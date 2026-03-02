@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/components/canvas.tsx","./src/components/chatpanel.tsx","./src/components/playerbar.tsx","./src/components/toolbar.tsx","./src/hooks/usecanvas.ts","./src/hooks/usewebsocket.ts","./src/pages/home.tsx","./src/pages/room.tsx","./src/types/protocol.ts"],"version":"5.9.3"}

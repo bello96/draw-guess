@@ -1,0 +1,17 @@
+name = "draw-guess-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-05"
+
+[durable_objects]
+bindings = [
+  { name = "GAME_ROOM", class_name = "GameRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GameRoom"]
+
+# Production route - uncomment and adjust after first deploy
+# routes = [
+#   { pattern = "draw-guess.dengjiabei.cn/api/*", zone_name = "dengjiabei.cn" }
+# ]
