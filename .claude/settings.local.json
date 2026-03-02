@@ -7,7 +7,12 @@
       "Bash(npx wrangler:*)",
       "Bash(taskkill:*)",
       "Bash(rm:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(curl:*)",
+      "WebFetch(domain:draw-guess-worker.deng19940906.workers.dev)",
+      "Bash(node:*)",
+      "Bash(echo:*)",
+      "Bash(nslookup:*)"
     ]
   }
 }
