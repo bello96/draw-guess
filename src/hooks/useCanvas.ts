@@ -12,6 +12,8 @@ interface UseCanvasOptions {
 export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCanvasOptions) {
   const isDrawingRef = useRef(false);
   const strokesRef = useRef<SerializedStroke[]>([]);
+  // Track current in-progress stroke for both local and remote drawing
+  const currentStrokeRef = useRef<{ points: { x: number; y: number }[]; color: string; lineWidth: number } | null>(null);
 
   // Setup canvas drawing events
   useEffect(() => {
@@ -48,6 +50,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       ctx.lineWidth = lineWidth;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
+      currentStrokeRef.current = { points: [{ x, y }], color, lineWidth };
       send({ type: "draw", action: "start", x, y, color, lineWidth });
     };
 
@@ -56,6 +59,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       const { x, y } = normalize(e);
       ctx.lineTo(e.offsetX, e.offsetY);
       ctx.stroke();
+      currentStrokeRef.current?.points.push({ x, y });
       send({ type: "draw", action: "move", x, y, color, lineWidth });
     };
 
@@ -65,6 +69,11 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       const { x, y } = normalize(e);
       ctx.lineTo(e.offsetX, e.offsetY);
       ctx.stroke();
+      if (currentStrokeRef.current) {
+        currentStrokeRef.current.points.push({ x, y });
+        strokesRef.current.push(currentStrokeRef.current as SerializedStroke);
+        currentStrokeRef.current = null;
+      }
       send({ type: "draw", action: "end", x, y, color, lineWidth });
     };
 
@@ -78,6 +87,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       ctx.lineWidth = lineWidth;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
+      currentStrokeRef.current = { points: [{ x, y }], color, lineWidth };
       send({ type: "draw", action: "start", x, y, color, lineWidth });
     };
 
@@ -87,6 +97,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       const { x, y, offsetX, offsetY } = normalizeTouchEvent(e);
       ctx.lineTo(offsetX, offsetY);
       ctx.stroke();
+      currentStrokeRef.current?.points.push({ x, y });
       send({ type: "draw", action: "move", x, y, color, lineWidth });
     };
 
@@ -97,6 +108,11 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       const { x, y, offsetX, offsetY } = normalizeTouchEvent(e);
       ctx.lineTo(offsetX, offsetY);
       ctx.stroke();
+      if (currentStrokeRef.current) {
+        currentStrokeRef.current.points.push({ x, y });
+        strokesRef.current.push(currentStrokeRef.current as SerializedStroke);
+        currentStrokeRef.current = null;
+      }
       send({ type: "draw", action: "end", x, y, color, lineWidth });
     };
 
@@ -119,7 +135,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
     };
   }, [canvasRef, isDrawer, color, lineWidth, send]);
 
-  // Replay a single draw event from remote
+  // Replay a single draw event from remote — also track strokes
   const replayDraw = useCallback(
     (msg: S_Draw) => {
       const canvas = canvasRef.current;
@@ -137,18 +153,25 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
         ctx.lineWidth = msg.lineWidth;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
+        currentStrokeRef.current = { points: [{ x: msg.x, y: msg.y }], color: msg.color, lineWidth: msg.lineWidth };
       } else if (msg.action === "move") {
         ctx.lineTo(cx, cy);
         ctx.stroke();
+        currentStrokeRef.current?.points.push({ x: msg.x, y: msg.y });
       } else if (msg.action === "end") {
         ctx.lineTo(cx, cy);
         ctx.stroke();
+        if (currentStrokeRef.current) {
+          currentStrokeRef.current.points.push({ x: msg.x, y: msg.y });
+          strokesRef.current.push(currentStrokeRef.current as SerializedStroke);
+          currentStrokeRef.current = null;
+        }
       }
     },
     [canvasRef],
   );
 
-  // Replay all strokes (on join or undo)
+  // Replay all strokes (on join, undo, or resize)
   const replayAll = useCallback(
     (strokes: SerializedStroke[]) => {
       const canvas = canvasRef.current;

@@ -41,6 +41,7 @@ export interface C_Undo {
 export interface C_SetAnswer {
   type: "setAnswer";
   answer: string;
+  timerSeconds?: number;
 }
 
 export interface C_Guess {
@@ -78,6 +79,7 @@ export interface S_RoomState {
   answerLength?: number;
   strokes: SerializedStroke[];
   yourId: string;
+  timerEndsAt?: number;
 }
 
 export interface S_PlayerJoined {
@@ -112,6 +114,8 @@ export interface S_PhaseChange {
   phase: GamePhase;
   drawerId: string;
   answerLength?: number;
+  timerEndsAt?: number;
+  answer?: string;
 }
 
 export interface S_GuessResult {

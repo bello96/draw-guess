@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { tx } from "@twind/core";
 import type { PlayerInfo, GamePhase } from "../types/protocol";
 
@@ -7,6 +8,7 @@ interface Props {
   drawerId: string | null;
   myId: string | null;
   phase: GamePhase;
+  timerEndsAt: number | null;
   onTransfer: () => void;
   onLeave: () => void;
 }
@@ -17,10 +19,34 @@ export default function PlayerBar({
   drawerId,
   myId,
   phase,
+  timerEndsAt,
   onTransfer,
   onLeave,
 }: Props) {
   const isDrawer = myId === drawerId;
+  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!timerEndsAt) {
+      setRemainingSeconds(null);
+      return;
+    }
+
+    const update = () => {
+      const diff = Math.max(0, Math.ceil((timerEndsAt - Date.now()) / 1000));
+      setRemainingSeconds(diff);
+    };
+
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [timerEndsAt]);
+
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
+  };
 
   return (
     <div className={tx("flex items-center justify-between p-3 bg-white rounded-xl shadow-sm")}>
@@ -48,6 +74,18 @@ export default function PlayerBar({
           {phase === "guessing" && "猜词中"}
           {phase === "revealed" && "已揭晓"}
         </div>
+
+        {/* Countdown timer */}
+        {remainingSeconds !== null && remainingSeconds > 0 && phase === "guessing" && (
+          <div
+            className={tx(
+              "px-2.5 py-1 rounded-full text-xs font-bold",
+              remainingSeconds <= 10 ? "bg-red-100 text-red-700 animate-pulse" : "bg-orange-100 text-orange-700",
+            )}
+          >
+            {formatTime(remainingSeconds)}
+          </div>
+        )}
       </div>
 
       {/* Players */}

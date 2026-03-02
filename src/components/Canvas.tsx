@@ -4,9 +4,10 @@ import { tx } from "@twind/core";
 interface Props {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   isDrawer: boolean;
+  onResize?: () => void;
 }
 
-export default function Canvas({ canvasRef, isDrawer }: Props) {
+export default function Canvas({ canvasRef, isDrawer, onResize }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Auto-resize canvas to fill container while keeping it square
@@ -17,23 +18,18 @@ export default function Canvas({ canvasRef, isDrawer }: Props) {
       if (!container || !canvas) return;
 
       const size = Math.min(container.clientWidth, container.clientHeight);
-      // Only resize if dimension actually changed, to avoid clearing the canvas
       if (canvas.width !== size || canvas.height !== size) {
-        // Save current drawing
-        const imageData = canvas.getContext("2d")?.getImageData(0, 0, canvas.width, canvas.height);
         canvas.width = size;
         canvas.height = size;
-        // Restore if dimensions were close enough
-        if (imageData && Math.abs(imageData.width - size) < 50) {
-          canvas.getContext("2d")?.putImageData(imageData, 0, 0);
-        }
+        // Let the parent replay all strokes after resize
+        onResize?.();
       }
     };
 
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
     return () => window.removeEventListener("resize", resizeCanvas);
-  }, [canvasRef]);
+  }, [canvasRef, onResize]);
 
   return (
     <div

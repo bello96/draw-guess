@@ -9,8 +9,16 @@ interface Props {
   answerLength: number | null;
   onSendChat: (text: string) => void;
   onGuess: (text: string) => void;
-  onSetAnswer: (answer: string) => void;
+  onSetAnswer: (answer: string, timerSeconds?: number) => void;
 }
+
+const TIMER_OPTIONS = [
+  { label: "不限时", value: 0 },
+  { label: "30秒", value: 30 },
+  { label: "1分钟", value: 60 },
+  { label: "3分钟", value: 180 },
+  { label: "5分钟", value: 300 },
+];
 
 export default function ChatPanel({
   messages,
@@ -21,8 +29,10 @@ export default function ChatPanel({
   onGuess,
   onSetAnswer,
 }: Props) {
-  const [input, setInput] = useState("");
+  const [chatInput, setChatInput] = useState("");
+  const [guessInput, setGuessInput] = useState("");
   const [answer, setAnswer] = useState("");
+  const [timerOption, setTimerOption] = useState(60);
   const listRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom
@@ -32,21 +42,25 @@ export default function ChatPanel({
     }
   }, [messages]);
 
-  const handleSend = () => {
-    if (!input.trim()) return;
-    if (!isDrawer && phase === "guessing") {
-      onGuess(input.trim());
-    } else {
-      onSendChat(input.trim());
-    }
-    setInput("");
+  const handleSendChat = () => {
+    if (!chatInput.trim()) return;
+    onSendChat(chatInput.trim());
+    setChatInput("");
+  };
+
+  const handleGuess = () => {
+    if (!guessInput.trim()) return;
+    onGuess(guessInput.trim());
+    setGuessInput("");
   };
 
   const handleSetAnswer = () => {
     if (!answer.trim()) return;
-    onSetAnswer(answer.trim());
+    onSetAnswer(answer.trim(), timerOption || undefined);
     setAnswer("");
   };
+
+  const showGuessInput = !isDrawer && phase === "guessing";
 
   return (
     <div className={tx("flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden")}>
@@ -95,7 +109,7 @@ export default function ChatPanel({
       {isDrawer && phase === "drawing" && (
         <div className={tx("px-3 py-2 border-t border-gray-100 bg-indigo-50")}>
           <div className={tx("text-xs text-indigo-600 mb-1.5")}>设置答案后对方才能开始猜</div>
-          <div className={tx("flex gap-2")}>
+          <div className={tx("flex gap-2 mb-2")}>
             <input
               type="text"
               value={answer}
@@ -117,35 +131,76 @@ export default function ChatPanel({
               确认
             </button>
           </div>
+          <div className={tx("flex items-center gap-2")}>
+            <span className={tx("text-xs text-indigo-500")}>倒计时:</span>
+            <select
+              value={timerOption}
+              onChange={(e) => setTimerOption(Number(e.target.value))}
+              className={tx(
+                "text-xs px-2 py-1 border border-indigo-200 rounded-lg bg-white",
+                "focus:ring-2 focus:ring-indigo-400 outline-none",
+              )}
+            >
+              {TIMER_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       )}
 
-      {/* Chat / Guess input */}
+      {/* Guess input (guesser only, during guessing phase) */}
+      {showGuessInput && (
+        <div className={tx("px-3 py-2 border-t border-green-200 bg-green-50")}>
+          <div className={tx("flex gap-2")}>
+            <input
+              type="text"
+              value={guessInput}
+              onChange={(e) => setGuessInput(e.target.value)}
+              placeholder="输入你的猜测..."
+              className={tx(
+                "flex-1 px-3 py-2 text-sm border border-green-300 rounded-lg",
+                "focus:ring-2 focus:ring-green-400 focus:border-transparent outline-none",
+              )}
+              onKeyDown={(e) => e.key === "Enter" && handleGuess()}
+            />
+            <button
+              onClick={handleGuess}
+              className={tx(
+                "px-4 py-2 text-sm bg-green-600 text-white rounded-lg",
+                "hover:bg-green-700 transition",
+              )}
+            >
+              猜
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Chat input (always visible) */}
       <div className={tx("px-3 py-2 border-t border-gray-100")}>
         <div className={tx("flex gap-2")}>
           <input
             type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={
-              !isDrawer && phase === "guessing" ? "输入你的猜测..." : "发送消息..."
-            }
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            placeholder="发送消息..."
             className={tx(
               "flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg",
               "focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none",
             )}
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
+            onKeyDown={(e) => e.key === "Enter" && handleSendChat()}
           />
           <button
-            onClick={handleSend}
+            onClick={handleSendChat}
             className={tx(
-              "px-4 py-2 text-sm rounded-lg transition",
-              !isDrawer && phase === "guessing"
-                ? "bg-green-600 text-white hover:bg-green-700"
-                : "bg-gray-600 text-white hover:bg-gray-700",
+              "px-4 py-2 text-sm bg-gray-600 text-white rounded-lg",
+              "hover:bg-gray-700 transition",
             )}
           >
-            {!isDrawer && phase === "guessing" ? "猜" : "发送"}
+            发送
           </button>
         </div>
       </div>

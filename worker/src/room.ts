@@ -33,6 +33,8 @@ export class GameRoom implements DurableObject {
   private strokes: SerializedStroke[] = [];
   private closed = false;
   private roomCode = "";
+  private timerEndsAt: number | null = null;
+  private pendingNextDrawer: string | null = null;
 
   // Transient state (not persisted, OK to lose on hibernation)
   private currentStrokePoints: { x: number; y: number }[] = [];
@@ -52,6 +54,7 @@ export class GameRoom implements DurableObject {
 
     const data = await this.state.storage.get<unknown>([
       "created", "drawerId", "phase", "answer", "closed", "roomCode", "strokes",
+      "timerEndsAt", "pendingNextDrawer",
     ]);
 
     this.created = (data.get("created") as boolean) ?? false;
@@ -61,6 +64,8 @@ export class GameRoom implements DurableObject {
     this.closed = (data.get("closed") as boolean) ?? false;
     this.roomCode = (data.get("roomCode") as string) ?? "";
     this.strokes = (data.get("strokes") as SerializedStroke[]) ?? [];
+    this.timerEndsAt = (data.get("timerEndsAt") as number | null) ?? null;
+    this.pendingNextDrawer = (data.get("pendingNextDrawer") as string | null) ?? null;
   }
 
   private async saveState() {
@@ -72,6 +77,8 @@ export class GameRoom implements DurableObject {
       closed: this.closed,
       roomCode: this.roomCode,
       strokes: this.strokes,
+      timerEndsAt: this.timerEndsAt,
+      pendingNextDrawer: this.pendingNextDrawer,
     });
   }
 
@@ -180,7 +187,7 @@ export class GameRoom implements DurableObject {
         await this.onUndo(ws);
         break;
       case "setAnswer":
-        await this.onSetAnswer(ws, msg.answer as string);
+        await this.onSetAnswer(ws, msg.answer as string, msg.timerSeconds as number | undefined);
         break;
       case "guess":
         await this.onGuess(ws, msg.text as string);
@@ -202,6 +209,42 @@ export class GameRoom implements DurableObject {
   async webSocketError(ws: WebSocket) {
     await this.ensureLoaded();
     await this.onDisconnect(ws);
+  }
+
+  // ============ Alarm handler (countdown timer) ============
+
+  async alarm() {
+    await this.ensureLoaded();
+
+    if (this.phase === "guessing") {
+      // Timer expired during guessing → reveal the answer
+      this.phase = "revealed";
+      this.timerEndsAt = null;
+
+      // Find the other player to auto-rotate to
+      const joined = this.getJoinedWebSockets();
+      const otherPlayer = joined.find(({ player }) => player.id !== this.drawerId);
+      if (otherPlayer) {
+        this.pendingNextDrawer = otherPlayer.player.id;
+      }
+
+      await this.saveState();
+
+      this.broadcast({
+        type: "phaseChange",
+        phase: "revealed",
+        drawerId: this.drawerId!,
+        answer: this.answer,
+      });
+
+      // Schedule auto-rotation after 3 seconds
+      if (this.pendingNextDrawer) {
+        await this.state.storage.setAlarm(Date.now() + 3000);
+      }
+    } else if (this.phase === "revealed" && this.pendingNextDrawer) {
+      // Auto-rotate to next drawer
+      await this.executeTransfer(this.pendingNextDrawer);
+    }
   }
 
   // ============ Message Handlers ============
@@ -241,6 +284,7 @@ export class GameRoom implements DurableObject {
       phase: this.phase,
       strokes: this.strokes,
       yourId: player.id,
+      timerEndsAt: this.timerEndsAt,
     });
 
     // Notify other player about the new join
@@ -333,13 +377,22 @@ export class GameRoom implements DurableObject {
     }
   }
 
-  private async onSetAnswer(ws: WebSocket, answer: string) {
+  private async onSetAnswer(ws: WebSocket, answer: string, timerSeconds?: number) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) return;
     if (!answer || answer.trim().length === 0) return;
 
     this.answer = answer.trim().toLowerCase();
     this.phase = "guessing";
+
+    // Set up timer if requested
+    if (timerSeconds && timerSeconds > 0) {
+      this.timerEndsAt = Date.now() + timerSeconds * 1000;
+      await this.state.storage.setAlarm(Date.now() + timerSeconds * 1000);
+    } else {
+      this.timerEndsAt = null;
+    }
+
     await this.saveState();
 
     this.broadcast({
@@ -347,6 +400,7 @@ export class GameRoom implements DurableObject {
       phase: "guessing",
       drawerId: this.drawerId!,
       answerLength: this.answer.length,
+      timerEndsAt: this.timerEndsAt,
     });
   }
 
@@ -368,13 +422,25 @@ export class GameRoom implements DurableObject {
     });
 
     if (correct) {
+      // Cancel existing alarm
+      await this.state.storage.deleteAlarm();
+      this.timerEndsAt = null;
+
       this.phase = "revealed";
+
+      // Set up auto-rotation: the guesser becomes the next drawer
+      this.pendingNextDrawer = player.id;
+
       await this.saveState();
+
       this.broadcast({
         type: "phaseChange",
         phase: "revealed",
         drawerId: this.drawerId!,
       });
+
+      // Schedule auto-rotation after 3 seconds
+      await this.state.storage.setAlarm(Date.now() + 3000);
     }
   }
 
@@ -396,30 +462,41 @@ export class GameRoom implements DurableObject {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) return;
 
+    // Cancel any pending alarm/timer
+    await this.state.storage.deleteAlarm();
+    this.timerEndsAt = null;
+    this.pendingNextDrawer = null;
+
     // Find the other player
     for (const { player: other } of this.getJoinedWebSockets()) {
       if (other.id !== player.id) {
-        this.drawerId = other.id;
-        this.phase = "drawing";
-        this.answer = null;
-        this.strokes = [];
-        this.currentStrokePoints = [];
-
-        await this.saveState();
-
-        this.broadcast({
-          type: "transferDone",
-          newDrawerId: other.id,
-        });
-        this.broadcast({ type: "clear" });
-        this.broadcast({
-          type: "phaseChange",
-          phase: "drawing",
-          drawerId: this.drawerId,
-        });
+        await this.executeTransfer(other.id);
         break;
       }
     }
+  }
+
+  private async executeTransfer(newDrawerId: string) {
+    this.drawerId = newDrawerId;
+    this.phase = "drawing";
+    this.answer = null;
+    this.strokes = [];
+    this.currentStrokePoints = [];
+    this.timerEndsAt = null;
+    this.pendingNextDrawer = null;
+
+    await this.saveState();
+
+    this.broadcast({
+      type: "transferDone",
+      newDrawerId: this.drawerId,
+    });
+    this.broadcast({ type: "clear" });
+    this.broadcast({
+      type: "phaseChange",
+      phase: "drawing",
+      drawerId: this.drawerId,
+    });
   }
 
   private async onDisconnect(ws: WebSocket) {
@@ -428,6 +505,11 @@ export class GameRoom implements DurableObject {
 
     // Clear attachment so this ws is no longer counted as a joined player
     ws.serializeAttachment(null);
+
+    // Cancel any pending alarm/timer
+    await this.state.storage.deleteAlarm();
+    this.timerEndsAt = null;
+    this.pendingNextDrawer = null;
 
     const remaining = this.getJoinedWebSockets();
 

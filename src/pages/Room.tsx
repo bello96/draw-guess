@@ -11,7 +11,6 @@ import type {
   GamePhase,
   ChatMessage,
   ServerMessage,
-  SerializedStroke,
 } from "../types/protocol";
 
 interface Props {
@@ -35,6 +34,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const [phase, setPhase] = useState<GamePhase>("waiting");
   const [answerLength, setAnswerLength] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [timerEndsAt, setTimerEndsAt] = useState<number | null>(null);
 
   // Drawing state
   const [color, setColor] = useState("#000000");
@@ -46,13 +46,18 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const { connected, send, addListener } = useWebSocket(roomCode, playerName);
 
   // Canvas
-  const { replayDraw, replayAll, clearCanvas } = useCanvas({
+  const { replayDraw, replayAll, clearCanvas, strokesRef } = useCanvas({
     canvasRef,
     isDrawer,
     color,
     lineWidth,
     send,
   });
+
+  // Canvas resize handler — replay all strokes from strokesRef
+  const handleCanvasResize = useCallback(() => {
+    replayAll([...strokesRef.current]);
+  }, [replayAll, strokesRef]);
 
   const addSystemMessage = useCallback((text: string) => {
     setMessages((prev) => [
@@ -78,6 +83,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           setDrawerId(msg.drawerId);
           setPhase(msg.phase);
           if (msg.answerLength) setAnswerLength(msg.answerLength);
+          if (msg.timerEndsAt) setTimerEndsAt(msg.timerEndsAt);
           if (msg.strokes.length > 0) {
             replayAll(msg.strokes);
           }
@@ -107,23 +113,31 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           break;
 
         case "undo":
-          // For undo, we need the server to tell us the new stroke list.
-          // Simple approach: the viewer clears and re-draws from server state.
-          // Since we don't have the stroke list, we'll just clear for now.
-          // A production version would sync the stroke array.
-          clearCanvas();
+          // Pop the last stroke and replay all remaining
+          strokesRef.current.pop();
+          replayAll([...strokesRef.current]);
           break;
 
         case "phaseChange":
           setPhase(msg.phase);
           setDrawerId(msg.drawerId);
           if (msg.answerLength) setAnswerLength(msg.answerLength);
+          if (msg.timerEndsAt) {
+            setTimerEndsAt(msg.timerEndsAt);
+          } else {
+            setTimerEndsAt(null);
+          }
           if (msg.phase === "guessing") {
             addSystemMessage("答案已设定，开始猜词！");
           } else if (msg.phase === "revealed") {
-            addSystemMessage("🎉 猜对了！本轮结束");
+            if (msg.answer) {
+              addSystemMessage(`⏰ 时间到！答案是：${msg.answer}`);
+            } else {
+              addSystemMessage("🎉 猜对了！本轮结束");
+            }
           } else if (msg.phase === "drawing") {
             addSystemMessage("新一轮开始，画手开始画画吧！");
+            setAnswerLength(null);
           } else if (msg.phase === "waiting") {
             addSystemMessage("等待其他玩家加入...");
           }
@@ -174,7 +188,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     });
 
     return unsubscribe;
-  }, [addListener, replayDraw, replayAll, clearCanvas, addSystemMessage]);
+  }, [addListener, replayDraw, replayAll, clearCanvas, addSystemMessage, strokesRef]);
 
   const handleClear = () => {
     send({ type: "clear" });
@@ -183,6 +197,9 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
 
   const handleUndo = () => {
     send({ type: "undo" });
+    // Local undo for the drawer: pop and replay
+    strokesRef.current.pop();
+    replayAll([...strokesRef.current]);
   };
 
   const handleTransfer = () => {
@@ -197,8 +214,8 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     send({ type: "guess", text });
   };
 
-  const handleSetAnswer = (answer: string) => {
-    send({ type: "setAnswer", answer });
+  const handleSetAnswer = (answer: string, timerSeconds?: number) => {
+    send({ type: "setAnswer", answer, timerSeconds });
   };
 
   if (!connected) {
@@ -221,6 +238,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
         drawerId={drawerId}
         myId={myId}
         phase={phase}
+        timerEndsAt={timerEndsAt}
         onTransfer={handleTransfer}
         onLeave={onLeave}
       />
@@ -229,7 +247,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
       <div className={tx("flex flex-1 gap-3 min-h-0")}>
         {/* Left: Canvas + Toolbar */}
         <div className={tx("flex flex-col flex-1 gap-3 min-h-0")}>
-          <Canvas canvasRef={canvasRef} isDrawer={isDrawer} />
+          <Canvas canvasRef={canvasRef} isDrawer={isDrawer} onResize={handleCanvasResize} />
           <Toolbar
             color={color}
             lineWidth={lineWidth}
