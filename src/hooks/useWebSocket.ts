@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { ClientMessage, ServerMessage } from "../types/protocol";
+import { wsUrl } from "../api";
 
 export function useWebSocket(roomCode: string, playerName: string) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -8,10 +9,9 @@ export function useWebSocket(roomCode: string, playerName: string) {
   const listenersRef = useRef<Set<(msg: ServerMessage) => void>>(new Set());
 
   useEffect(() => {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${location.host}/api/rooms/${roomCode}/ws`;
+    const url = wsUrl(`/api/rooms/${roomCode}/ws`);
 
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {

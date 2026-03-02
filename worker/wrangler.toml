@@ -1,6 +1,7 @@
 name = "draw-guess-worker"
 main = "src/index.ts"
 compatibility_date = "2024-12-05"
+workers_dev = true
 
 routes = [
   { pattern = "draw-guess.dengjiabei.cn/api/*", zone_name = "dengjiabei.cn" }
