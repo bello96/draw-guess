@@ -45,6 +45,11 @@ export default function Home({ onEnterRoom }: Props) {
     try {
       const res = await fetch(apiUrl(`/api/rooms/${joinCode}`));
       const data = await res.json();
+      if (!data.created) {
+        setError("房间不存在");
+        setLoading(false);
+        return;
+      }
       if (data.closed || data.playerCount >= 2) {
         setError("房间已满，无法加入");
         setLoading(false);

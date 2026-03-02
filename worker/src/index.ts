@@ -33,6 +33,10 @@ export default {
     // POST /api/rooms - Create a new room
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       const roomCode = generateRoomCode();
+      // Initialize the Durable Object so it knows this room was created
+      const doId = env.GAME_ROOM.idFromName(roomCode);
+      const stub = env.GAME_ROOM.get(doId);
+      await stub.fetch(new Request("http://internal/init?code=" + roomCode, { method: "POST" }));
       return new Response(JSON.stringify({ roomCode }), {
         headers: { "Content-Type": "application/json", ...corsHeaders() },
       });

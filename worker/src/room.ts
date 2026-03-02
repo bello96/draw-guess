@@ -1,4 +1,4 @@
-// ============ Types (mirrored from frontend protocol.ts) ============
+// ============ Types ============
 
 type GamePhase = "waiting" | "drawing" | "guessing" | "revealed";
 
@@ -14,69 +14,143 @@ interface SerializedStroke {
   lineWidth: number;
 }
 
-interface PlayerState {
+// Data stored as WebSocket attachment (survives hibernation)
+interface PlayerAttachment {
   id: string;
   name: string;
   isOwner: boolean;
-  ws: WebSocket;
 }
 
 // ============ GameRoom Durable Object ============
 
 export class GameRoom implements DurableObject {
-  private players: Map<WebSocket, PlayerState> = new Map();
+  // In-memory cache (restored from storage on wake)
+  private loaded = false;
+  private created = false;
   private drawerId: string | null = null;
   private phase: GamePhase = "waiting";
   private answer: string | null = null;
   private strokes: SerializedStroke[] = [];
+  private closed = false;
+  private roomCode = "";
+
+  // Transient state (not persisted, OK to lose on hibernation)
   private currentStrokePoints: { x: number; y: number }[] = [];
   private currentStrokeColor = "#000000";
   private currentStrokeWidth = 3;
-  private closed = false;
-  private roomCode = "";
 
   constructor(
     private state: DurableObjectState,
     private env: unknown,
   ) {}
 
+  // ============ Restore state from storage after hibernation ============
+
+  private async ensureLoaded() {
+    if (this.loaded) return;
+    this.loaded = true;
+
+    const data = await this.state.storage.get<unknown>([
+      "created", "drawerId", "phase", "answer", "closed", "roomCode", "strokes",
+    ]);
+
+    this.created = (data.get("created") as boolean) ?? false;
+    this.drawerId = (data.get("drawerId") as string | null) ?? null;
+    this.phase = (data.get("phase") as GamePhase) ?? "waiting";
+    this.answer = (data.get("answer") as string | null) ?? null;
+    this.closed = (data.get("closed") as boolean) ?? false;
+    this.roomCode = (data.get("roomCode") as string) ?? "";
+    this.strokes = (data.get("strokes") as SerializedStroke[]) ?? [];
+  }
+
+  private async saveState() {
+    await this.state.storage.put({
+      created: this.created,
+      drawerId: this.drawerId,
+      phase: this.phase,
+      answer: this.answer,
+      closed: this.closed,
+      roomCode: this.roomCode,
+      strokes: this.strokes,
+    });
+  }
+
+  // ============ Player helpers using WebSocket attachments ============
+
+  private getPlayer(ws: WebSocket): PlayerAttachment | null {
+    return ws.deserializeAttachment() as PlayerAttachment | null;
+  }
+
+  private getJoinedWebSockets(): { ws: WebSocket; player: PlayerAttachment }[] {
+    const result: { ws: WebSocket; player: PlayerAttachment }[] = [];
+    for (const ws of this.state.getWebSockets()) {
+      const player = this.getPlayer(ws);
+      if (player) {
+        result.push({ ws, player });
+      }
+    }
+    return result;
+  }
+
+  private getJoinedCount(): number {
+    return this.getJoinedWebSockets().length;
+  }
+
+  private getPlayerInfoList(): PlayerInfo[] {
+    return this.getJoinedWebSockets().map(({ player }) => ({
+      id: player.id,
+      name: player.name,
+      isOwner: player.isOwner,
+    }));
+  }
+
+  // ============ HTTP fetch handler ============
+
   async fetch(request: Request): Promise<Response> {
+    await this.ensureLoaded();
     const url = new URL(request.url);
+
+    // Internal: POST /init - mark room as created
+    if (url.pathname === "/init" && request.method === "POST") {
+      const code = url.searchParams.get("code") || "";
+      this.created = true;
+      this.roomCode = code;
+      await this.state.storage.put({ created: true, roomCode: code });
+      return new Response("OK");
+    }
 
     // Room info endpoint (non-WebSocket)
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response(
         JSON.stringify({
-          playerCount: this.players.size,
+          playerCount: this.getJoinedCount(),
           closed: this.closed,
           phase: this.phase,
+          created: this.created,
         }),
         { headers: { "Content-Type": "application/json" } },
       );
     }
 
     // WebSocket upgrade
-    if (this.players.size >= 2) {
+    if (this.getJoinedCount() >= 2) {
       return new Response("Room is full", { status: 403 });
-    }
-
-    // Extract room code from URL
-    const match = url.pathname.match(/\/api\/rooms\/(\d{6})\/ws/);
-    if (match) {
-      this.roomCode = match[1];
     }
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
+    // Accept WebSocket for hibernation; attachment will be set on "join"
     this.state.acceptWebSocket(server);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // Hibernatable WebSocket API handlers
+  // ============ Hibernatable WebSocket API handlers ============
+
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     if (typeof message !== "string") return;
+    await this.ensureLoaded();
 
     let msg: Record<string, unknown>;
     try {
@@ -87,10 +161,10 @@ export class GameRoom implements DurableObject {
 
     switch (msg.type) {
       case "join":
-        this.onJoin(ws, msg.playerName as string);
+        await this.onJoin(ws, msg.playerName as string);
         break;
       case "draw":
-        this.onDraw(ws, msg as {
+        await this.onDraw(ws, msg as {
           type: string;
           action: "start" | "move" | "end";
           x: number;
@@ -100,51 +174,53 @@ export class GameRoom implements DurableObject {
         });
         break;
       case "clear":
-        this.onClear(ws);
+        await this.onClear(ws);
         break;
       case "undo":
-        this.onUndo(ws);
+        await this.onUndo(ws);
         break;
       case "setAnswer":
-        this.onSetAnswer(ws, msg.answer as string);
+        await this.onSetAnswer(ws, msg.answer as string);
         break;
       case "guess":
-        this.onGuess(ws, msg.text as string);
+        await this.onGuess(ws, msg.text as string);
         break;
       case "chat":
         this.onChat(ws, msg.text as string);
         break;
       case "transfer":
-        this.onTransfer(ws);
+        await this.onTransfer(ws);
         break;
     }
   }
 
   async webSocketClose(ws: WebSocket) {
-    this.onDisconnect(ws);
+    await this.ensureLoaded();
+    await this.onDisconnect(ws);
   }
 
   async webSocketError(ws: WebSocket) {
-    this.onDisconnect(ws);
+    await this.ensureLoaded();
+    await this.onDisconnect(ws);
   }
 
   // ============ Message Handlers ============
 
-  private onJoin(ws: WebSocket, playerName: string) {
-    if (this.players.size >= 2) {
+  private async onJoin(ws: WebSocket, playerName: string) {
+    if (this.getJoinedCount() >= 2) {
       this.send(ws, { type: "error", message: "房间已满" });
       return;
     }
 
-    const isOwner = this.players.size === 0;
-    const player: PlayerState = {
+    const isOwner = this.getJoinedCount() === 0;
+    const player: PlayerAttachment = {
       id: crypto.randomUUID(),
       name: playerName || (isOwner ? "玩家1" : "玩家2"),
       isOwner,
-      ws,
     };
 
-    this.players.set(ws, player);
+    // Store player info as WebSocket attachment (survives hibernation)
+    ws.serializeAttachment(player);
 
     if (isOwner) {
       this.drawerId = player.id;
@@ -153,6 +229,8 @@ export class GameRoom implements DurableObject {
       this.closed = true;
       this.phase = "drawing";
     }
+
+    await this.saveState();
 
     // Send full state to the joining player
     this.send(ws, {
@@ -174,17 +252,20 @@ export class GameRoom implements DurableObject {
       ws,
     );
 
-    // If 2 players, switch to drawing phase
-    if (this.players.size === 2) {
-      this.broadcast({
-        type: "phaseChange",
-        phase: "drawing",
-        drawerId: this.drawerId!,
-      });
+    // If 2 players, notify first player about phase change
+    if (this.getJoinedCount() === 2) {
+      this.broadcast(
+        {
+          type: "phaseChange",
+          phase: "drawing",
+          drawerId: this.drawerId!,
+        },
+        ws, // Only send to the OTHER player; joining player already has it via roomState
+      );
     }
   }
 
-  private onDraw(
+  private async onDraw(
     ws: WebSocket,
     msg: {
       type: string;
@@ -195,11 +276,8 @@ export class GameRoom implements DurableObject {
       lineWidth: number;
     },
   ) {
-    const player = this.players.get(ws);
-    if (!player || player.id !== this.drawerId) {
-      this.send(ws, { type: "error", message: "你不是画手" });
-      return;
-    }
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) return;
 
     // Track stroke for replay
     if (msg.action === "start") {
@@ -216,6 +294,8 @@ export class GameRoom implements DurableObject {
         lineWidth: this.currentStrokeWidth,
       });
       this.currentStrokePoints = [];
+      // Persist strokes only on stroke end
+      await this.state.storage.put("strokes", this.strokes);
     }
 
     // Forward to the other player
@@ -232,32 +312,35 @@ export class GameRoom implements DurableObject {
     );
   }
 
-  private onClear(ws: WebSocket) {
-    const player = this.players.get(ws);
+  private async onClear(ws: WebSocket) {
+    const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) return;
 
     this.strokes = [];
     this.currentStrokePoints = [];
+    await this.state.storage.put("strokes", this.strokes);
     this.broadcast({ type: "clear" });
   }
 
-  private onUndo(ws: WebSocket) {
-    const player = this.players.get(ws);
+  private async onUndo(ws: WebSocket) {
+    const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) return;
 
     if (this.strokes.length > 0) {
       this.strokes.pop();
+      await this.state.storage.put("strokes", this.strokes);
       this.broadcast({ type: "undo" });
     }
   }
 
-  private onSetAnswer(ws: WebSocket, answer: string) {
-    const player = this.players.get(ws);
+  private async onSetAnswer(ws: WebSocket, answer: string) {
+    const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) return;
     if (!answer || answer.trim().length === 0) return;
 
     this.answer = answer.trim().toLowerCase();
     this.phase = "guessing";
+    await this.saveState();
 
     this.broadcast({
       type: "phaseChange",
@@ -267,8 +350,8 @@ export class GameRoom implements DurableObject {
     });
   }
 
-  private onGuess(ws: WebSocket, text: string) {
-    const player = this.players.get(ws);
+  private async onGuess(ws: WebSocket, text: string) {
+    const player = this.getPlayer(ws);
     if (!player || player.id === this.drawerId) return;
     if (this.phase !== "guessing") return;
     if (!text || text.trim().length === 0) return;
@@ -286,6 +369,7 @@ export class GameRoom implements DurableObject {
 
     if (correct) {
       this.phase = "revealed";
+      await this.saveState();
       this.broadcast({
         type: "phaseChange",
         phase: "revealed",
@@ -295,7 +379,7 @@ export class GameRoom implements DurableObject {
   }
 
   private onChat(ws: WebSocket, text: string) {
-    const player = this.players.get(ws);
+    const player = this.getPlayer(ws);
     if (!player) return;
     if (!text || text.trim().length === 0) return;
 
@@ -308,22 +392,24 @@ export class GameRoom implements DurableObject {
     });
   }
 
-  private onTransfer(ws: WebSocket) {
-    const player = this.players.get(ws);
+  private async onTransfer(ws: WebSocket) {
+    const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) return;
 
     // Find the other player
-    for (const [, otherPlayer] of this.players) {
-      if (otherPlayer.id !== player.id) {
-        this.drawerId = otherPlayer.id;
+    for (const { player: other } of this.getJoinedWebSockets()) {
+      if (other.id !== player.id) {
+        this.drawerId = other.id;
         this.phase = "drawing";
         this.answer = null;
         this.strokes = [];
         this.currentStrokePoints = [];
 
+        await this.saveState();
+
         this.broadcast({
           type: "transferDone",
-          newDrawerId: otherPlayer.id,
+          newDrawerId: other.id,
         });
         this.broadcast({ type: "clear" });
         this.broadcast({
@@ -336,13 +422,16 @@ export class GameRoom implements DurableObject {
     }
   }
 
-  private onDisconnect(ws: WebSocket) {
-    const player = this.players.get(ws);
+  private async onDisconnect(ws: WebSocket) {
+    const player = this.getPlayer(ws);
     if (!player) return;
 
-    this.players.delete(ws);
+    // Clear attachment so this ws is no longer counted as a joined player
+    ws.serializeAttachment(null);
 
-    if (this.players.size > 0) {
+    const remaining = this.getJoinedWebSockets();
+
+    if (remaining.length > 0) {
       this.broadcast({
         type: "playerLeft",
         playerId: player.id,
@@ -350,27 +439,30 @@ export class GameRoom implements DurableObject {
 
       // If the drawer left, give draw permission to the remaining player
       if (player.id === this.drawerId) {
-        for (const [, remaining] of this.players) {
-          this.drawerId = remaining.id;
-          this.phase = "drawing";
-          this.answer = null;
-          this.broadcast({
-            type: "phaseChange",
-            phase: "drawing",
-            drawerId: this.drawerId,
-          });
-          break;
-        }
+        this.drawerId = remaining[0].player.id;
       }
 
       // Re-open the room so a new player can join
       this.closed = false;
       this.phase = "waiting";
+      this.answer = null;
+
+      await this.saveState();
+
       this.broadcast({
         type: "phaseChange",
         phase: "waiting",
         drawerId: this.drawerId!,
       });
+    } else {
+      // Room is empty, reset everything
+      this.created = false;
+      this.closed = false;
+      this.phase = "waiting";
+      this.drawerId = null;
+      this.answer = null;
+      this.strokes = [];
+      await this.saveState();
     }
   }
 
@@ -385,18 +477,13 @@ export class GameRoom implements DurableObject {
   }
 
   private broadcast(msg: Record<string, unknown>, exclude?: WebSocket) {
-    for (const [ws] of this.players) {
+    for (const ws of this.state.getWebSockets()) {
       if (ws !== exclude) {
-        this.send(ws, msg);
+        const player = this.getPlayer(ws);
+        if (player) {
+          this.send(ws, msg);
+        }
       }
     }
-  }
-
-  private getPlayerInfoList(): PlayerInfo[] {
-    const list: PlayerInfo[] = [];
-    for (const [, p] of this.players) {
-      list.push({ id: p.id, name: p.name, isOwner: p.isOwner });
-    }
-    return list;
   }
 }
