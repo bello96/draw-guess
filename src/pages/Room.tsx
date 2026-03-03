@@ -34,7 +34,6 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const [phase, setPhase] = useState<GamePhase>("waiting");
   const [answerLength, setAnswerLength] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [timerEndsAt, setTimerEndsAt] = useState<number | null>(null);
 
   // Drawing state
   const [color, setColor] = useState("#000000");
@@ -83,7 +82,6 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           setDrawerId(msg.drawerId);
           setPhase(msg.phase);
           if (msg.answerLength) setAnswerLength(msg.answerLength);
-          if (msg.timerEndsAt) setTimerEndsAt(msg.timerEndsAt);
           if (msg.strokes.length > 0) {
             replayAll(msg.strokes);
           }
@@ -122,19 +120,10 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           setPhase(msg.phase);
           setDrawerId(msg.drawerId);
           if (msg.answerLength) setAnswerLength(msg.answerLength);
-          if (msg.timerEndsAt) {
-            setTimerEndsAt(msg.timerEndsAt);
-          } else {
-            setTimerEndsAt(null);
-          }
           if (msg.phase === "guessing") {
             addSystemMessage("答案已设定，开始猜词！");
           } else if (msg.phase === "revealed") {
-            if (msg.answer) {
-              addSystemMessage(`⏰ 时间到！答案是：${msg.answer}`);
-            } else {
-              addSystemMessage("🎉 猜对了！本轮结束");
-            }
+            addSystemMessage("🎉 猜对了！请手动转让画笔开始下一轮");
           } else if (msg.phase === "drawing") {
             addSystemMessage("新一轮开始，画手开始画画吧！");
             setAnswerLength(null);
@@ -188,7 +177,14 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     });
 
     return unsubscribe;
-  }, [addListener, replayDraw, replayAll, clearCanvas, addSystemMessage, strokesRef]);
+  }, [
+    addListener,
+    replayDraw,
+    replayAll,
+    clearCanvas,
+    addSystemMessage,
+    strokesRef,
+  ]);
 
   const handleClear = () => {
     send({ type: "clear" });
@@ -214,13 +210,17 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     send({ type: "guess", text });
   };
 
-  const handleSetAnswer = (answer: string, timerSeconds?: number) => {
-    send({ type: "setAnswer", answer, timerSeconds });
+  const handleSetAnswer = (answer: string) => {
+    send({ type: "setAnswer", answer });
   };
 
   if (!connected) {
     return (
-      <div className={tx("flex items-center justify-center min-h-screen bg-gray-50")}>
+      <div
+        className={tx(
+          "flex items-center justify-center min-h-screen bg-gray-50",
+        )}
+      >
         <div className={tx("text-center")}>
           <div className={tx("text-4xl mb-4 animate-bounce")}>🎨</div>
           <div className={tx("text-gray-500")}>连接中...</div>
@@ -238,7 +238,6 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
         drawerId={drawerId}
         myId={myId}
         phase={phase}
-        timerEndsAt={timerEndsAt}
         onTransfer={handleTransfer}
         onLeave={onLeave}
       />
@@ -247,7 +246,11 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
       <div className={tx("flex flex-1 gap-3 min-h-0")}>
         {/* Left: Canvas + Toolbar */}
         <div className={tx("flex flex-col flex-1 gap-3 min-h-0")}>
-          <Canvas canvasRef={canvasRef} isDrawer={isDrawer} onResize={handleCanvasResize} />
+          <Canvas
+            canvasRef={canvasRef}
+            isDrawer={isDrawer}
+            onResize={handleCanvasResize}
+          />
           <Toolbar
             color={color}
             lineWidth={lineWidth}
@@ -260,7 +263,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
         </div>
 
         {/* Right: Chat panel */}
-        <div className={tx("w-80 min-h-0")}>
+        <div className={tx("w-[350px] min-h-0")}>
           <ChatPanel
             messages={messages}
             phase={phase}

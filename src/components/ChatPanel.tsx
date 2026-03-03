@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from "react";
 import { tx } from "@twind/core";
 import type { ChatMessage, GamePhase } from "../types/protocol";
 
+type InputMode = "chat" | "setAnswer" | "guess";
+
 interface Props {
   messages: ChatMessage[];
   phase: GamePhase;
@@ -9,16 +11,49 @@ interface Props {
   answerLength: number | null;
   onSendChat: (text: string) => void;
   onGuess: (text: string) => void;
-  onSetAnswer: (answer: string, timerSeconds?: number) => void;
+  onSetAnswer: (answer: string) => void;
 }
 
-const TIMER_OPTIONS = [
-  { label: "不限时", value: 0 },
-  { label: "30秒", value: 30 },
-  { label: "1分钟", value: 60 },
-  { label: "3分钟", value: 180 },
-  { label: "5分钟", value: 300 },
-];
+const MODE_CONFIG: Record<
+  InputMode,
+  {
+    label: string;
+    btnText: string;
+    borderColor: string;
+    focusRing: string;
+    btnBg: string;
+    btnHover: string;
+    placeholder: string;
+  }
+> = {
+  chat: {
+    label: "聊天",
+    btnText: "发送",
+    borderColor: "border-gray-300",
+    focusRing: "focus:ring-gray-400",
+    btnBg: "bg-gray-600",
+    btnHover: "hover:bg-gray-700",
+    placeholder: "发送消息...",
+  },
+  setAnswer: {
+    label: "答案",
+    btnText: "确认",
+    borderColor: "border-indigo-400",
+    focusRing: "focus:ring-indigo-400",
+    btnBg: "bg-indigo-600",
+    btnHover: "hover:bg-indigo-700",
+    placeholder: "输入正确答案...",
+  },
+  guess: {
+    label: "答案",
+    btnText: "猜测",
+    borderColor: "border-green-400",
+    focusRing: "focus:ring-green-400",
+    btnBg: "bg-green-600",
+    btnHover: "hover:bg-green-700",
+    placeholder: "输入你的猜测...",
+  },
+};
 
 export default function ChatPanel({
   messages,
@@ -29,11 +64,25 @@ export default function ChatPanel({
   onGuess,
   onSetAnswer,
 }: Props) {
-  const [chatInput, setChatInput] = useState("");
-  const [guessInput, setGuessInput] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [timerOption, setTimerOption] = useState(60);
+  const [input, setInput] = useState("");
+  const [mode, setMode] = useState<InputMode>("chat");
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Compute available modes based on game state
+  const availableModes: InputMode[] = ["chat"];
+  if (isDrawer && phase === "drawing") {
+    availableModes.push("setAnswer");
+  }
+  if (!isDrawer && phase === "guessing") {
+    availableModes.push("guess");
+  }
+
+  // Auto-switch to chat if current mode is no longer available
+  useEffect(() => {
+    if (!availableModes.includes(mode)) {
+      setMode("chat");
+    }
+  }, [phase, isDrawer]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -42,28 +91,39 @@ export default function ChatPanel({
     }
   }, [messages]);
 
-  const handleSendChat = () => {
-    if (!chatInput.trim()) return;
-    onSendChat(chatInput.trim());
-    setChatInput("");
+  const handleSubmit = () => {
+    if (!input.trim()) return;
+    const text = input.trim();
+    setInput("");
+
+    switch (mode) {
+      case "chat":
+        onSendChat(text);
+        break;
+      case "setAnswer":
+        onSetAnswer(text);
+        break;
+      case "guess":
+        onGuess(text);
+        break;
+    }
   };
 
-  const handleGuess = () => {
-    if (!guessInput.trim()) return;
-    onGuess(guessInput.trim());
-    setGuessInput("");
+  const cycleMode = () => {
+    const idx = availableModes.indexOf(mode);
+    const next = availableModes[(idx + 1) % availableModes.length];
+    setMode(next);
+    setInput("");
   };
 
-  const handleSetAnswer = () => {
-    if (!answer.trim()) return;
-    onSetAnswer(answer.trim(), timerOption || undefined);
-    setAnswer("");
-  };
-
-  const showGuessInput = !isDrawer && phase === "guessing";
+  const cfg = MODE_CONFIG[mode];
 
   return (
-    <div className={tx("flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden")}>
+    <div
+      className={tx(
+        "flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden",
+      )}
+    >
       {/* Header */}
       <div className={tx("px-4 py-3 border-b border-gray-100")}>
         <h3 className={tx("font-semibold text-gray-700")}>聊天</h3>
@@ -75,11 +135,16 @@ export default function ChatPanel({
       </div>
 
       {/* Messages */}
-      <div ref={listRef} className={tx("flex-1 overflow-y-auto p-3 space-y-2 min-h-0")}>
+      <div
+        ref={listRef}
+        className={tx("flex-1 overflow-y-auto p-3 space-y-2 min-h-0")}
+      >
         {messages.map((msg) => (
           <div key={msg.id}>
             {msg.kind === "system" ? (
-              <div className={tx("text-center text-xs text-gray-400 py-1")}>{msg.text}</div>
+              <div className={tx("text-center text-xs text-gray-400 py-1")}>
+                {msg.text}
+              </div>
             ) : msg.kind === "guess" ? (
               <div
                 className={tx(
@@ -92,11 +157,15 @@ export default function ChatPanel({
                 <span className={tx("font-medium")}>{msg.playerName}</span>
                 <span className={tx("mx-1")}>猜：</span>
                 <span>{msg.text}</span>
-                <span className={tx("ml-2")}>{msg.correct ? "✅ 正确!" : "❌ 不对"}</span>
+                <span className={tx("ml-2")}>
+                  {msg.correct ? "✅ 正确!" : "❌ 不对"}
+                </span>
               </div>
             ) : (
               <div className={tx("text-sm")}>
-                <span className={tx("font-medium text-indigo-600")}>{msg.playerName}</span>
+                <span className={tx("font-medium text-indigo-600")}>
+                  {msg.playerName}
+                </span>
                 <span className={tx("text-gray-400 mx-1")}>:</span>
                 <span className={tx("text-gray-700")}>{msg.text}</span>
               </div>
@@ -105,103 +174,60 @@ export default function ChatPanel({
         ))}
       </div>
 
-      {/* Answer input (drawer only, during drawing phase) */}
-      {isDrawer && phase === "drawing" && (
-        <div className={tx("px-3 py-2 border-t border-gray-100 bg-indigo-50")}>
-          <div className={tx("text-xs text-indigo-600 mb-1.5")}>设置答案后对方才能开始猜</div>
-          <div className={tx("flex gap-2 mb-2")}>
-            <input
-              type="text"
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-              placeholder="输入正确答案..."
-              className={tx(
-                "flex-1 px-3 py-2 text-sm border border-indigo-200 rounded-lg",
-                "focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none",
-              )}
-              onKeyDown={(e) => e.key === "Enter" && handleSetAnswer()}
-            />
-            <button
-              onClick={handleSetAnswer}
-              className={tx(
-                "px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg",
-                "hover:bg-indigo-700 transition",
-              )}
-            >
-              确认
-            </button>
-          </div>
-          <div className={tx("flex items-center gap-2")}>
-            <span className={tx("text-xs text-indigo-500")}>倒计时:</span>
-            <select
-              value={timerOption}
-              onChange={(e) => setTimerOption(Number(e.target.value))}
-              className={tx(
-                "text-xs px-2 py-1 border border-indigo-200 rounded-lg bg-white",
-                "focus:ring-2 focus:ring-indigo-400 outline-none",
-              )}
-            >
-              {TIMER_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      )}
-
-      {/* Guess input (guesser only, during guessing phase) */}
-      {showGuessInput && (
-        <div className={tx("px-3 py-2 border-t border-green-200 bg-green-50")}>
-          <div className={tx("flex gap-2")}>
-            <input
-              type="text"
-              value={guessInput}
-              onChange={(e) => setGuessInput(e.target.value)}
-              placeholder="输入你的猜测..."
-              className={tx(
-                "flex-1 px-3 py-2 text-sm border border-green-300 rounded-lg",
-                "focus:ring-2 focus:ring-green-400 focus:border-transparent outline-none",
-              )}
-              onKeyDown={(e) => e.key === "Enter" && handleGuess()}
-            />
-            <button
-              onClick={handleGuess}
-              className={tx(
-                "px-4 py-2 text-sm bg-green-600 text-white rounded-lg",
-                "hover:bg-green-700 transition",
-              )}
-            >
-              猜
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Chat input (always visible) */}
+      {/* Unified input */}
       <div className={tx("px-3 py-2 border-t border-gray-100")}>
-        <div className={tx("flex gap-2")}>
+        {mode === "setAnswer" && (
+          <div className={tx("text-xs text-indigo-600 mb-1.5")}>
+            设置答案后对方才能开始猜
+          </div>
+        )}
+        <div className={tx("flex gap-2 items-center")}>
           <input
             type="text"
-            value={chatInput}
-            onChange={(e) => setChatInput(e.target.value)}
-            placeholder="发送消息..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={cfg.placeholder}
             className={tx(
-              "flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg",
-              "focus:ring-2 focus:ring-indigo-400 focus:border-transparent outline-none",
+              "flex-1 px-3 py-2 text-sm border-2 rounded-lg",
+              cfg.borderColor,
+              "focus:ring-2",
+              cfg.focusRing,
+              "focus:border-transparent outline-none",
+              "transition-colors",
             )}
-            onKeyDown={(e) => e.key === "Enter" && handleSendChat()}
+            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
           />
           <button
-            onClick={handleSendChat}
+            onClick={handleSubmit}
             className={tx(
-              "px-4 py-2 text-sm bg-gray-600 text-white rounded-lg",
-              "hover:bg-gray-700 transition",
+              "px-4 py-2 text-sm text-white rounded-lg transition shrink-0",
+              cfg.btnBg,
+              cfg.btnHover,
             )}
           >
-            发送
+            {cfg.btnText}
           </button>
+          {availableModes.length > 1 && (
+            <button
+              onClick={cycleMode}
+              title="切换输入模式"
+              className={tx(
+                "px-2.5 py-2 text-xs font-medium rounded-lg transition shrink-0",
+                mode === "chat" &&
+                  "bg-gray-100 text-gray-600 hover:bg-gray-200",
+                mode === "setAnswer" &&
+                  "bg-indigo-100 text-indigo-700 hover:bg-indigo-200",
+                mode === "guess" &&
+                  "bg-green-100 text-green-700 hover:bg-green-200",
+              )}
+            >
+              {(() => {
+                const idx = availableModes.indexOf(mode);
+                const next = availableModes[(idx + 1) % availableModes.length];
+                return MODE_CONFIG[next].label;
+              })()}
+            </button>
+          )}
         </div>
       </div>
     </div>

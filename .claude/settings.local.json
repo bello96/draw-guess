@@ -12,7 +12,14 @@
       "WebFetch(domain:draw-guess-worker.deng19940906.workers.dev)",
       "Bash(node:*)",
       "Bash(echo:*)",
-      "Bash(nslookup:*)"
-    ]
+      "Bash(nslookup:*)",
+      "Bash(git:*)",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep"
+    ],
+    "deny": ["Bash(rm -rf *)", "Bash(sudo *)"]
   }
 }
