@@ -8,6 +8,7 @@ interface Props {
   myId: string | null;
   phase: GamePhase;
   onTransfer: () => void;
+  onContinueDrawing: () => void;
   onLeave: () => void;
 }
 
@@ -18,6 +19,7 @@ export default function PlayerBar({
   myId,
   phase,
   onTransfer,
+  onContinueDrawing,
   onLeave,
 }: Props) {
   const isDrawer = myId === drawerId;
@@ -87,6 +89,17 @@ export default function PlayerBar({
 
       {/* Actions */}
       <div className={tx("flex items-center justify-end gap-2 w-[300px]")}>
+        {isDrawer && players.length === 2 && phase === "revealed" && (
+          <button
+            onClick={onContinueDrawing}
+            className={tx(
+              "px-3 py-1.5 text-sm bg-indigo-50 text-indigo-700",
+              "hover:bg-indigo-100 rounded-lg transition",
+            )}
+          >
+            继续出题
+          </button>
+        )}
         {isDrawer && players.length === 2 && (
           <button
             onClick={onTransfer}

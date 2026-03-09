@@ -33,6 +33,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const [drawerId, setDrawerId] = useState<string | null>(null);
   const [phase, setPhase] = useState<GamePhase>("waiting");
   const [answerLength, setAnswerLength] = useState<number | null>(null);
+  const [answerText, setAnswerText] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
   // Drawing state
@@ -123,10 +124,11 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           if (msg.phase === "guessing") {
             addSystemMessage("答案已设定，开始猜词！");
           } else if (msg.phase === "revealed") {
-            addSystemMessage("🎉 猜对了！请手动转让画笔开始下一轮");
+            addSystemMessage("🎉 猜对了！可以继续出题或转让画笔");
           } else if (msg.phase === "drawing") {
             addSystemMessage("新一轮开始，画手开始画画吧！");
             setAnswerLength(null);
+            setAnswerText(null);
           } else if (msg.phase === "waiting") {
             addSystemMessage("等待其他玩家加入...");
           }
@@ -202,6 +204,10 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     send({ type: "transfer" });
   };
 
+  const handleContinueDrawing = () => {
+    send({ type: "continueDrawing" });
+  };
+
   const handleSendChat = (text: string) => {
     send({ type: "chat", text });
   };
@@ -212,6 +218,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
 
   const handleSetAnswer = (answer: string) => {
     send({ type: "setAnswer", answer });
+    setAnswerText(answer);
   };
 
   if (!connected) {
@@ -239,6 +246,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
         myId={myId}
         phase={phase}
         onTransfer={handleTransfer}
+        onContinueDrawing={handleContinueDrawing}
         onLeave={onLeave}
       />
 
@@ -269,6 +277,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
             phase={phase}
             isDrawer={isDrawer}
             answerLength={answerLength}
+            answerText={answerText}
             onSendChat={handleSendChat}
             onGuess={handleGuess}
             onSetAnswer={handleSetAnswer}

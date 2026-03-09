@@ -9,6 +9,7 @@ interface Props {
   phase: GamePhase;
   isDrawer: boolean;
   answerLength: number | null;
+  answerText: string | null;
   onSendChat: (text: string) => void;
   onGuess: (text: string) => void;
   onSetAnswer: (answer: string) => void;
@@ -60,6 +61,7 @@ export default function ChatPanel({
   phase,
   isDrawer,
   answerLength,
+  answerText,
   onSendChat,
   onGuess,
   onSetAnswer,
@@ -127,6 +129,11 @@ export default function ChatPanel({
       {/* Header */}
       <div className={tx("px-4 py-3 border-b border-gray-100")}>
         <h3 className={tx("font-semibold text-gray-700")}>聊天</h3>
+        {isDrawer && answerText && (phase === "guessing" || phase === "revealed") && (
+          <div className={tx("text-sm text-indigo-600 mt-1")}>
+            答案：{answerText}
+          </div>
+        )}
         {!isDrawer && phase === "guessing" && answerLength && (
           <div className={tx("text-sm text-green-600 mt-1")}>
             提示：答案共 {answerLength} 个字 {"_ ".repeat(answerLength).trim()}

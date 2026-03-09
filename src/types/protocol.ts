@@ -57,6 +57,10 @@ export interface C_Transfer {
   type: "transfer";
 }
 
+export interface C_ContinueDrawing {
+  type: "continueDrawing";
+}
+
 export type ClientMessage =
   | C_Join
   | C_Draw
@@ -65,7 +69,8 @@ export type ClientMessage =
   | C_SetAnswer
   | C_Guess
   | C_Chat
-  | C_Transfer;
+  | C_Transfer
+  | C_ContinueDrawing;
 
 // ============ Server → Client Messages ============
 

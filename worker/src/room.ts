@@ -191,6 +191,9 @@ export class GameRoom implements DurableObject {
       case "transfer":
         await this.onTransfer(ws);
         break;
+      case "continueDrawing":
+        await this.onContinueDrawing(ws);
+        break;
     }
   }
 
@@ -396,6 +399,26 @@ export class GameRoom implements DurableObject {
       playerName: player.name,
       text: text.trim(),
       timestamp: Date.now(),
+    });
+  }
+
+  private async onContinueDrawing(ws: WebSocket) {
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) return;
+    if (this.phase !== "revealed") return;
+
+    this.phase = "drawing";
+    this.answer = null;
+    this.strokes = [];
+    this.currentStrokePoints = [];
+
+    await this.saveState();
+
+    this.broadcast({ type: "clear" });
+    this.broadcast({
+      type: "phaseChange",
+      phase: "drawing",
+      drawerId: this.drawerId!,
     });
   }
 
