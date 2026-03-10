@@ -149,15 +149,19 @@ export default function Canvas({
             }}
             onBlur={() => onTextConfirm?.()}
             className={tx(
-              "absolute bg-white/80 outline-none border-b-2 border-indigo-400 text-black px-0.5",
+              "absolute outline-none border-b-2 border-indigo-400",
             )}
             style={{
               left: textInput.x,
               top: textInput.y,
               fontSize: displayFontSize,
+              lineHeight: 1.2,
               fontFamily: "sans-serif",
               width: Math.max(40, textValue.length * displayFontSize * 0.7 + 16),
               color: textColor,
+              padding: 0,
+              margin: 0,
+              background: "transparent",
             }}
             autoFocus
           />
@@ -167,28 +171,30 @@ export default function Canvas({
         {pendingText && (
           <div
             className={tx(
-              "absolute flex items-start gap-0.5 select-none",
+              "absolute flex items-start select-none",
               isDragging ? "cursor-grabbing" : "cursor-grab",
             )}
-            style={{ left: pendingText.x, top: pendingText.y - 4 }}
+            style={{ left: pendingText.x, top: pendingText.y }}
             onMouseDown={handleDragStart}
           >
-            {/* Border outline */}
+            {/* Border outline — no padding, border uses outline to avoid layout shift */}
             <div
-              className={tx(
-                "border border-dashed border-indigo-400 rounded px-1 py-0.5 whitespace-nowrap",
-              )}
+              className={tx("whitespace-nowrap")}
               style={{
                 fontSize: displayFontSize,
+                lineHeight: 1.2,
                 fontFamily: "sans-serif",
                 color: textColor,
+                outline: "1px dashed #818cf8",
+                outlineOffset: 2,
+                borderRadius: 3,
               }}
             >
               {pendingText.text}
             </div>
 
             {/* Action buttons */}
-            <div className={tx("flex flex-col gap-0.5 -mt-1")}>
+            <div className={tx("flex flex-col gap-0.5 ml-1")}>
               {/* Delete button */}
               <button
                 onClick={(e) => {
