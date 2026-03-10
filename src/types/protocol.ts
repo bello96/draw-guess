@@ -12,6 +12,9 @@ export interface SerializedStroke {
   points: { x: number; y: number }[];
   color: string;
   lineWidth: number;
+  // Text stroke fields (optional)
+  text?: string;
+  fontSize?: number;
 }
 
 // ============ Client → Server Messages ============

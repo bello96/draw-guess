@@ -13,6 +13,7 @@ import type {
   ChatMessage,
   ServerMessage,
 } from "../types/protocol";
+import type { ToolMode } from "../components/Toolbar";
 
 interface Props {
   roomCode: string;
@@ -41,6 +42,24 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   // Drawing state
   const [color, setColor] = useState("#000000");
   const [lineWidth, setLineWidth] = useState(4);
+  const [tool, setTool] = useState<ToolMode>("pen");
+  // Phase 1: typing text
+  const [textInput, setTextInput] = useState<{
+    x: number;
+    y: number;
+    normalizedX: number;
+    normalizedY: number;
+  } | null>(null);
+  const [textValue, setTextValue] = useState("");
+  const textInputRef = useRef<HTMLInputElement>(null);
+  // Phase 2: pending text (movable + deletable, not yet committed to canvas)
+  const [pendingText, setPendingText] = useState<{
+    text: string;
+    x: number;
+    y: number;
+    normalizedX: number;
+    normalizedY: number;
+  } | null>(null);
 
   const isDrawer = myId !== null && myId === drawerId;
 
@@ -48,11 +67,12 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const { connected, send, addListener } = useWebSocket(roomCode, playerName);
 
   // Canvas
-  const { replayDraw, replayAll, clearCanvas, strokesRef } = useCanvas({
+  const { replayDraw, replayAll, clearCanvas, addTextStroke, strokesRef } = useCanvas({
     canvasRef,
     isDrawer,
     color,
     lineWidth,
+    tool,
     send,
   });
 
@@ -214,6 +234,89 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     send({ type: "continueDrawing" });
   };
 
+  // Commit pending text to canvas
+  const commitPendingText = useCallback(() => {
+    if (!pendingText) return;
+    const fontSize = Math.max(lineWidth * 6, 24);
+    addTextStroke(pendingText.text, pendingText.normalizedX, pendingText.normalizedY, color, fontSize);
+    setPendingText(null);
+  }, [pendingText, color, lineWidth, addTextStroke]);
+
+  // Text tool: handle canvas click to place text input
+  const handleCanvasClickForText = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!isDrawer || tool !== "text") return;
+      // If there's pending text, commit it first
+      if (pendingText) {
+        commitPendingText();
+      }
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const offsetX = e.clientX - rect.left;
+      const offsetY = e.clientY - rect.top;
+      setTextInput({
+        x: offsetX,
+        y: offsetY,
+        normalizedX: offsetX / rect.width,
+        normalizedY: offsetY / rect.height,
+      });
+      setTextValue("");
+      setTimeout(() => textInputRef.current?.focus(), 0);
+    },
+    [isDrawer, tool, canvasRef, pendingText, commitPendingText],
+  );
+
+  // After typing, move text to pending state (movable + deletable)
+  const handleTextConfirm = useCallback(() => {
+    if (!textInput || !textValue.trim()) {
+      setTextInput(null);
+      setTextValue("");
+      return;
+    }
+    setPendingText({
+      text: textValue.trim(),
+      x: textInput.x,
+      y: textInput.y,
+      normalizedX: textInput.normalizedX,
+      normalizedY: textInput.normalizedY,
+    });
+    setTextInput(null);
+    setTextValue("");
+  }, [textInput, textValue]);
+
+  // Delete pending text
+  const handleDeletePendingText = useCallback(() => {
+    setPendingText(null);
+  }, []);
+
+  // Update pending text position after drag
+  const handlePendingTextMove = useCallback(
+    (x: number, y: number) => {
+      if (!pendingText) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      setPendingText((prev) =>
+        prev
+          ? { ...prev, x, y, normalizedX: x / rect.width, normalizedY: y / rect.height }
+          : null,
+      );
+    },
+    [pendingText, canvasRef],
+  );
+
+  // When switching away from text tool, commit pending text
+  const handleToolChange = useCallback(
+    (t: ToolMode) => {
+      if (t !== "text" && pendingText) {
+        commitPendingText();
+      }
+      setTool(t);
+    },
+    [pendingText, commitPendingText],
+  );
+
   const handleSendChat = (text: string) => {
     send({ type: "chat", text });
   };
@@ -266,13 +369,28 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           <Canvas
             canvasRef={canvasRef}
             isDrawer={isDrawer}
+            tool={tool}
             onResize={handleCanvasResize}
+            onCanvasClick={handleCanvasClickForText}
+            textInput={textInput}
+            textValue={textValue}
+            onTextValueChange={setTextValue}
+            onTextConfirm={handleTextConfirm}
+            onTextCancel={() => { setTextInput(null); setTextValue(""); }}
+            textInputRef={textInputRef}
+            pendingText={pendingText}
+            onPendingTextMove={handlePendingTextMove}
+            onPendingTextDelete={handleDeletePendingText}
+            onPendingTextCommit={commitPendingText}
+            textColor={color}
           />
           <Toolbar
             color={color}
             lineWidth={lineWidth}
+            tool={tool}
             onColorChange={setColor}
             onLineWidthChange={setLineWidth}
+            onToolChange={handleToolChange}
             onClear={handleClear}
             onUndo={handleUndo}
             disabled={!isDrawer}

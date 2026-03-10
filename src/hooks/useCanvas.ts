@@ -1,15 +1,17 @@
 import { useRef, useCallback, useEffect } from "react";
 import type { ClientMessage, S_Draw, SerializedStroke } from "../types/protocol";
+import type { ToolMode } from "../components/Toolbar";
 
 interface UseCanvasOptions {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   isDrawer: boolean;
   color: string;
   lineWidth: number;
+  tool: ToolMode;
   send: (msg: ClientMessage) => void;
 }
 
-export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCanvasOptions) {
+export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }: UseCanvasOptions) {
   const isDrawingRef = useRef(false);
   const strokesRef = useRef<SerializedStroke[]>([]);
   // Track current in-progress stroke for both local and remote drawing
@@ -23,7 +25,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    if (!isDrawer) return;
+    if (!isDrawer || tool === "text") return;
 
     const normalize = (e: MouseEvent) => ({
       x: e.offsetX / canvas.width,
@@ -133,7 +135,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       canvas.removeEventListener("touchmove", onTouchMove);
       canvas.removeEventListener("touchend", onTouchEnd);
     };
-  }, [canvasRef, isDrawer, color, lineWidth, send]);
+  }, [canvasRef, isDrawer, color, lineWidth, tool, send]);
 
   // Replay a single draw event from remote — also track strokes
   const replayDraw = useCallback(
@@ -171,6 +173,21 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
     [canvasRef],
   );
 
+  // Draw a single text stroke on the canvas
+  const drawTextStroke = useCallback(
+    (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, stroke: SerializedStroke) => {
+      if (!stroke.text || stroke.points.length === 0) return;
+      const fontSize = (stroke.fontSize || 24) * (canvas.width / 800);
+      ctx.font = `${fontSize}px sans-serif`;
+      ctx.fillStyle = stroke.color;
+      ctx.textBaseline = "top";
+      const px = stroke.points[0].x * canvas.width;
+      const py = stroke.points[0].y * canvas.height;
+      ctx.fillText(stroke.text, px, py);
+    },
+    [],
+  );
+
   // Replay all strokes (on join, undo, or resize)
   const replayAll = useCallback(
     (strokes: SerializedStroke[]) => {
@@ -183,6 +200,10 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       for (const stroke of strokes) {
+        if (stroke.text) {
+          drawTextStroke(ctx, canvas, stroke);
+          continue;
+        }
         ctx.beginPath();
         ctx.strokeStyle = stroke.color;
         ctx.lineWidth = stroke.lineWidth;
@@ -197,7 +218,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
         ctx.stroke();
       }
     },
-    [canvasRef],
+    [canvasRef, drawTextStroke],
   );
 
   // Clear canvas
@@ -210,5 +231,26 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, send }: UseCa
     strokesRef.current = [];
   }, [canvasRef]);
 
-  return { replayDraw, replayAll, clearCanvas, strokesRef };
+  // Add a text stroke to the canvas
+  const addTextStroke = useCallback(
+    (text: string, x: number, y: number, textColor: string, fontSize: number) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      const stroke: SerializedStroke = {
+        points: [{ x, y }],
+        color: textColor,
+        lineWidth: 0,
+        text,
+        fontSize,
+      };
+      drawTextStroke(ctx, canvas, stroke);
+      strokesRef.current.push(stroke);
+    },
+    [canvasRef, drawTextStroke],
+  );
+
+  return { replayDraw, replayAll, clearCanvas, addTextStroke, strokesRef };
 }

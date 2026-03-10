@@ -8,11 +8,15 @@ const COLORS = [
 
 const LINE_WIDTHS = [2, 4, 8, 12];
 
+export type ToolMode = "pen" | "text";
+
 interface Props {
   color: string;
   lineWidth: number;
+  tool: ToolMode;
   onColorChange: (c: string) => void;
   onLineWidthChange: (w: number) => void;
+  onToolChange: (t: ToolMode) => void;
   onClear: () => void;
   onUndo: () => void;
   disabled: boolean;
@@ -21,8 +25,10 @@ interface Props {
 export default function Toolbar({
   color,
   lineWidth,
+  tool,
   onColorChange,
   onLineWidthChange,
+  onToolChange,
   onClear,
   onUndo,
   disabled,
@@ -47,6 +53,33 @@ export default function Toolbar({
             style={{ backgroundColor: c }}
           />
         ))}
+      </div>
+
+      {/* Divider */}
+      <div className={tx("w-px h-8 bg-gray-200")} />
+
+      {/* Tool mode */}
+      <div className={tx("flex gap-1.5 items-center")}>
+        <button
+          onClick={() => onToolChange("pen")}
+          title="画笔"
+          className={tx(
+            "flex items-center justify-center w-8 h-8 rounded-lg transition text-base",
+            tool === "pen" ? "bg-indigo-100 text-indigo-700" : "hover:bg-gray-100 text-gray-600",
+          )}
+        >
+          ✏️
+        </button>
+        <button
+          onClick={() => onToolChange("text")}
+          title="文字"
+          className={tx(
+            "flex items-center justify-center w-8 h-8 rounded-lg transition font-bold text-base",
+            tool === "text" ? "bg-indigo-100 text-indigo-700" : "hover:bg-gray-100 text-gray-600",
+          )}
+        >
+          T
+        </button>
       </div>
 
       {/* Divider */}
