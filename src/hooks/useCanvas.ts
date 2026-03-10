@@ -174,6 +174,9 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
   );
 
   // Draw a single text stroke on the canvas
+  // The y offset compensates for the difference between HTML line-height spacing
+  // and canvas textBaseline="top": HTML lineHeight 1.2 adds 0.1*fontSize above text,
+  // so we shift canvas text down by the same amount to match the overlay position.
   const drawTextStroke = useCallback(
     (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, stroke: SerializedStroke) => {
       if (!stroke.text || stroke.points.length === 0) return;
@@ -182,7 +185,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
       ctx.fillStyle = stroke.color;
       ctx.textBaseline = "top";
       const px = stroke.points[0].x * canvas.width;
-      const py = stroke.points[0].y * canvas.height;
+      const py = stroke.points[0].y * canvas.height + fontSize * 0.1;
       ctx.fillText(stroke.text, px, py);
     },
     [],
