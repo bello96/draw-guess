@@ -239,21 +239,30 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     send({ type: "continueDrawing" });
   };
 
+  // Map lineWidth to distinct font sizes: 2→16, 4→24, 8→36, 12→48
+  const textFontSize = lineWidth * 4 + 8;
+
+  // Compute the actual display pixel size (matching canvas rendering)
+  const getDisplayFontSize = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return textFontSize;
+    return textFontSize * (canvas.width / 800);
+  }, [textFontSize, canvasRef]);
+
   // Commit pending text to canvas and sync to server
   const commitPendingText = useCallback(() => {
     if (!pendingText) return;
-    const fontSize = Math.max(lineWidth * 6, 24);
-    addTextStroke(pendingText.text, pendingText.normalizedX, pendingText.normalizedY, color, fontSize);
+    addTextStroke(pendingText.text, pendingText.normalizedX, pendingText.normalizedY, color, textFontSize);
     send({
       type: "textStroke",
       text: pendingText.text,
       x: pendingText.normalizedX,
       y: pendingText.normalizedY,
       color,
-      fontSize,
+      fontSize: textFontSize,
     });
     setPendingText(null);
-  }, [pendingText, color, lineWidth, addTextStroke, send]);
+  }, [pendingText, color, textFontSize, addTextStroke, send]);
 
   // Text tool: handle canvas click to place text input
   const handleCanvasClickForText = useCallback(
@@ -396,6 +405,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
             onPendingTextDelete={handleDeletePendingText}
             onPendingTextCommit={commitPendingText}
             textColor={color}
+            displayFontSize={getDisplayFontSize()}
           />
           <Toolbar
             color={color}

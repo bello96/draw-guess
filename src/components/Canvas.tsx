@@ -27,6 +27,7 @@ interface Props {
   onPendingTextDelete?: () => void;
   onPendingTextCommit?: () => void;
   textColor?: string;
+  displayFontSize?: number;
 }
 
 export default function Canvas({
@@ -46,6 +47,7 @@ export default function Canvas({
   onPendingTextDelete,
   onPendingTextCommit,
   textColor = "#000000",
+  displayFontSize = 18,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
@@ -152,9 +154,9 @@ export default function Canvas({
             style={{
               left: textInput.x,
               top: textInput.y,
-              fontSize: "18px",
+              fontSize: displayFontSize,
               fontFamily: "sans-serif",
-              width: Math.max(40, textValue.length * 12 + 16),
+              width: Math.max(40, textValue.length * displayFontSize * 0.7 + 16),
               color: textColor,
             }}
             autoFocus
@@ -177,7 +179,7 @@ export default function Canvas({
                 "border border-dashed border-indigo-400 rounded px-1 py-0.5 whitespace-nowrap",
               )}
               style={{
-                fontSize: "18px",
+                fontSize: displayFontSize,
                 fontFamily: "sans-serif",
                 color: textColor,
               }}
