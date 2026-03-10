@@ -12,6 +12,8 @@ interface SerializedStroke {
   points: { x: number; y: number }[];
   color: string;
   lineWidth: number;
+  text?: string;
+  fontSize?: number;
 }
 
 // Data stored as WebSocket attachment (survives hibernation)
@@ -191,6 +193,16 @@ export class GameRoom implements DurableObject {
       case "transfer":
         await this.onTransfer(ws);
         break;
+      case "textStroke":
+        await this.onTextStroke(ws, msg as {
+          type: string;
+          text: string;
+          x: number;
+          y: number;
+          color: string;
+          fontSize: number;
+        });
+        break;
       case "continueDrawing":
         await this.onContinueDrawing(ws);
         break;
@@ -314,6 +326,43 @@ export class GameRoom implements DurableObject {
         y: msg.y,
         color: msg.color,
         lineWidth: msg.lineWidth,
+      },
+      ws,
+    );
+  }
+
+  private async onTextStroke(
+    ws: WebSocket,
+    msg: {
+      type: string;
+      text: string;
+      x: number;
+      y: number;
+      color: string;
+      fontSize: number;
+    },
+  ) {
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) return;
+
+    const stroke: SerializedStroke = {
+      points: [{ x: msg.x, y: msg.y }],
+      color: msg.color,
+      lineWidth: 0,
+      text: msg.text,
+      fontSize: msg.fontSize,
+    };
+    this.strokes.push(stroke);
+    await this.state.storage.put("strokes", this.strokes);
+
+    this.broadcast(
+      {
+        type: "textStroke",
+        text: msg.text,
+        x: msg.x,
+        y: msg.y,
+        color: msg.color,
+        fontSize: msg.fontSize,
       },
       ws,
     );

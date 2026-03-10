@@ -60,6 +60,15 @@ export interface C_Transfer {
   type: "transfer";
 }
 
+export interface C_TextStroke {
+  type: "textStroke";
+  text: string;
+  x: number;
+  y: number;
+  color: string;
+  fontSize: number;
+}
+
 export interface C_ContinueDrawing {
   type: "continueDrawing";
 }
@@ -72,6 +81,7 @@ export type ClientMessage =
   | C_SetAnswer
   | C_Guess
   | C_Chat
+  | C_TextStroke
   | C_Transfer
   | C_ContinueDrawing;
 
@@ -139,6 +149,15 @@ export interface S_Chat {
   timestamp: number;
 }
 
+export interface S_TextStroke {
+  type: "textStroke";
+  text: string;
+  x: number;
+  y: number;
+  color: string;
+  fontSize: number;
+}
+
 export interface S_TransferDone {
   type: "transferDone";
   newDrawerId: string;
@@ -164,6 +183,7 @@ export type ServerMessage =
   | S_PhaseChange
   | S_GuessResult
   | S_Chat
+  | S_TextStroke
   | S_TransferDone
   | S_Error
   | S_RoomClosed;

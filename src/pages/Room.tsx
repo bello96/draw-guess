@@ -133,6 +133,10 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           clearCanvas();
           break;
 
+        case "textStroke":
+          addTextStroke(msg.text, msg.x, msg.y, msg.color, msg.fontSize);
+          break;
+
         case "undo":
           // Pop the last stroke and replay all remaining
           strokesRef.current.pop();
@@ -210,6 +214,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     replayDraw,
     replayAll,
     clearCanvas,
+    addTextStroke,
     addSystemMessage,
     strokesRef,
   ]);
@@ -234,13 +239,21 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     send({ type: "continueDrawing" });
   };
 
-  // Commit pending text to canvas
+  // Commit pending text to canvas and sync to server
   const commitPendingText = useCallback(() => {
     if (!pendingText) return;
     const fontSize = Math.max(lineWidth * 6, 24);
     addTextStroke(pendingText.text, pendingText.normalizedX, pendingText.normalizedY, color, fontSize);
+    send({
+      type: "textStroke",
+      text: pendingText.text,
+      x: pendingText.normalizedX,
+      y: pendingText.normalizedY,
+      color,
+      fontSize,
+    });
     setPendingText(null);
-  }, [pendingText, color, lineWidth, addTextStroke]);
+  }, [pendingText, color, lineWidth, addTextStroke, send]);
 
   // Text tool: handle canvas click to place text input
   const handleCanvasClickForText = useCallback(
