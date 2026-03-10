@@ -69,6 +69,7 @@ export default function ChatPanel({
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<InputMode>("chat");
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Compute available modes based on game state
   const availableModes: InputMode[] = ["chat"];
@@ -85,6 +86,11 @@ export default function ChatPanel({
       setMode("chat");
     }
   }, [phase, isDrawer]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-focus input when mode changes
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, [mode]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -190,6 +196,7 @@ export default function ChatPanel({
         )}
         <div className={tx("flex gap-2 items-center")}>
           <input
+            ref={inputRef}
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}

@@ -6,6 +6,7 @@ import Canvas from "../components/Canvas";
 import Toolbar from "../components/Toolbar";
 import PlayerBar from "../components/PlayerBar";
 import ChatPanel from "../components/ChatPanel";
+import Confetti from "../components/Confetti";
 import type {
   PlayerInfo,
   GamePhase,
@@ -35,6 +36,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const [answerLength, setAnswerLength] = useState<number | null>(null);
   const [answerText, setAnswerText] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [confettiKey, setConfettiKey] = useState(0);
 
   // Drawing state
   const [color, setColor] = useState("#000000");
@@ -129,6 +131,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
             addSystemMessage("新一轮开始，画手开始画画吧！");
             setAnswerLength(null);
             setAnswerText(null);
+            setConfettiKey(0);
           } else if (msg.phase === "waiting") {
             addSystemMessage("等待其他玩家加入...");
           }
@@ -147,6 +150,9 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
               correct: msg.correct,
             },
           ]);
+          if (msg.correct) {
+            setConfettiKey((k) => k + 1);
+          }
           break;
 
         case "chat":
@@ -238,6 +244,9 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
 
   return (
     <div className={tx("flex flex-col h-screen bg-gray-50 p-3 gap-3")}>
+      {confettiKey > 0 && (
+        <Confetti key={confettiKey} duration={4000} />
+      )}
       {/* Top bar */}
       <PlayerBar
         roomCode={roomCode}
