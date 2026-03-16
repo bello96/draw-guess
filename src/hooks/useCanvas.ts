@@ -11,6 +11,17 @@ interface UseCanvasOptions {
   send: (msg: ClientMessage) => void;
 }
 
+// Reference canvas size for lineWidth scaling (lineWidth values are authored for this size)
+const REF_SIZE = 800;
+const MIN_SCALE = 0.5;
+const MAX_SCALE = 1.5;
+
+/** Scale a base lineWidth to the current canvas size, clamped to min/max bounds */
+function scaleLineWidth(baseWidth: number, canvasSize: number): number {
+  const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, canvasSize / REF_SIZE));
+  return baseWidth * scale;
+}
+
 export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }: UseCanvasOptions) {
   const isDrawingRef = useRef(false);
   const strokesRef = useRef<SerializedStroke[]>([]);
@@ -49,7 +60,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
       ctx.beginPath();
       ctx.moveTo(e.offsetX, e.offsetY);
       ctx.strokeStyle = color;
-      ctx.lineWidth = lineWidth;
+      ctx.lineWidth = scaleLineWidth(lineWidth, canvas.width);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       currentStrokeRef.current = { points: [{ x, y }], color, lineWidth };
@@ -86,7 +97,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
       ctx.beginPath();
       ctx.moveTo(offsetX, offsetY);
       ctx.strokeStyle = color;
-      ctx.lineWidth = lineWidth;
+      ctx.lineWidth = scaleLineWidth(lineWidth, canvas.width);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       currentStrokeRef.current = { points: [{ x, y }], color, lineWidth };
@@ -152,7 +163,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
         ctx.beginPath();
         ctx.moveTo(cx, cy);
         ctx.strokeStyle = msg.color;
-        ctx.lineWidth = msg.lineWidth;
+        ctx.lineWidth = scaleLineWidth(msg.lineWidth, canvas.width);
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
         currentStrokeRef.current = { points: [{ x: msg.x, y: msg.y }], color: msg.color, lineWidth: msg.lineWidth };
@@ -209,7 +220,7 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
         }
         ctx.beginPath();
         ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = stroke.lineWidth;
+        ctx.lineWidth = scaleLineWidth(stroke.lineWidth, canvas.width);
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
         for (let i = 0; i < stroke.points.length; i++) {

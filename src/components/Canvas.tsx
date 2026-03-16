@@ -54,13 +54,15 @@ export default function Canvas({
   const [isDragging, setIsDragging] = useState(false);
 
   // Auto-resize canvas to fill container while keeping it square
+  const MIN_CANVAS_SIZE = 400;
+
   useEffect(() => {
     const resizeCanvas = () => {
       const container = containerRef.current;
       const canvas = canvasRef.current;
       if (!container || !canvas) return;
 
-      const size = Math.min(container.clientWidth, container.clientHeight);
+      const size = Math.max(MIN_CANVAS_SIZE, Math.min(container.clientWidth, container.clientHeight));
       if (canvas.width !== size || canvas.height !== size) {
         canvas.width = size;
         canvas.height = size;
@@ -125,7 +127,7 @@ export default function Canvas({
       ref={containerRef}
       className={tx(
         "flex items-center justify-center bg-gray-100 rounded-xl overflow-hidden",
-        "flex-1 min-h-0 relative",
+        "flex-1 min-h-0 relative min-w-[400px] min-h-[400px]",
       )}
     >
       <div className={tx("relative")}>
