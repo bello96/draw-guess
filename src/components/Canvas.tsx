@@ -1,13 +1,14 @@
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { tx } from "@twind/core";
 import type { ToolMode } from "./Toolbar";
 
-interface PendingText {
+export interface EditingText {
   text: string;
   x: number;
   y: number;
   normalizedX: number;
   normalizedY: number;
+  fontSize: number;
 }
 
 interface Props {
@@ -16,19 +17,30 @@ interface Props {
   tool?: ToolMode;
   onResize?: () => void;
   onCanvasClick?: (e: React.MouseEvent<HTMLCanvasElement>) => void;
-  textInput?: { x: number; y: number } | null;
-  textValue?: string;
-  onTextValueChange?: (v: string) => void;
-  onTextConfirm?: () => void;
-  onTextCancel?: () => void;
-  textInputRef?: React.RefObject<HTMLInputElement | null>;
-  pendingText?: PendingText | null;
-  onPendingTextMove?: (x: number, y: number) => void;
-  onPendingTextDelete?: () => void;
-  onPendingTextCommit?: () => void;
+  editingText?: EditingText | null;
+  onEditingTextUpdate?: (updates: Partial<EditingText>) => void;
+  onEditingTextDelete?: () => void;
+  onEditingTextCommit?: () => void;
   textColor?: string;
-  displayFontSize?: number;
 }
+
+/** Measure the pixel width of the longest line in a string */
+function measureTextWidth(text: string, fontSize: number): number {
+  const c = document.createElement("canvas");
+  const ctx = c.getContext("2d");
+  if (!ctx) return 60;
+  ctx.font = `${fontSize}px sans-serif`;
+  const lines = text.split("\n");
+  const maxWidth = Math.max(...lines.map((l) => ctx.measureText(l || " ").width));
+  return Math.max(60, maxWidth + 8);
+}
+
+const CORNERS = [
+  { name: "nw", cursor: "nw-resize", style: { top: -5, left: -5 } },
+  { name: "ne", cursor: "ne-resize", style: { top: -5, right: -5 } },
+  { name: "sw", cursor: "sw-resize", style: { bottom: -5, left: -5 } },
+  { name: "se", cursor: "se-resize", style: { bottom: -5, right: -5 } },
+] as const;
 
 export default function Canvas({
   canvasRef,
@@ -36,24 +48,20 @@ export default function Canvas({
   tool = "pen",
   onResize,
   onCanvasClick,
-  textInput,
-  textValue = "",
-  onTextValueChange,
-  onTextConfirm,
-  onTextCancel,
-  textInputRef,
-  pendingText,
-  onPendingTextMove,
-  onPendingTextDelete,
-  onPendingTextCommit,
+  editingText,
+  onEditingTextUpdate,
+  onEditingTextDelete,
+  onEditingTextCommit,
   textColor = "#000000",
-  displayFontSize = 18,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const resizeRef = useRef<{ corner: string; startX: number; startY: number; initialFontSize: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
 
-  // Auto-resize canvas to fill container while keeping it square
+  // Canvas size
   const MIN_CANVAS_SIZE = 400;
 
   useEffect(() => {
@@ -75,45 +83,126 @@ export default function Canvas({
     return () => window.removeEventListener("resize", resizeCanvas);
   }, [canvasRef, onResize]);
 
-  // Drag handlers for pending text
-  const handleDragStart = useCallback(
+  // Display font size (scaled to canvas)
+  const displayFontSize = editingText
+    ? editingText.fontSize * ((canvasRef.current?.width || 800) / 800)
+    : 18;
+
+  // Auto-size textarea height
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta || !editingText) return;
+    ta.style.height = "0";
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, [editingText?.text, displayFontSize]);
+
+  // Textarea width based on text content
+  const textareaWidth = useMemo(
+    () => (editingText ? measureTextWidth(editingText.text, displayFontSize) : 60),
+    [editingText?.text, displayFontSize],
+  );
+
+  // === Move: drag on dashed border area ===
+  const handleBorderMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (!pendingText) return;
+      if (!editingText) return;
       e.preventDefault();
-      e.stopPropagation();
       dragRef.current = {
         startX: e.clientX,
         startY: e.clientY,
-        origX: pendingText.x,
-        origY: pendingText.y,
+        origX: editingText.x,
+        origY: editingText.y,
       };
       setIsDragging(true);
     },
-    [pendingText],
+    [editingText],
   );
 
   useEffect(() => {
     if (!isDragging) return;
 
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMove = (e: MouseEvent) => {
       if (!dragRef.current) return;
       const dx = e.clientX - dragRef.current.startX;
       const dy = e.clientY - dragRef.current.startY;
-      onPendingTextMove?.(dragRef.current.origX + dx, dragRef.current.origY + dy);
+      const newX = dragRef.current.origX + dx;
+      const newY = dragRef.current.origY + dy;
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        onEditingTextUpdate?.({
+          x: newX,
+          y: newY,
+          normalizedX: newX / rect.width,
+          normalizedY: newY / rect.height,
+        });
+      }
     };
 
-    const handleMouseUp = () => {
+    const handleUp = () => {
       dragRef.current = null;
       setIsDragging(false);
     };
 
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
     return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
     };
-  }, [isDragging, onPendingTextMove]);
+  }, [isDragging, canvasRef, onEditingTextUpdate]);
+
+  // === Resize: drag on corner handles ===
+  const handleResizeStart = useCallback(
+    (e: React.MouseEvent, corner: string) => {
+      if (!editingText) return;
+      e.preventDefault();
+      e.stopPropagation();
+      resizeRef.current = {
+        corner,
+        startX: e.clientX,
+        startY: e.clientY,
+        initialFontSize: editingText.fontSize,
+      };
+      setIsResizing(true);
+    },
+    [editingText],
+  );
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMove = (e: MouseEvent) => {
+      const ref = resizeRef.current;
+      if (!ref) return;
+      const dx = e.clientX - ref.startX;
+      const dy = e.clientY - ref.startY;
+      // Each corner direction: outward = bigger
+      let delta: number;
+      switch (ref.corner) {
+        case "se": delta = dx + dy; break;
+        case "nw": delta = -dx - dy; break;
+        case "ne": delta = dx - dy; break;
+        case "sw": delta = -dx + dy; break;
+        default: delta = 0;
+      }
+      const scale = Math.max(0.3, 1 + delta / 200);
+      const newFontSize = Math.round(Math.max(12, Math.min(72, ref.initialFontSize * scale)));
+      onEditingTextUpdate?.({ fontSize: newFontSize });
+    };
+
+    const handleUp = () => {
+      resizeRef.current = null;
+      setIsResizing(false);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isResizing, onEditingTextUpdate]);
 
   const cursorClass =
     isDrawer && tool === "text"
@@ -138,71 +227,83 @@ export default function Canvas({
           onClick={onCanvasClick}
         />
 
-        {/* Phase 1: text input */}
-        {textInput && (
-          <input
-            ref={textInputRef as React.RefObject<HTMLInputElement>}
-            type="text"
-            value={textValue}
-            onChange={(e) => onTextValueChange?.(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") onTextConfirm?.();
-              if (e.key === "Escape") onTextCancel?.();
-            }}
-            onBlur={() => onTextConfirm?.()}
-            className={tx(
-              "absolute outline-none border-b-2 border-indigo-400",
-            )}
-            style={{
-              left: textInput.x,
-              top: textInput.y,
-              fontSize: displayFontSize,
-              lineHeight: 1.2,
-              fontFamily: "sans-serif",
-              width: Math.max(40, textValue.length * displayFontSize * 0.7 + 16),
-              color: textColor,
-              padding: 0,
-              margin: 0,
-              background: "transparent",
-            }}
-            autoFocus
-          />
-        )}
-
-        {/* Phase 2: pending text overlay — draggable with delete & confirm */}
-        {pendingText && (
+        {/* Unified text editing overlay */}
+        {editingText && (
           <div
-            className={tx(
-              "absolute flex items-start select-none",
-              isDragging ? "cursor-grabbing" : "cursor-grab",
-            )}
-            style={{ left: pendingText.x, top: pendingText.y }}
-            onMouseDown={handleDragStart}
+            className={tx("absolute select-none")}
+            style={{ left: editingText.x - 10, top: editingText.y - 10 }}
           >
-            {/* Border outline — no padding, border uses outline to avoid layout shift */}
+            {/* Dashed border wrapper — drag on border to move */}
             <div
-              className={tx("whitespace-nowrap")}
+              onMouseDown={handleBorderMouseDown}
               style={{
-                fontSize: displayFontSize,
-                lineHeight: 1.2,
-                fontFamily: "sans-serif",
-                color: textColor,
-                outline: "1px dashed #818cf8",
-                outlineOffset: 2,
-                borderRadius: 3,
+                padding: 8,
+                border: "2px dashed #818cf8",
+                borderRadius: 4,
+                cursor: isDragging ? "grabbing" : "move",
+                position: "relative",
               }}
             >
-              {pendingText.text}
+              <textarea
+                ref={textareaRef}
+                value={editingText.text}
+                onChange={(e) => onEditingTextUpdate?.({ text: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    onEditingTextDelete?.();
+                  }
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+                autoFocus
+                style={{
+                  fontSize: displayFontSize,
+                  lineHeight: 1.2,
+                  fontFamily: "sans-serif",
+                  color: textColor,
+                  background: "transparent",
+                  border: "none",
+                  outline: "none",
+                  resize: "none",
+                  padding: 0,
+                  // Pull text up by half-leading so the glyph top aligns with (x, y)
+                  marginTop: -displayFontSize * 0.1,
+                  marginLeft: 0,
+                  marginRight: 0,
+                  marginBottom: 0,
+                  display: "block",
+                  minWidth: 40,
+                  minHeight: displayFontSize * 1.2,
+                  width: textareaWidth,
+                  overflow: "hidden",
+                }}
+              />
+
+              {/* Corner resize handles */}
+              {CORNERS.map((corner) => (
+                <div
+                  key={corner.name}
+                  onMouseDown={(e) => handleResizeStart(e, corner.name)}
+                  className={tx("absolute")}
+                  style={{
+                    width: 10,
+                    height: 10,
+                    background: "#818cf8",
+                    borderRadius: 2,
+                    cursor: corner.cursor,
+                    ...corner.style,
+                  }}
+                />
+              ))}
             </div>
 
             {/* Action buttons */}
-            <div className={tx("flex flex-col gap-0.5 ml-1")}>
-              {/* Delete button */}
+            <div
+              className={tx("absolute flex flex-col gap-0.5")}
+              style={{ right: -28, top: 0 }}
+            >
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onPendingTextDelete?.();
-                }}
+                onClick={(e) => { e.stopPropagation(); onEditingTextDelete?.(); }}
                 onMouseDown={(e) => e.stopPropagation()}
                 className={tx(
                   "w-5 h-5 flex items-center justify-center rounded-full",
@@ -213,12 +314,8 @@ export default function Canvas({
               >
                 ×
               </button>
-              {/* Confirm button */}
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onPendingTextCommit?.();
-                }}
+                onClick={(e) => { e.stopPropagation(); onEditingTextCommit?.(); }}
                 onMouseDown={(e) => e.stopPropagation()}
                 className={tx(
                   "w-5 h-5 flex items-center justify-center rounded-full",

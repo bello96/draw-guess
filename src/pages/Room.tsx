@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useCallback } from "react";
 import { tx } from "@twind/core";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useCanvas } from "../hooks/useCanvas";
 import Canvas from "../components/Canvas";
+import type { EditingText } from "../components/Canvas";
 import Toolbar from "../components/Toolbar";
 import PlayerBar from "../components/PlayerBar";
 import ChatPanel from "../components/ChatPanel";
@@ -14,6 +15,7 @@ import type {
   ServerMessage,
 } from "../types/protocol";
 import type { ToolMode } from "../components/Toolbar";
+import { useEffect } from "react";
 
 interface Props {
   roomCode: string;
@@ -25,6 +27,8 @@ let msgIdCounter = 0;
 function nextMsgId() {
   return `msg-${++msgIdCounter}`;
 }
+
+const DEFAULT_TEXT_FONT_SIZE = 24;
 
 export default function Room({ roomCode, playerName, onLeave }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -43,23 +47,9 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const [color, setColor] = useState("#000000");
   const [lineWidth, setLineWidth] = useState(4);
   const [tool, setTool] = useState<ToolMode>("pen");
-  // Phase 1: typing text
-  const [textInput, setTextInput] = useState<{
-    x: number;
-    y: number;
-    normalizedX: number;
-    normalizedY: number;
-  } | null>(null);
-  const [textValue, setTextValue] = useState("");
-  const textInputRef = useRef<HTMLInputElement>(null);
-  // Phase 2: pending text (movable + deletable, not yet committed to canvas)
-  const [pendingText, setPendingText] = useState<{
-    text: string;
-    x: number;
-    y: number;
-    normalizedX: number;
-    normalizedY: number;
-  } | null>(null);
+
+  // Unified text editing state
+  const [editingText, setEditingText] = useState<EditingText | null>(null);
 
   const isDrawer = myId !== null && myId === drawerId;
 
@@ -138,7 +128,6 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
           break;
 
         case "undo":
-          // Pop the last stroke and replay all remaining
           strokesRef.current.pop();
           replayAll([...strokesRef.current]);
           break;
@@ -226,7 +215,6 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
 
   const handleUndo = () => {
     send({ type: "undo" });
-    // Local undo for the drawer: pop and replay
     strokesRef.current.pop();
     replayAll([...strokesRef.current]);
   };
@@ -239,104 +227,71 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
     send({ type: "continueDrawing" });
   };
 
-  // Map lineWidth to distinct font sizes: 2→16, 4→24, 8→36, 12→48
-  const textFontSize = lineWidth * 4 + 8;
-
-  // Compute the actual display pixel size (matching canvas rendering)
-  const getDisplayFontSize = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return textFontSize;
-    return textFontSize * (canvas.width / 800);
-  }, [textFontSize, canvasRef]);
-
-  // Commit pending text to canvas and sync to server
-  const commitPendingText = useCallback(() => {
-    if (!pendingText) return;
-    addTextStroke(pendingText.text, pendingText.normalizedX, pendingText.normalizedY, color, textFontSize);
+  // Commit editing text to canvas and sync to server
+  const commitEditingText = useCallback(() => {
+    if (!editingText || !editingText.text.trim()) {
+      setEditingText(null);
+      return;
+    }
+    addTextStroke(editingText.text, editingText.normalizedX, editingText.normalizedY, color, editingText.fontSize);
     send({
       type: "textStroke",
-      text: pendingText.text,
-      x: pendingText.normalizedX,
-      y: pendingText.normalizedY,
+      text: editingText.text,
+      x: editingText.normalizedX,
+      y: editingText.normalizedY,
       color,
-      fontSize: textFontSize,
+      fontSize: editingText.fontSize,
     });
-    setPendingText(null);
-  }, [pendingText, color, textFontSize, addTextStroke, send]);
+    setEditingText(null);
+  }, [editingText, color, addTextStroke, send]);
 
-  // Text tool: handle canvas click to place text input
+  // Text tool: click on canvas to create editing text
   const handleCanvasClickForText = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!isDrawer || tool !== "text") return;
-      // If there's pending text, commit it first
-      if (pendingText) {
-        commitPendingText();
+      // Commit current editing text first
+      if (editingText) {
+        commitEditingText();
       }
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
       const offsetX = e.clientX - rect.left;
       const offsetY = e.clientY - rect.top;
-      setTextInput({
+      setEditingText({
+        text: "",
         x: offsetX,
         y: offsetY,
         normalizedX: offsetX / rect.width,
         normalizedY: offsetY / rect.height,
+        fontSize: DEFAULT_TEXT_FONT_SIZE,
       });
-      setTextValue("");
-      setTimeout(() => textInputRef.current?.focus(), 0);
     },
-    [isDrawer, tool, canvasRef, pendingText, commitPendingText],
+    [isDrawer, tool, canvasRef, editingText, commitEditingText],
   );
 
-  // After typing, move text to pending state (movable + deletable)
-  const handleTextConfirm = useCallback(() => {
-    if (!textInput || !textValue.trim()) {
-      setTextInput(null);
-      setTextValue("");
-      return;
-    }
-    setPendingText({
-      text: textValue.trim(),
-      x: textInput.x,
-      y: textInput.y,
-      normalizedX: textInput.normalizedX,
-      normalizedY: textInput.normalizedY,
-    });
-    setTextInput(null);
-    setTextValue("");
-  }, [textInput, textValue]);
+  // Update editing text fields
+  const handleEditingTextUpdate = useCallback(
+    (updates: Partial<EditingText>) => {
+      setEditingText((prev) => (prev ? { ...prev, ...updates } : null));
+    },
+    [],
+  );
 
-  // Delete pending text
-  const handleDeletePendingText = useCallback(() => {
-    setPendingText(null);
+  // Delete editing text
+  const handleEditingTextDelete = useCallback(() => {
+    setEditingText(null);
   }, []);
 
-  // Update pending text position after drag
-  const handlePendingTextMove = useCallback(
-    (x: number, y: number) => {
-      if (!pendingText) return;
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      setPendingText((prev) =>
-        prev
-          ? { ...prev, x, y, normalizedX: x / rect.width, normalizedY: y / rect.height }
-          : null,
-      );
-    },
-    [pendingText, canvasRef],
-  );
-
-  // When switching away from text tool, commit pending text
+  // When switching away from text tool, commit editing text
   const handleToolChange = useCallback(
     (t: ToolMode) => {
-      if (t !== "text" && pendingText) {
-        commitPendingText();
+      if (t !== "text" && editingText) {
+        commitEditingText();
       }
       setTool(t);
     },
-    [pendingText, commitPendingText],
+    [editingText, commitEditingText],
   );
 
   const handleSendChat = (text: string) => {
@@ -394,18 +349,11 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
             tool={tool}
             onResize={handleCanvasResize}
             onCanvasClick={handleCanvasClickForText}
-            textInput={textInput}
-            textValue={textValue}
-            onTextValueChange={setTextValue}
-            onTextConfirm={handleTextConfirm}
-            onTextCancel={() => { setTextInput(null); setTextValue(""); }}
-            textInputRef={textInputRef}
-            pendingText={pendingText}
-            onPendingTextMove={handlePendingTextMove}
-            onPendingTextDelete={handleDeletePendingText}
-            onPendingTextCommit={commitPendingText}
+            editingText={editingText}
+            onEditingTextUpdate={handleEditingTextUpdate}
+            onEditingTextDelete={handleEditingTextDelete}
+            onEditingTextCommit={commitEditingText}
             textColor={color}
-            displayFontSize={getDisplayFontSize()}
           />
           <Toolbar
             color={color}

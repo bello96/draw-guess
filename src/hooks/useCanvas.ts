@@ -196,8 +196,12 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
       ctx.fillStyle = stroke.color;
       ctx.textBaseline = "top";
       const px = stroke.points[0].x * canvas.width;
-      const py = stroke.points[0].y * canvas.height + fontSize * 0.1;
-      ctx.fillText(stroke.text, px, py);
+      const py = stroke.points[0].y * canvas.height;
+      const lineHeight = fontSize * 1.2;
+      const lines = stroke.text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], px, py + i * lineHeight);
+      }
     },
     [],
   );
