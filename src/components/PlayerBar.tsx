@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { tx } from "@twind/core";
 import type { PlayerInfo, GamePhase } from "../types/protocol";
 
@@ -23,6 +24,15 @@ export default function PlayerBar({
   onLeave,
 }: Props) {
   const isDrawer = myId === drawerId;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyLink = () => {
+    const url = `${window.location.origin}/${roomCode}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
 
   return (
     <div
@@ -41,6 +51,20 @@ export default function PlayerBar({
           >
             {roomCode}
           </span>
+          {players.length === 1 && (
+            <button
+              onClick={handleCopyLink}
+              className={tx(
+                "px-2 py-0.5 text-xs rounded-md transition",
+                copied
+                  ? "bg-green-100 text-green-700"
+                  : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100",
+              )}
+              title="复制房间链接分享给好友"
+            >
+              {copied ? "已复制" : "分享房间"}
+            </button>
+          )}
         </div>
 
         {/* Phase indicator */}
