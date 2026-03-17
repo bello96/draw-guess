@@ -74,6 +74,10 @@ export interface C_ContinueDrawing {
   type: "continueDrawing";
 }
 
+export interface C_Leave {
+  type: "leave";
+}
+
 export type ClientMessage =
   | C_Join
   | C_Draw
@@ -84,7 +88,8 @@ export type ClientMessage =
   | C_Chat
   | C_TextStroke
   | C_Transfer
-  | C_ContinueDrawing;
+  | C_ContinueDrawing
+  | C_Leave;
 
 // ============ Server → Client Messages ============
 

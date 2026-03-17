@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { tx } from "@twind/core";
 import { apiUrl } from "../api";
+// apiUrl used only for room creation
 
 interface Props {
   onEnterRoom: (roomCode: string, playerName: string) => void;
@@ -31,7 +32,7 @@ export default function Home({ onEnterRoom }: Props) {
     }
   };
 
-  const handleJoin = async () => {
+  const handleJoin = () => {
     if (!name.trim()) {
       setError("请输入昵称");
       return;
@@ -40,27 +41,8 @@ export default function Home({ onEnterRoom }: Props) {
       setError("请输入6位房间号");
       return;
     }
-    setLoading(true);
-    setError("");
-    try {
-      const res = await fetch(apiUrl(`/api/rooms/${joinCode}`));
-      const data = await res.json();
-      if (!data.created) {
-        setError("房间不存在");
-        setLoading(false);
-        return;
-      }
-      if (data.closed || data.playerCount >= 2) {
-        setError("房间已满，无法加入");
-        setLoading(false);
-        return;
-      }
-      onEnterRoom(joinCode, name.trim());
-    } catch {
-      setError("加入房间失败，请重试");
-    } finally {
-      setLoading(false);
-    }
+    // Go directly to room — server validates on WebSocket join
+    onEnterRoom(joinCode, name.trim());
   };
 
   return (

@@ -263,6 +263,9 @@ export class GameRoom implements DurableObject {
       case "continueDrawing":
         await this.onContinueDrawing(ws);
         break;
+      case "leave":
+        await this.onLeave(ws);
+        break;
     }
   }
 
@@ -331,6 +334,13 @@ export class GameRoom implements DurableObject {
   // ============ Message Handlers ============
 
   private async onJoin(ws: WebSocket, playerName: string, playerId?: string) {
+    // Reject joins to non-existent rooms
+    if (!this.created) {
+      this.send(ws, { type: "error", message: "房间不存在" });
+      try { ws.close(1000, "room not found"); } catch { /* ignore */ }
+      return;
+    }
+
     await this.touchActivity();
 
     if (playerId) {
@@ -676,6 +686,25 @@ export class GameRoom implements DurableObject {
     });
   }
 
+  /** Intentional leave — immediate removal, no grace period */
+  private async onLeave(ws: WebSocket) {
+    const player = this.getPlayer(ws);
+    if (!player) return;
+
+    ws.serializeAttachment(null);
+
+    // Process as actual leave immediately
+    await this.processActualLeave({
+      id: player.id,
+      name: player.name,
+      isOwner: player.isOwner,
+      disconnectedAt: 0,
+    });
+
+    try { ws.close(1000, "left"); } catch { /* ignore */ }
+  }
+
+  /** Unintentional disconnect — grace period for reconnection */
   private async onDisconnect(ws: WebSocket) {
     const player = this.getPlayer(ws);
     if (!player) return;

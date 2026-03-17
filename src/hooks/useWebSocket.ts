@@ -56,5 +56,12 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
     };
   }, []);
 
-  return { connected, lastMessage, send, addListener };
+  /** Send "leave" message before closing — triggers immediate removal on server */
+  const leave = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "leave" }));
+    }
+  }, []);
+
+  return { connected, lastMessage, send, addListener, leave };
 }

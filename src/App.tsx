@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from "react";
 import { tx } from "@twind/core";
 import Home from "./pages/Home";
 import Room from "./pages/Room";
-import { apiUrl } from "./api";
 
 /** Extract a 6-digit room code from the URL path, e.g. /438907 */
 function getRoomCodeFromUrl(): string {
@@ -25,8 +24,6 @@ export default function App() {
 
   // URL-based join flow
   const [urlJoinCode, setUrlJoinCode] = useState("");
-  const [urlJoinError, setUrlJoinError] = useState("");
-  const [urlJoinLoading, setUrlJoinLoading] = useState(false);
   const [showNicknameModal, setShowNicknameModal] = useState(false);
   const [modalName, setModalName] = useState("");
 
@@ -35,53 +32,19 @@ export default function App() {
     const code = getRoomCodeFromUrl();
     if (!code) return;
 
-    setUrlJoinCode(code);
-    setUrlJoinLoading(true);
-
     const savedName = sessionStorage.getItem(NICKNAME_KEY);
     const savedPlayerId = sessionStorage.getItem(PLAYER_ID_KEY);
 
-    // If we have a saved playerId, this is a reconnection (page refresh).
-    // Skip the room check and try to reconnect directly — the server will validate.
+    // Reconnection (page refresh) — go directly, server validates
     if (savedName && savedPlayerId) {
       enterRoom(code, savedName, savedPlayerId);
-      setUrlJoinCode("");
-      setUrlJoinLoading(false);
       return;
     }
 
-    fetch(apiUrl(`/api/rooms/${code}`))
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data.created) {
-          setUrlJoinError("房间不存在");
-          setTimeout(() => {
-            window.history.replaceState(null, "", "/");
-            setUrlJoinCode("");
-            setUrlJoinError("");
-          }, 2000);
-        } else if (data.closed || data.playerCount >= 2) {
-          setUrlJoinError("房间已满，无法加入");
-          setTimeout(() => {
-            window.history.replaceState(null, "", "/");
-            setUrlJoinCode("");
-            setUrlJoinError("");
-          }, 2000);
-        } else {
-          // Room exists and has space — new visitor, show nickname modal
-          setModalName(defaultNickname());
-          setShowNicknameModal(true);
-        }
-      })
-      .catch(() => {
-        setUrlJoinError("检查房间失败，请重试");
-        setTimeout(() => {
-          window.history.replaceState(null, "", "/");
-          setUrlJoinCode("");
-          setUrlJoinError("");
-        }, 2000);
-      })
-      .finally(() => setUrlJoinLoading(false));
+    // New visitor — show nickname modal immediately (no HTTP check, server validates on WS join)
+    setUrlJoinCode(code);
+    setModalName(defaultNickname());
+    setShowNicknameModal(true);
   }, []);
 
   const enterRoom = useCallback((code: string, name: string, existingPlayerId?: string) => {
@@ -112,37 +75,6 @@ export default function App() {
   if (roomCode) {
     return (
       <Room roomCode={roomCode} playerName={playerName} playerId={playerId} onLeave={leaveRoom} />
-    );
-  }
-
-  // URL join: loading or error overlay
-  if (urlJoinCode && (urlJoinLoading || urlJoinError)) {
-    return (
-      <div
-        className={tx(
-          "flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50",
-        )}
-      >
-        <div className={tx("bg-white rounded-2xl shadow-xl p-8 text-center")}>
-          {urlJoinLoading && (
-            <>
-              <div className={tx("text-4xl mb-4 animate-bounce")}>🎨</div>
-              <div className={tx("text-gray-500")}>
-                正在检查房间 {urlJoinCode} ...
-              </div>
-            </>
-          )}
-          {urlJoinError && (
-            <>
-              <div className={tx("text-4xl mb-4")}>😥</div>
-              <div className={tx("text-red-600 font-medium")}>{urlJoinError}</div>
-              <div className={tx("text-gray-400 text-sm mt-2")}>
-                即将返回首页...
-              </div>
-            </>
-          )}
-        </div>
-      </div>
     );
   }
 

@@ -38,6 +38,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Game state
   const [myId, setMyId] = useState<string | null>(null);
+  const myIdRef = useRef<string | null>(null);
   const [players, setPlayers] = useState<PlayerInfo[]>([]);
   const [drawerId, setDrawerId] = useState<string | null>(null);
   const [phase, setPhase] = useState<GamePhase>("waiting");
@@ -45,6 +46,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const [answerText, setAnswerText] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [confettiKey, setConfettiKey] = useState(0);
+  const [joinError, setJoinError] = useState("");
 
   // Drawing state
   const [color, setColor] = useState("#000000");
@@ -57,7 +59,13 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const isDrawer = myId !== null && myId === drawerId;
 
   // WebSocket
-  const { connected, send, addListener } = useWebSocket(roomCode, playerName, playerId);
+  const { connected, send, addListener, leave: wsLeave } = useWebSocket(roomCode, playerName, playerId);
+
+  // Wrap onLeave: send "leave" message first for instant server-side removal
+  const handleLeave = useCallback(() => {
+    wsLeave();
+    onLeave();
+  }, [wsLeave, onLeave]);
 
   // Canvas
   const { replayDraw, replayAll, clearCanvas, addTextStroke, strokesRef } = useCanvas({
@@ -94,6 +102,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       switch (msg.type) {
         case "roomState":
           setMyId(msg.yourId);
+          myIdRef.current = msg.yourId;
           // Persist playerId for reconnection on page refresh
           sessionStorage.setItem(PLAYER_ID_KEY, msg.yourId);
           setPlayers(msg.players);
@@ -193,12 +202,18 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           break;
 
         case "error":
-          addSystemMessage(`⚠️ ${msg.message}`);
+          // If we haven't joined yet (no myId), this is a join error — show and redirect
+          if (!myIdRef.current) {
+            setJoinError(msg.message);
+            setTimeout(() => onLeave(), 1500);
+          } else {
+            addSystemMessage(`⚠️ ${msg.message}`);
+          }
           break;
 
         case "roomClosed":
           addSystemMessage(`房间已关闭: ${msg.reason}`);
-          setTimeout(() => onLeave(), 2000);
+          setTimeout(() => onLeave(), 1500);
           break;
       }
     });
@@ -314,7 +329,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     setAnswerText(answer);
   };
 
-  if (!connected) {
+  if (!connected || !myId) {
     return (
       <div
         className={tx(
@@ -322,8 +337,18 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         )}
       >
         <div className={tx("text-center")}>
-          <div className={tx("text-4xl mb-4 animate-bounce")}>🎨</div>
-          <div className={tx("text-gray-500")}>连接中...</div>
+          {joinError ? (
+            <>
+              <div className={tx("text-4xl mb-4")}>😥</div>
+              <div className={tx("text-red-600 font-medium")}>{joinError}</div>
+              <div className={tx("text-gray-400 text-sm mt-2")}>即将返回首页...</div>
+            </>
+          ) : (
+            <>
+              <div className={tx("text-4xl mb-4 animate-bounce")}>🎨</div>
+              <div className={tx("text-gray-500")}>连接中...</div>
+            </>
+          )}
         </div>
       </div>
     );
@@ -343,7 +368,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         phase={phase}
         onTransfer={handleTransfer}
         onContinueDrawing={handleContinueDrawing}
-        onLeave={onLeave}
+        onLeave={handleLeave}
       />
 
       {/* Main content */}
