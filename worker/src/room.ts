@@ -32,6 +32,7 @@ interface DisconnectedPlayer {
 }
 
 const RECONNECT_GRACE_MS = 30_000; // 30 seconds
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 // ============ GameRoom Durable Object ============
 
@@ -46,6 +47,7 @@ export class GameRoom implements DurableObject {
   private closed = false;
   private roomCode = "";
   private disconnectedPlayers: Map<string, DisconnectedPlayer> = new Map();
+  private lastActivityAt = 0;
 
   // Transient state (not persisted, OK to lose on hibernation)
   private currentStrokePoints: { x: number; y: number }[] = [];
@@ -65,7 +67,7 @@ export class GameRoom implements DurableObject {
 
     const data = await this.state.storage.get<unknown>([
       "created", "drawerId", "phase", "answer", "closed", "roomCode", "strokes",
-      "disconnectedPlayers",
+      "disconnectedPlayers", "lastActivityAt",
     ]);
 
     this.created = (data.get("created") as boolean) ?? false;
@@ -78,6 +80,7 @@ export class GameRoom implements DurableObject {
 
     const dcRaw = data.get("disconnectedPlayers") as [string, DisconnectedPlayer][] | null;
     this.disconnectedPlayers = dcRaw ? new Map(dcRaw) : new Map();
+    this.lastActivityAt = (data.get("lastActivityAt") as number) ?? 0;
   }
 
   private async saveState() {
@@ -90,7 +93,34 @@ export class GameRoom implements DurableObject {
       roomCode: this.roomCode,
       strokes: this.strokes,
       disconnectedPlayers: Array.from(this.disconnectedPlayers.entries()),
+      lastActivityAt: this.lastActivityAt,
     });
+  }
+
+  /** Update last activity timestamp and schedule inactivity alarm */
+  private async touchActivity() {
+    this.lastActivityAt = Date.now();
+    await this.state.storage.put("lastActivityAt", this.lastActivityAt);
+    this.scheduleNextAlarm();
+  }
+
+  /** Schedule the earliest needed alarm (reconnect grace or inactivity timeout) */
+  private scheduleNextAlarm() {
+    const candidates: number[] = [];
+
+    // Reconnect grace deadlines
+    for (const dp of this.disconnectedPlayers.values()) {
+      candidates.push(dp.disconnectedAt + RECONNECT_GRACE_MS);
+    }
+
+    // Inactivity timeout
+    if (this.lastActivityAt > 0 && this.getEffectivePlayerCount() > 0) {
+      candidates.push(this.lastActivityAt + INACTIVITY_TIMEOUT_MS);
+    }
+
+    if (candidates.length > 0) {
+      this.state.storage.setAlarm(Math.min(...candidates));
+    }
   }
 
   /** Total player count including those in reconnection grace period */
@@ -183,6 +213,11 @@ export class GameRoom implements DurableObject {
       return;
     }
 
+    // Update activity on any player message
+    if (msg.type !== "join") {
+      await this.touchActivity();
+    }
+
     switch (msg.type) {
       case "join":
         await this.onJoin(ws, msg.playerName as string, msg.playerId as string | undefined);
@@ -245,34 +280,59 @@ export class GameRoom implements DurableObject {
     await this.ensureLoaded();
 
     const now = Date.now();
-    const expired: DisconnectedPlayer[] = [];
 
+    // --- 1. Process expired disconnected players ---
+    const expired: DisconnectedPlayer[] = [];
     for (const [id, dp] of this.disconnectedPlayers) {
       if (now - dp.disconnectedAt >= RECONNECT_GRACE_MS) {
         expired.push(dp);
         this.disconnectedPlayers.delete(id);
       }
     }
-
-    // Process each expired disconnected player as a real leave
     for (const dp of expired) {
       await this.processActualLeave(dp);
     }
 
-    // If there are still disconnected players waiting, schedule another alarm
-    if (this.disconnectedPlayers.size > 0) {
-      const nextExpiry = Math.min(
-        ...Array.from(this.disconnectedPlayers.values()).map(
-          (p) => p.disconnectedAt + RECONNECT_GRACE_MS,
-        ),
-      );
-      this.state.storage.setAlarm(nextExpiry);
+    // --- 2. Check inactivity timeout ---
+    if (
+      this.lastActivityAt > 0 &&
+      now - this.lastActivityAt >= INACTIVITY_TIMEOUT_MS &&
+      this.getEffectivePlayerCount() > 0
+    ) {
+      // Notify all connected players and destroy the room
+      this.broadcast({
+        type: "roomClosed",
+        reason: "房间超过10分钟无活动，已自动关闭",
+      });
+
+      // Close all WebSockets
+      for (const { ws } of this.getJoinedWebSockets()) {
+        ws.serializeAttachment(null);
+        try { ws.close(1000, "inactivity"); } catch { /* ignore */ }
+      }
+
+      // Reset room
+      this.created = false;
+      this.closed = false;
+      this.phase = "waiting";
+      this.drawerId = null;
+      this.answer = null;
+      this.strokes = [];
+      this.disconnectedPlayers.clear();
+      this.lastActivityAt = 0;
+      await this.saveState();
+      return;
     }
+
+    // --- 3. Schedule next alarm if needed ---
+    this.scheduleNextAlarm();
   }
 
   // ============ Message Handlers ============
 
   private async onJoin(ws: WebSocket, playerName: string, playerId?: string) {
+    await this.touchActivity();
+
     if (playerId) {
       // Check disconnectedPlayers first (normal reconnection after close was processed)
       const disconnected = this.disconnectedPlayers.get(playerId);
@@ -634,7 +694,7 @@ export class GameRoom implements DurableObject {
     await this.saveState();
 
     // Schedule alarm to clean up if they don't reconnect
-    this.state.storage.setAlarm(Date.now() + RECONNECT_GRACE_MS);
+    this.scheduleNextAlarm();
   }
 
   /** Called when a disconnected player's grace period expires without reconnecting */

@@ -198,6 +198,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
         case "roomClosed":
           addSystemMessage(`房间已关闭: ${msg.reason}`);
+          setTimeout(() => onLeave(), 2000);
           break;
       }
     });
@@ -211,6 +212,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     addTextStroke,
     addSystemMessage,
     strokesRef,
+    onLeave,
   ]);
 
   const handleClear = () => {
