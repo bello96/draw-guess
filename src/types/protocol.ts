@@ -22,6 +22,7 @@ export interface SerializedStroke {
 export interface C_Join {
   type: "join";
   playerName: string;
+  playerId?: string; // For reconnection — reuse previous player ID
 }
 
 export interface C_Draw {

@@ -23,6 +23,16 @@ interface PlayerAttachment {
   isOwner: boolean;
 }
 
+// Player info stored during reconnection grace period
+interface DisconnectedPlayer {
+  id: string;
+  name: string;
+  isOwner: boolean;
+  disconnectedAt: number;
+}
+
+const RECONNECT_GRACE_MS = 30_000; // 30 seconds
+
 // ============ GameRoom Durable Object ============
 
 export class GameRoom implements DurableObject {
@@ -35,6 +45,7 @@ export class GameRoom implements DurableObject {
   private strokes: SerializedStroke[] = [];
   private closed = false;
   private roomCode = "";
+  private disconnectedPlayers: Map<string, DisconnectedPlayer> = new Map();
 
   // Transient state (not persisted, OK to lose on hibernation)
   private currentStrokePoints: { x: number; y: number }[] = [];
@@ -54,6 +65,7 @@ export class GameRoom implements DurableObject {
 
     const data = await this.state.storage.get<unknown>([
       "created", "drawerId", "phase", "answer", "closed", "roomCode", "strokes",
+      "disconnectedPlayers",
     ]);
 
     this.created = (data.get("created") as boolean) ?? false;
@@ -63,6 +75,9 @@ export class GameRoom implements DurableObject {
     this.closed = (data.get("closed") as boolean) ?? false;
     this.roomCode = (data.get("roomCode") as string) ?? "";
     this.strokes = (data.get("strokes") as SerializedStroke[]) ?? [];
+
+    const dcRaw = data.get("disconnectedPlayers") as [string, DisconnectedPlayer][] | null;
+    this.disconnectedPlayers = dcRaw ? new Map(dcRaw) : new Map();
   }
 
   private async saveState() {
@@ -74,7 +89,13 @@ export class GameRoom implements DurableObject {
       closed: this.closed,
       roomCode: this.roomCode,
       strokes: this.strokes,
+      disconnectedPlayers: Array.from(this.disconnectedPlayers.entries()),
     });
+  }
+
+  /** Total player count including those in reconnection grace period */
+  private getEffectivePlayerCount(): number {
+    return this.getJoinedCount() + this.disconnectedPlayers.size;
   }
 
   // ============ Player helpers using WebSocket attachments ============
@@ -125,7 +146,7 @@ export class GameRoom implements DurableObject {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response(
         JSON.stringify({
-          playerCount: this.getJoinedCount(),
+          playerCount: this.getEffectivePlayerCount(),
           closed: this.closed,
           phase: this.phase,
           created: this.created,
@@ -134,7 +155,8 @@ export class GameRoom implements DurableObject {
       );
     }
 
-    // WebSocket upgrade
+    // WebSocket upgrade — allow if there's room for active connections
+    // (reconnecting players will be validated in onJoin by matching their playerId)
     if (this.getJoinedCount() >= 2) {
       return new Response("Room is full", { status: 403 });
     }
@@ -163,7 +185,7 @@ export class GameRoom implements DurableObject {
 
     switch (msg.type) {
       case "join":
-        await this.onJoin(ws, msg.playerName as string);
+        await this.onJoin(ws, msg.playerName as string, msg.playerId as string | undefined);
         break;
       case "draw":
         await this.onDraw(ws, msg as {
@@ -220,18 +242,75 @@ export class GameRoom implements DurableObject {
   }
 
   async alarm() {
-    // No-op: timers and auto-transfer removed
+    await this.ensureLoaded();
+
+    const now = Date.now();
+    const expired: DisconnectedPlayer[] = [];
+
+    for (const [id, dp] of this.disconnectedPlayers) {
+      if (now - dp.disconnectedAt >= RECONNECT_GRACE_MS) {
+        expired.push(dp);
+        this.disconnectedPlayers.delete(id);
+      }
+    }
+
+    // Process each expired disconnected player as a real leave
+    for (const dp of expired) {
+      await this.processActualLeave(dp);
+    }
+
+    // If there are still disconnected players waiting, schedule another alarm
+    if (this.disconnectedPlayers.size > 0) {
+      const nextExpiry = Math.min(
+        ...Array.from(this.disconnectedPlayers.values()).map(
+          (p) => p.disconnectedAt + RECONNECT_GRACE_MS,
+        ),
+      );
+      this.state.storage.setAlarm(nextExpiry);
+    }
   }
 
   // ============ Message Handlers ============
 
-  private async onJoin(ws: WebSocket, playerName: string) {
-    if (this.getJoinedCount() >= 2) {
+  private async onJoin(ws: WebSocket, playerName: string, playerId?: string) {
+    // Check if this is a reconnection (player ID matches a disconnected player)
+    const disconnected = playerId ? this.disconnectedPlayers.get(playerId) : undefined;
+
+    if (disconnected) {
+      // ---- Reconnection: restore the player ----
+      this.disconnectedPlayers.delete(playerId!);
+
+      const player: PlayerAttachment = {
+        id: disconnected.id,
+        name: disconnected.name,
+        isOwner: disconnected.isOwner,
+      };
+
+      ws.serializeAttachment(player);
+      await this.saveState();
+
+      // Send full state to reconnecting player (they get their old ID back)
+      this.send(ws, {
+        type: "roomState",
+        roomCode: this.roomCode,
+        players: this.getPlayerInfoList(),
+        drawerId: this.drawerId,
+        phase: this.phase,
+        strokes: this.strokes,
+        yourId: player.id,
+        answerLength: this.answer ? this.answer.length : undefined,
+      });
+
+      return;
+    }
+
+    // ---- New player join ----
+    if (this.getEffectivePlayerCount() >= 2) {
       this.send(ws, { type: "error", message: "房间已满" });
       return;
     }
 
-    const isOwner = this.getJoinedCount() === 0;
+    const isOwner = this.getEffectivePlayerCount() === 0;
     const player: PlayerAttachment = {
       id: crypto.randomUUID(),
       name: playerName || (isOwner ? "玩家1" : "玩家2"),
@@ -512,17 +591,43 @@ export class GameRoom implements DurableObject {
     // Clear attachment so this ws is no longer counted as a joined player
     ws.serializeAttachment(null);
 
-    const remaining = this.getJoinedWebSockets();
+    // Store in disconnectedPlayers for reconnection grace period
+    this.disconnectedPlayers.set(player.id, {
+      id: player.id,
+      name: player.name,
+      isOwner: player.isOwner,
+      disconnectedAt: Date.now(),
+    });
 
-    if (remaining.length > 0) {
+    await this.saveState();
+
+    // Schedule alarm to clean up if they don't reconnect
+    this.state.storage.setAlarm(Date.now() + RECONNECT_GRACE_MS);
+  }
+
+  /** Called when a disconnected player's grace period expires without reconnecting */
+  private async processActualLeave(dp: DisconnectedPlayer) {
+    const remaining = this.getJoinedWebSockets();
+    // Also consider other disconnected players still in grace period
+    const otherDisconnected = Array.from(this.disconnectedPlayers.values());
+
+    const allRemaining = [
+      ...remaining.map((r) => r.player),
+      ...otherDisconnected,
+    ];
+
+    if (allRemaining.length > 0) {
+      // Notify connected players about the leave
       this.broadcast({
         type: "playerLeft",
-        playerId: player.id,
+        playerId: dp.id,
       });
 
-      // If the drawer left, give draw permission to the remaining player
-      if (player.id === this.drawerId) {
+      // If the drawer left, give draw permission to remaining
+      if (dp.id === this.drawerId && remaining.length > 0) {
         this.drawerId = remaining[0].player.id;
+      } else if (dp.id === this.drawerId && otherDisconnected.length > 0) {
+        this.drawerId = otherDisconnected[0].id;
       }
 
       // Re-open the room so a new player can join
@@ -538,7 +643,7 @@ export class GameRoom implements DurableObject {
         drawerId: this.drawerId!,
       });
     } else {
-      // Room is empty, reset everything
+      // Room is truly empty, reset everything
       this.created = false;
       this.closed = false;
       this.phase = "waiting";

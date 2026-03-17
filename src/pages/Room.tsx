@@ -20,8 +20,11 @@ import { useEffect } from "react";
 interface Props {
   roomCode: string;
   playerName: string;
+  playerId?: string;
   onLeave: () => void;
 }
+
+const PLAYER_ID_KEY = "draw-guess-playerId";
 
 let msgIdCounter = 0;
 function nextMsgId() {
@@ -30,7 +33,7 @@ function nextMsgId() {
 
 const DEFAULT_TEXT_FONT_SIZE = 24;
 
-export default function Room({ roomCode, playerName, onLeave }: Props) {
+export default function Room({ roomCode, playerName, playerId, onLeave }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Game state
@@ -54,7 +57,7 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
   const isDrawer = myId !== null && myId === drawerId;
 
   // WebSocket
-  const { connected, send, addListener } = useWebSocket(roomCode, playerName);
+  const { connected, send, addListener } = useWebSocket(roomCode, playerName, playerId);
 
   // Canvas
   const { replayDraw, replayAll, clearCanvas, addTextStroke, strokesRef } = useCanvas({
@@ -91,6 +94,8 @@ export default function Room({ roomCode, playerName, onLeave }: Props) {
       switch (msg.type) {
         case "roomState":
           setMyId(msg.yourId);
+          // Persist playerId for reconnection on page refresh
+          sessionStorage.setItem(PLAYER_ID_KEY, msg.yourId);
           setPlayers(msg.players);
           setDrawerId(msg.drawerId);
           setPhase(msg.phase);

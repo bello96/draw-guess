@@ -16,10 +16,12 @@ function defaultNickname(): string {
 }
 
 const NICKNAME_KEY = "draw-guess-nickname";
+const PLAYER_ID_KEY = "draw-guess-playerId";
 
 export default function App() {
   const [roomCode, setRoomCode] = useState("");
   const [playerName, setPlayerName] = useState("");
+  const [playerId, setPlayerId] = useState<string | undefined>(undefined);
 
   // URL-based join flow
   const [urlJoinCode, setUrlJoinCode] = useState("");
@@ -35,6 +37,18 @@ export default function App() {
 
     setUrlJoinCode(code);
     setUrlJoinLoading(true);
+
+    const savedName = sessionStorage.getItem(NICKNAME_KEY);
+    const savedPlayerId = sessionStorage.getItem(PLAYER_ID_KEY);
+
+    // If we have a saved playerId, this is a reconnection (page refresh).
+    // Skip the room check and try to reconnect directly — the server will validate.
+    if (savedName && savedPlayerId) {
+      enterRoom(code, savedName, savedPlayerId);
+      setUrlJoinCode("");
+      setUrlJoinLoading(false);
+      return;
+    }
 
     fetch(apiUrl(`/api/rooms/${code}`))
       .then((res) => res.json())
@@ -54,17 +68,9 @@ export default function App() {
             setUrlJoinError("");
           }, 2000);
         } else {
-          // Room exists and has space
-          const savedName = sessionStorage.getItem(NICKNAME_KEY);
-          if (savedName) {
-            // Rejoin after refresh — reuse saved nickname directly
-            enterRoom(code, savedName);
-            setUrlJoinCode("");
-          } else {
-            // New visitor — show nickname modal
-            setModalName(defaultNickname());
-            setShowNicknameModal(true);
-          }
+          // Room exists and has space — new visitor, show nickname modal
+          setModalName(defaultNickname());
+          setShowNicknameModal(true);
         }
       })
       .catch(() => {
@@ -78,9 +84,10 @@ export default function App() {
       .finally(() => setUrlJoinLoading(false));
   }, []);
 
-  const enterRoom = useCallback((code: string, name: string) => {
+  const enterRoom = useCallback((code: string, name: string, existingPlayerId?: string) => {
     setPlayerName(name);
     setRoomCode(code);
+    if (existingPlayerId) setPlayerId(existingPlayerId);
     sessionStorage.setItem(NICKNAME_KEY, name);
     window.history.replaceState(null, "", `/${code}`);
   }, []);
@@ -88,7 +95,9 @@ export default function App() {
   const leaveRoom = useCallback(() => {
     setRoomCode("");
     setPlayerName("");
+    setPlayerId(undefined);
     sessionStorage.removeItem(NICKNAME_KEY);
+    sessionStorage.removeItem(PLAYER_ID_KEY);
     window.history.replaceState(null, "", "/");
   }, []);
 
@@ -102,7 +111,7 @@ export default function App() {
   // In room
   if (roomCode) {
     return (
-      <Room roomCode={roomCode} playerName={playerName} onLeave={leaveRoom} />
+      <Room roomCode={roomCode} playerName={playerName} playerId={playerId} onLeave={leaveRoom} />
     );
   }
 

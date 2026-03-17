@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import type { ClientMessage, ServerMessage } from "../types/protocol";
 import { wsUrl } from "../api";
 
-export function useWebSocket(roomCode: string, playerName: string) {
+export function useWebSocket(roomCode: string, playerName: string, playerId?: string) {
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<ServerMessage | null>(null);
@@ -16,7 +16,9 @@ export function useWebSocket(roomCode: string, playerName: string) {
 
     ws.onopen = () => {
       setConnected(true);
-      ws.send(JSON.stringify({ type: "join", playerName }));
+      const joinMsg: Record<string, unknown> = { type: "join", playerName };
+      if (playerId) joinMsg.playerId = playerId;
+      ws.send(JSON.stringify(joinMsg));
     };
 
     ws.onmessage = (event) => {
@@ -39,7 +41,7 @@ export function useWebSocket(roomCode: string, playerName: string) {
       ws.close();
       wsRef.current = null;
     };
-  }, [roomCode, playerName]);
+  }, [roomCode, playerName, playerId]);
 
   const send = useCallback((msg: ClientMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
