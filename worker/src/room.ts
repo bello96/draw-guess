@@ -273,35 +273,67 @@ export class GameRoom implements DurableObject {
   // ============ Message Handlers ============
 
   private async onJoin(ws: WebSocket, playerName: string, playerId?: string) {
-    // Check if this is a reconnection (player ID matches a disconnected player)
-    const disconnected = playerId ? this.disconnectedPlayers.get(playerId) : undefined;
+    if (playerId) {
+      // Check disconnectedPlayers first (normal reconnection after close was processed)
+      const disconnected = this.disconnectedPlayers.get(playerId);
 
-    if (disconnected) {
-      // ---- Reconnection: restore the player ----
-      this.disconnectedPlayers.delete(playerId!);
+      if (disconnected) {
+        // ---- Reconnection from disconnectedPlayers ----
+        this.disconnectedPlayers.delete(playerId);
 
-      const player: PlayerAttachment = {
-        id: disconnected.id,
-        name: disconnected.name,
-        isOwner: disconnected.isOwner,
-      };
+        const player: PlayerAttachment = {
+          id: disconnected.id,
+          name: disconnected.name,
+          isOwner: disconnected.isOwner,
+        };
 
-      ws.serializeAttachment(player);
-      await this.saveState();
+        ws.serializeAttachment(player);
+        await this.saveState();
 
-      // Send full state to reconnecting player (they get their old ID back)
-      this.send(ws, {
-        type: "roomState",
-        roomCode: this.roomCode,
-        players: this.getPlayerInfoList(),
-        drawerId: this.drawerId,
-        phase: this.phase,
-        strokes: this.strokes,
-        yourId: player.id,
-        answerLength: this.answer ? this.answer.length : undefined,
-      });
+        this.send(ws, {
+          type: "roomState",
+          roomCode: this.roomCode,
+          players: this.getPlayerInfoList(),
+          drawerId: this.drawerId,
+          phase: this.phase,
+          strokes: this.strokes,
+          yourId: player.id,
+          answerLength: this.answer ? this.answer.length : undefined,
+        });
 
-      return;
+        return;
+      }
+
+      // Check active WebSockets — the old connection may not have closed yet (race condition)
+      for (const { ws: oldWs, player: existing } of this.getJoinedWebSockets()) {
+        if (existing.id === playerId && oldWs !== ws) {
+          // Take over: close old WS, reuse identity on new WS
+          oldWs.serializeAttachment(null);
+          try { oldWs.close(1000, "reconnected"); } catch { /* already closed */ }
+
+          const player: PlayerAttachment = {
+            id: existing.id,
+            name: existing.name,
+            isOwner: existing.isOwner,
+          };
+
+          ws.serializeAttachment(player);
+          await this.saveState();
+
+          this.send(ws, {
+            type: "roomState",
+            roomCode: this.roomCode,
+            players: this.getPlayerInfoList(),
+            drawerId: this.drawerId,
+            phase: this.phase,
+            strokes: this.strokes,
+            yourId: player.id,
+            answerLength: this.answer ? this.answer.length : undefined,
+          });
+
+          return;
+        }
+      }
     }
 
     // ---- New player join ----
