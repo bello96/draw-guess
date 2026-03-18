@@ -419,6 +419,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             messages={messages}
             phase={phase}
             isDrawer={isDrawer}
+            myId={myId}
             answerLength={answerLength}
             answerText={answerText}
             onSendChat={handleSendChat}

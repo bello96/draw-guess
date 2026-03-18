@@ -8,6 +8,7 @@ interface Props {
   messages: ChatMessage[];
   phase: GamePhase;
   isDrawer: boolean;
+  myId: string | null;
   answerLength: number | null;
   answerText: string | null;
   onSendChat: (text: string) => void;
@@ -60,6 +61,7 @@ export default function ChatPanel({
   messages,
   phase,
   isDrawer,
+  myId,
   answerLength,
   answerText,
   onSendChat,
@@ -167,7 +169,7 @@ export default function ChatPanel({
                     : "bg-red-50 text-red-600 border border-red-200",
                 )}
               >
-                <span className={tx("font-medium")}>{msg.playerName}</span>
+                <span className={tx("font-medium")}>{msg.playerName}{msg.playerId === myId && "（你）"}</span>
                 <span className={tx("mx-1")}>猜：</span>
                 <span>{msg.text}</span>
                 <span className={tx("ml-2")}>
@@ -177,7 +179,7 @@ export default function ChatPanel({
             ) : (
               <div className={tx("text-sm")}>
                 <span className={tx("font-medium text-indigo-600")}>
-                  {msg.playerName}
+                  {msg.playerName}{msg.playerId === myId && "（你）"}
                 </span>
                 <span className={tx("text-gray-400 mx-1")}>:</span>
                 <span className={tx("text-gray-700")}>{msg.text}</span>
