@@ -95,7 +95,9 @@ export class GameRoom implements DurableObject {
     this.chatHistory = (data.get("chatHistory") as ChatHistoryEntry[]) ?? [];
 
     const dcRaw = data.get("disconnectedPlayers") as [string, DisconnectedPlayer][] | null;
-    this.disconnectedPlayers = dcRaw ? new Map(dcRaw) : new Map();
+    this.disconnectedPlayers = dcRaw
+      ? new Map(dcRaw.map(([id, dp]) => [id, { ...dp, graceMs: dp.graceMs ?? RECONNECT_GRACE_MS }]))
+      : new Map();
     this.lastActivityAt = (data.get("lastActivityAt") as number) ?? 0;
   }
 
