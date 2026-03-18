@@ -42,6 +42,16 @@ export default {
       });
     }
 
+    // POST /api/rooms/:code/quickleave - Beacon-based quick leave
+    const quickleaveMatch = url.pathname.match(/^\/api\/rooms\/(\d{6})\/quickleave$/);
+    if (quickleaveMatch && request.method === "POST") {
+      const roomCode = quickleaveMatch[1];
+      const doId = env.GAME_ROOM.idFromName(roomCode);
+      const stub = env.GAME_ROOM.get(doId);
+      await stub.fetch(request);
+      return new Response("OK", { headers: corsHeaders() });
+    }
+
     // GET /api/rooms/:code/ws - WebSocket upgrade
     const wsMatch = url.pathname.match(/^\/api\/rooms\/(\d{6})\/ws$/);
     if (wsMatch) {

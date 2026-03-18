@@ -31,6 +31,7 @@ interface PlayerAttachment {
   id: string;
   name: string;
   isOwner: boolean;
+  quickLeave?: boolean; // Set by quickleave beacon — use short grace on disconnect
 }
 
 // Player info stored during reconnection grace period
@@ -39,9 +40,11 @@ interface DisconnectedPlayer {
   name: string;
   isOwner: boolean;
   disconnectedAt: number;
+  graceMs: number; // Grace period duration (short for quickleave, long for normal)
 }
 
 const RECONNECT_GRACE_MS = 30_000; // 30 seconds
+const QUICK_LEAVE_GRACE_MS = 5_000; // 5 seconds (enough for page refresh, fast for close/navigate)
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_CHAT_HISTORY = 200;
 
@@ -124,7 +127,7 @@ export class GameRoom implements DurableObject {
 
     // Reconnect grace deadlines
     for (const dp of this.disconnectedPlayers.values()) {
-      candidates.push(dp.disconnectedAt + RECONNECT_GRACE_MS);
+      candidates.push(dp.disconnectedAt + dp.graceMs);
     }
 
     // Inactivity timeout
@@ -183,6 +186,31 @@ export class GameRoom implements DurableObject {
       this.created = true;
       this.roomCode = code;
       await this.state.storage.put({ created: true, roomCode: code });
+      return new Response("OK");
+    }
+
+    // POST /quickleave — beacon from pagehide, shorten grace period
+    if (url.pathname.endsWith("/quickleave") && request.method === "POST") {
+      const playerId = url.searchParams.get("playerId");
+      if (!playerId) return new Response("Missing playerId", { status: 400 });
+
+      // Case 1: Player still connected (beacon arrived before WS close) — mark for short grace
+      for (const { ws, player } of this.getJoinedWebSockets()) {
+        if (player.id === playerId) {
+          ws.serializeAttachment({ ...player, quickLeave: true });
+          return new Response("OK");
+        }
+      }
+
+      // Case 2: Already disconnected (WS closed before beacon) — shorten grace
+      const dp = this.disconnectedPlayers.get(playerId);
+      if (dp) {
+        dp.disconnectedAt = Date.now();
+        dp.graceMs = QUICK_LEAVE_GRACE_MS;
+        await this.saveState();
+        this.scheduleNextAlarm();
+      }
+
       return new Response("OK");
     }
 
@@ -301,7 +329,7 @@ export class GameRoom implements DurableObject {
     // --- 1. Process expired disconnected players ---
     const expired: DisconnectedPlayer[] = [];
     for (const [id, dp] of this.disconnectedPlayers) {
-      if (now - dp.disconnectedAt >= RECONNECT_GRACE_MS) {
+      if (now - dp.disconnectedAt >= dp.graceMs) {
         expired.push(dp);
         this.disconnectedPlayers.delete(id);
       }
@@ -748,6 +776,7 @@ export class GameRoom implements DurableObject {
       name: player.name,
       isOwner: player.isOwner,
       disconnectedAt: 0,
+      graceMs: 0,
     });
 
     try { ws.close(1000, "left"); } catch { /* ignore */ }
@@ -761,12 +790,16 @@ export class GameRoom implements DurableObject {
     // Clear attachment so this ws is no longer counted as a joined player
     ws.serializeAttachment(null);
 
+    // Use short grace if quickleave beacon was received (page unload — refresh/close/navigate)
+    const graceMs = player.quickLeave ? QUICK_LEAVE_GRACE_MS : RECONNECT_GRACE_MS;
+
     // Store in disconnectedPlayers for reconnection grace period
     this.disconnectedPlayers.set(player.id, {
       id: player.id,
       name: player.name,
       isOwner: player.isOwner,
       disconnectedAt: Date.now(),
+      graceMs,
     });
 
     await this.saveState();

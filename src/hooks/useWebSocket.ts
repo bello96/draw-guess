@@ -1,14 +1,21 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { ClientMessage, ServerMessage } from "../types/protocol";
-import { wsUrl } from "../api";
+import { apiUrl, wsUrl } from "../api";
+
+const PLAYER_ID_KEY = "draw-guess-playerId";
 
 export function useWebSocket(roomCode: string, playerName: string, playerId?: string) {
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<ServerMessage | null>(null);
   const listenersRef = useRef<Set<(msg: ServerMessage) => void>>(new Set());
+  const isUnloadingRef = useRef(false);
+  const hasLeftRef = useRef(false);
 
   useEffect(() => {
+    isUnloadingRef.current = false;
+    hasLeftRef.current = false;
+
     const url = wsUrl(`/api/rooms/${roomCode}/ws`);
 
     const ws = new WebSocket(url);
@@ -37,7 +44,36 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
       setConnected(false);
     };
 
+    // Detect page unload (refresh / close / navigate to external URL)
+    const onBeforeUnload = () => {
+      isUnloadingRef.current = true;
+    };
+
+    // Send quickleave beacon on page hide — tells server to use a short
+    // grace period (5s) instead of the default 30s.  Enough for refresh
+    // to reconnect, but fast removal for tab close / external navigation.
+    const onPageHide = () => {
+      if (hasLeftRef.current) return;
+      const pid = sessionStorage.getItem(PLAYER_ID_KEY);
+      if (pid && navigator.sendBeacon) {
+        navigator.sendBeacon(
+          apiUrl(`/api/rooms/${roomCode}/quickleave?playerId=${pid}`),
+        );
+      }
+    };
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", onPageHide);
+
     return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onPageHide);
+
+      // SPA navigation (not page unload) — send "leave" for immediate removal
+      if (!isUnloadingRef.current && !hasLeftRef.current && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "leave" }));
+      }
+
       ws.close();
       wsRef.current = null;
     };
@@ -60,6 +96,7 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
   const leave = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "leave" }));
+      hasLeftRef.current = true;
     }
   }, []);
 
