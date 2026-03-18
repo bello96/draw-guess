@@ -16,6 +16,16 @@ interface SerializedStroke {
   fontSize?: number;
 }
 
+// Chat/guess message stored for replay on reconnection
+interface ChatHistoryEntry {
+  kind: "chat" | "guess";
+  playerId: string;
+  playerName: string;
+  text: string;
+  timestamp: number;
+  correct?: boolean;
+}
+
 // Data stored as WebSocket attachment (survives hibernation)
 interface PlayerAttachment {
   id: string;
@@ -33,6 +43,7 @@ interface DisconnectedPlayer {
 
 const RECONNECT_GRACE_MS = 30_000; // 30 seconds
 const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_CHAT_HISTORY = 200;
 
 // ============ GameRoom Durable Object ============
 
@@ -44,6 +55,7 @@ export class GameRoom implements DurableObject {
   private phase: GamePhase = "waiting";
   private answer: string | null = null;
   private strokes: SerializedStroke[] = [];
+  private chatHistory: ChatHistoryEntry[] = [];
   private closed = false;
   private roomCode = "";
   private disconnectedPlayers: Map<string, DisconnectedPlayer> = new Map();
@@ -67,7 +79,7 @@ export class GameRoom implements DurableObject {
 
     const data = await this.state.storage.get<unknown>([
       "created", "drawerId", "phase", "answer", "closed", "roomCode", "strokes",
-      "disconnectedPlayers", "lastActivityAt",
+      "chatHistory", "disconnectedPlayers", "lastActivityAt",
     ]);
 
     this.created = (data.get("created") as boolean) ?? false;
@@ -77,6 +89,7 @@ export class GameRoom implements DurableObject {
     this.closed = (data.get("closed") as boolean) ?? false;
     this.roomCode = (data.get("roomCode") as string) ?? "";
     this.strokes = (data.get("strokes") as SerializedStroke[]) ?? [];
+    this.chatHistory = (data.get("chatHistory") as ChatHistoryEntry[]) ?? [];
 
     const dcRaw = data.get("disconnectedPlayers") as [string, DisconnectedPlayer][] | null;
     this.disconnectedPlayers = dcRaw ? new Map(dcRaw) : new Map();
@@ -92,6 +105,7 @@ export class GameRoom implements DurableObject {
       closed: this.closed,
       roomCode: this.roomCode,
       strokes: this.strokes,
+      chatHistory: this.chatHistory,
       disconnectedPlayers: Array.from(this.disconnectedPlayers.entries()),
       lastActivityAt: this.lastActivityAt,
     });
@@ -245,7 +259,7 @@ export class GameRoom implements DurableObject {
         await this.onGuess(ws, msg.text as string);
         break;
       case "chat":
-        this.onChat(ws, msg.text as string);
+        await this.onChat(ws, msg.text as string);
         break;
       case "transfer":
         await this.onTransfer(ws);
@@ -321,6 +335,7 @@ export class GameRoom implements DurableObject {
       this.drawerId = null;
       this.answer = null;
       this.strokes = [];
+      this.chatHistory = [];
       this.disconnectedPlayers.clear();
       this.lastActivityAt = 0;
       await this.saveState();
@@ -367,8 +382,10 @@ export class GameRoom implements DurableObject {
           drawerId: this.drawerId,
           phase: this.phase,
           strokes: this.strokes,
+          chatHistory: this.chatHistory,
           yourId: player.id,
           answerLength: this.answer ? this.answer.length : undefined,
+          answer: player.id === this.drawerId && this.answer ? this.answer : undefined,
         });
 
         return;
@@ -397,8 +414,10 @@ export class GameRoom implements DurableObject {
             drawerId: this.drawerId,
             phase: this.phase,
             strokes: this.strokes,
+            chatHistory: this.chatHistory,
             yourId: player.id,
             answerLength: this.answer ? this.answer.length : undefined,
+            answer: player.id === this.drawerId && this.answer ? this.answer : undefined,
           });
 
           return;
@@ -440,6 +459,7 @@ export class GameRoom implements DurableObject {
       drawerId: this.drawerId,
       phase: this.phase,
       strokes: this.strokes,
+      chatHistory: this.chatHistory,
       yourId: player.id,
     });
 
@@ -594,14 +614,28 @@ export class GameRoom implements DurableObject {
     if (this.phase !== "guessing") return;
     if (!text || text.trim().length === 0) return;
 
-    const guess = text.trim().toLowerCase();
+    const trimmed = text.trim();
+    const guess = trimmed.toLowerCase();
     const correct = guess === this.answer;
+
+    this.chatHistory.push({
+      kind: "guess",
+      playerId: player.id,
+      playerName: player.name,
+      text: trimmed,
+      timestamp: Date.now(),
+      correct,
+    });
+    if (this.chatHistory.length > MAX_CHAT_HISTORY) {
+      this.chatHistory = this.chatHistory.slice(-MAX_CHAT_HISTORY);
+    }
+    await this.state.storage.put("chatHistory", this.chatHistory);
 
     this.broadcast({
       type: "guessResult",
       playerId: player.id,
       playerName: player.name,
-      text: text.trim(),
+      text: trimmed,
       correct,
     });
 
@@ -618,17 +652,32 @@ export class GameRoom implements DurableObject {
     }
   }
 
-  private onChat(ws: WebSocket, text: string) {
+  private async onChat(ws: WebSocket, text: string) {
     const player = this.getPlayer(ws);
     if (!player) return;
     if (!text || text.trim().length === 0) return;
+
+    const timestamp = Date.now();
+    const trimmed = text.trim();
+
+    this.chatHistory.push({
+      kind: "chat",
+      playerId: player.id,
+      playerName: player.name,
+      text: trimmed,
+      timestamp,
+    });
+    if (this.chatHistory.length > MAX_CHAT_HISTORY) {
+      this.chatHistory = this.chatHistory.slice(-MAX_CHAT_HISTORY);
+    }
+    await this.state.storage.put("chatHistory", this.chatHistory);
 
     this.broadcast({
       type: "chat",
       playerId: player.id,
       playerName: player.name,
-      text: text.trim(),
-      timestamp: Date.now(),
+      text: trimmed,
+      timestamp,
     });
   }
 
@@ -771,6 +820,7 @@ export class GameRoom implements DurableObject {
       this.drawerId = null;
       this.answer = null;
       this.strokes = [];
+      this.chatHistory = [];
       await this.saveState();
     }
   }

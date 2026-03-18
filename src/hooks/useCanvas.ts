@@ -209,12 +209,15 @@ export function useCanvas({ canvasRef, isDrawer, color, lineWidth, tool, send }:
   // Replay all strokes (on join, undo, or resize)
   const replayAll = useCallback(
     (strokes: SerializedStroke[]) => {
+      // Always save strokes even if canvas isn't mounted yet —
+      // the resize callback will replay them once the canvas is ready.
+      strokesRef.current = strokes;
+
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      strokesRef.current = strokes;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       for (const stroke of strokes) {

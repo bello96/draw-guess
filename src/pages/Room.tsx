@@ -12,6 +12,7 @@ import type {
   PlayerInfo,
   GamePhase,
   ChatMessage,
+  ChatHistoryEntry,
   ServerMessage,
 } from "../types/protocol";
 import type { ToolMode } from "../components/Toolbar";
@@ -109,8 +110,20 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           setDrawerId(msg.drawerId);
           setPhase(msg.phase);
           if (msg.answerLength) setAnswerLength(msg.answerLength);
-          if (msg.strokes.length > 0) {
-            replayAll(msg.strokes);
+          if (msg.answer) setAnswerText(msg.answer);
+          // Replay strokes (strokesRef is saved even if canvas isn't mounted yet)
+          replayAll(msg.strokes);
+          // Restore chat history
+          if (msg.chatHistory && msg.chatHistory.length > 0) {
+            setMessages(msg.chatHistory.map((entry: ChatHistoryEntry) => ({
+              id: nextMsgId(),
+              playerId: entry.playerId,
+              playerName: entry.playerName,
+              text: entry.text,
+              timestamp: entry.timestamp,
+              kind: entry.kind,
+              correct: entry.correct,
+            })));
           }
           break;
 

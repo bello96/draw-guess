@@ -91,6 +91,17 @@ export type ClientMessage =
   | C_ContinueDrawing
   | C_Leave;
 
+// ============ Chat History (persisted on server for replay) ============
+
+export interface ChatHistoryEntry {
+  kind: "chat" | "guess";
+  playerId: string;
+  playerName: string;
+  text: string;
+  timestamp: number;
+  correct?: boolean;
+}
+
 // ============ Server → Client Messages ============
 
 export interface S_RoomState {
@@ -100,7 +111,9 @@ export interface S_RoomState {
   drawerId: string;
   phase: GamePhase;
   answerLength?: number;
+  answer?: string; // Only sent to the drawer
   strokes: SerializedStroke[];
+  chatHistory?: ChatHistoryEntry[];
   yourId: string;
 }
 
