@@ -229,12 +229,8 @@ export class GameRoom implements DurableObject {
       );
     }
 
-    // WebSocket upgrade — allow if there's room for active connections
-    // (reconnecting players will be validated in onJoin by matching their playerId)
-    if (this.getJoinedCount() >= 2) {
-      return new Response("Room is full", { status: 403 });
-    }
-
+    // WebSocket upgrade — always accept; capacity is validated in onJoin
+    // which can send a proper error message the client can display.
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
@@ -458,6 +454,7 @@ export class GameRoom implements DurableObject {
     // ---- New player join ----
     if (this.getEffectivePlayerCount() >= 2) {
       this.send(ws, { type: "error", message: "房间已满" });
+      try { ws.close(1000, "room full"); } catch { /* ignore */ }
       return;
     }
 
