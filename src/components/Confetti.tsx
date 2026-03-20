@@ -1,7 +1,23 @@
 import { useEffect, useState } from "react";
 import { tx } from "@twind/core";
 
-interface FireworkParticle {
+// ============ Confetti (top rain) ============
+
+interface ConfettiPiece {
+  id: number;
+  left: number;
+  delay: number;
+  duration: number;
+  color: string;
+  size: number;
+  rotation: number;
+  sway: number;
+  shape: "circle" | "rect" | "strip";
+}
+
+// ============ Firework (bottom launch) ============
+
+interface FwParticle {
   id: number;
   dx: number;
   dy: number;
@@ -16,10 +32,17 @@ interface Burst {
   x: number;
   y: number;
   delay: number;
-  rocketDuration: number;
+  rocketDur: number;
   color: string;
-  particles: FireworkParticle[];
+  particles: FwParticle[];
 }
+
+const COLORS = [
+  "#ff4757", "#ff6b81", "#ffa502", "#ffd32a", "#1e90ff", "#48dbfb",
+  "#e056fd", "#f368e0", "#2ed573", "#7bed9f", "#ff6348", "#fab1a0",
+  "#a29bfe", "#6c5ce7", "#fdcb6e", "#00cec9", "#fd79a8", "#e84393",
+  "#ff9ff3", "#54a0ff", "#00d2d3", "#ee5a24",
+];
 
 const PALETTES = [
   ["#ff4757", "#ff6b81", "#ff7979", "#ffcccc"],
@@ -34,71 +57,78 @@ const PALETTES = [
   ["#fd79a8", "#e84393", "#d63031", "#ffcccc"],
 ];
 
-let bid = 0;
-let ppid = 0;
+let uid = 0;
+
+function pickColor() {
+  return COLORS[Math.floor(Math.random() * COLORS.length)];
+}
+
+function createConfetti(count: number): ConfettiPiece[] {
+  const shapes: ConfettiPiece["shape"][] = ["circle", "rect", "strip"];
+  return Array.from({ length: count }, () => ({
+    id: ++uid,
+    left: Math.random() * 100,
+    delay: Math.random() * 2500,
+    duration: 2200 + Math.random() * 2000,
+    color: pickColor(),
+    size: 6 + Math.random() * 8,
+    rotation: Math.random() * 360,
+    sway: -60 + Math.random() * 120,
+    shape: shapes[Math.floor(Math.random() * shapes.length)],
+  }));
+}
 
 function createBurst(x: number, y: number, delay: number): Burst {
   const palette = PALETTES[Math.floor(Math.random() * PALETTES.length)];
-  const count = 50 + Math.floor(Math.random() * 30);
+  const count = 60 + Math.floor(Math.random() * 40);
 
-  const particles: FireworkParticle[] = Array.from({ length: count }, () => {
+  const particles: FwParticle[] = Array.from({ length: count }, () => {
     const angle = Math.random() * Math.PI * 2;
-    const dist = 50 + Math.random() * 140;
+    const dist = 60 + Math.random() * 160;
     return {
-      id: ++ppid,
+      id: ++uid,
       dx: Math.cos(angle) * dist,
       dy: Math.sin(angle) * dist,
       color: palette[Math.floor(Math.random() * palette.length)],
-      size: 2 + Math.random() * 4,
-      duration: 700 + Math.random() * 700,
-      sparkle: Math.random() < 0.3,
+      size: 2.5 + Math.random() * 4.5,
+      duration: 800 + Math.random() * 800,
+      sparkle: Math.random() < 0.35,
     };
   });
 
   return {
-    id: ++bid,
+    id: ++uid,
     x,
     y,
     delay,
-    rocketDuration: 350 + Math.random() * 250,
+    rocketDur: 300 + Math.random() * 250,
     color: palette[0],
     particles,
   };
 }
 
-export default function Confetti({ duration = 4000 }: { duration?: number }) {
+export default function Confetti({ duration = 5000 }: { duration?: number }) {
+  const [confetti, setConfetti] = useState<ConfettiPiece[]>([]);
   const [bursts, setBursts] = useState<Burst[]>([]);
   const [visible, setVisible] = useState(true);
 
   useEffect(() => {
+    // --- Confetti rain from top: 150 pieces ---
+    setConfetti(createConfetti(150));
+
+    // --- Fireworks from bottom: 16 bursts in 3 waves ---
     const b: Burst[] = [];
-
-    // Wave 1 — 5 bursts
+    for (let i = 0; i < 6; i++) {
+      b.push(createBurst(8 + Math.random() * 84, 15 + Math.random() * 30, i * 160 + Math.random() * 120));
+    }
     for (let i = 0; i < 5; i++) {
-      b.push(createBurst(
-        12 + Math.random() * 76,
-        18 + Math.random() * 30,
-        i * 180 + Math.random() * 150,
-      ));
+      b.push(createBurst(5 + Math.random() * 90, 12 + Math.random() * 35, 800 + i * 180 + Math.random() * 150));
     }
-    // Wave 2 — 4 bursts
-    for (let i = 0; i < 4; i++) {
-      b.push(createBurst(
-        10 + Math.random() * 80,
-        15 + Math.random() * 35,
-        900 + i * 200 + Math.random() * 200,
-      ));
+    for (let i = 0; i < 5; i++) {
+      b.push(createBurst(10 + Math.random() * 80, 18 + Math.random() * 28, 1700 + i * 100 + Math.random() * 100));
     }
-    // Wave 3 — finale 4 bursts
-    for (let i = 0; i < 4; i++) {
-      b.push(createBurst(
-        15 + Math.random() * 70,
-        20 + Math.random() * 25,
-        1800 + i * 120 + Math.random() * 120,
-      ));
-    }
-
     setBursts(b);
+
     const t = setTimeout(() => setVisible(false), duration);
     return () => clearTimeout(t);
   }, [duration]);
@@ -110,44 +140,70 @@ export default function Confetti({ duration = 4000 }: { duration?: number }) {
       className={tx("fixed inset-0 pointer-events-none overflow-hidden")}
       style={{ zIndex: 9999 }}
     >
+      {/* ====== Confetti rain from top ====== */}
+      {confetti.map((p) => {
+        const w = p.shape === "strip" ? p.size * 0.35 : p.size;
+        const h = p.shape === "rect" ? p.size * 0.6 : p.shape === "strip" ? p.size * 1.8 : p.size;
+        const br = p.shape === "circle" ? "50%" : "2px";
+        return (
+          <div
+            key={p.id}
+            style={{
+              position: "absolute",
+              left: `${p.left}%`,
+              top: -20,
+              width: w,
+              height: h,
+              backgroundColor: p.color,
+              borderRadius: br,
+              opacity: 0,
+              animation: `cf-fall ${p.duration}ms ${p.delay}ms ease-in forwards`,
+              "--sway": `${p.sway}px`,
+              "--rot": `${p.rotation}deg`,
+            } as React.CSSProperties}
+          />
+        );
+      })}
+
+      {/* ====== Fireworks from bottom ====== */}
       {bursts.map((burst) => (
         <div key={burst.id}>
-          {/* Rocket trail */}
+          {/* Rocket */}
           <div
             style={{
               position: "absolute",
               left: `${burst.x}%`,
               bottom: 0,
               width: 4,
-              height: 20,
+              height: 24,
               borderRadius: 2,
               background: `linear-gradient(to top, transparent, ${burst.color})`,
-              boxShadow: `0 0 8px ${burst.color}, 0 0 16px ${burst.color}`,
+              boxShadow: `0 0 10px ${burst.color}, 0 0 20px ${burst.color}`,
               opacity: 0,
-              animation: `fw-rocket ${burst.rocketDuration}ms ${burst.delay}ms ease-out forwards`,
+              animation: `fw-rocket ${burst.rocketDur}ms ${burst.delay}ms ease-out forwards`,
               "--ty": `${-(100 - burst.y)}vh`,
             } as React.CSSProperties}
           />
 
-          {/* Flash at burst point */}
+          {/* Flash */}
           <div
             style={{
               position: "absolute",
               left: `${burst.x}%`,
               top: `${burst.y}%`,
-              width: 8,
-              height: 8,
-              marginLeft: -4,
-              marginTop: -4,
+              width: 10,
+              height: 10,
+              marginLeft: -5,
+              marginTop: -5,
               borderRadius: "50%",
               backgroundColor: "#fff",
-              boxShadow: `0 0 30px 15px ${burst.color}, 0 0 60px 30px ${burst.color}44`,
+              boxShadow: `0 0 40px 20px ${burst.color}, 0 0 80px 40px ${burst.color}66`,
               opacity: 0,
-              animation: `fw-flash 300ms ${burst.delay + burst.rocketDuration}ms ease-out forwards`,
+              animation: `fw-flash 350ms ${burst.delay + burst.rocketDur}ms ease-out forwards`,
             }}
           />
 
-          {/* Explosion particles */}
+          {/* Particles */}
           {burst.particles.map((p) => (
             <div
               key={p.id}
@@ -159,9 +215,9 @@ export default function Confetti({ duration = 4000 }: { duration?: number }) {
                 height: p.size,
                 borderRadius: "50%",
                 backgroundColor: p.color,
-                boxShadow: `0 0 ${p.size + 2}px ${p.color}`,
+                boxShadow: `0 0 ${p.size + 3}px ${p.color}`,
                 opacity: 0,
-                animation: `fw-explode ${p.duration}ms ${burst.delay + burst.rocketDuration}ms ease-out forwards${p.sparkle ? `, fw-sparkle ${200 + Math.random() * 200}ms ${burst.delay + burst.rocketDuration}ms ease-in-out ${Math.floor(p.duration / 200)}` : ""}`,
+                animation: `fw-explode ${p.duration}ms ${burst.delay + burst.rocketDur}ms ease-out forwards${p.sparkle ? `, fw-sparkle ${150 + Math.random() * 150}ms ${burst.delay + burst.rocketDur}ms ease-in-out ${Math.floor(p.duration / 150)}` : ""}`,
                 "--dx": `${p.dx}px`,
                 "--dy": `${p.dy}px`,
               } as React.CSSProperties}
@@ -171,26 +227,32 @@ export default function Confetti({ duration = 4000 }: { duration?: number }) {
       ))}
 
       <style>{`
+        @keyframes cf-fall {
+          0%   { transform: translateY(0) translateX(0) rotate(0deg) scale(1); opacity: 1; }
+          25%  { opacity: 1; }
+          50%  { transform: translateY(50vh) translateX(var(--sway)) rotate(var(--rot)) scale(0.9); opacity: 0.9; }
+          100% { transform: translateY(105vh) translateX(calc(var(--sway) * -0.5)) rotate(calc(var(--rot) + 360deg)) scale(0.4); opacity: 0; }
+        }
         @keyframes fw-rocket {
           0%   { transform: translateY(0); opacity: 0; }
           8%   { opacity: 1; }
-          85%  { opacity: 0.9; }
+          80%  { opacity: 0.9; }
           100% { transform: translateY(var(--ty)); opacity: 0; }
         }
         @keyframes fw-flash {
           0%   { transform: scale(0); opacity: 1; }
-          50%  { transform: scale(2.5); opacity: 0.8; }
-          100% { transform: scale(4); opacity: 0; }
+          40%  { transform: scale(3); opacity: 0.9; }
+          100% { transform: scale(5); opacity: 0; }
         }
         @keyframes fw-explode {
           0%   { transform: translate(0, 0) scale(0.3); opacity: 1; }
-          15%  { transform: translate(calc(var(--dx) * 0.3), calc(var(--dy) * 0.3)) scale(1.3); opacity: 1; }
-          50%  { transform: translate(calc(var(--dx) * 0.75), calc(var(--dy) * 0.75)) scale(1); opacity: 0.85; }
-          100% { transform: translate(var(--dx), calc(var(--dy) + 90px)) scale(0.15); opacity: 0; }
+          12%  { transform: translate(calc(var(--dx) * 0.25), calc(var(--dy) * 0.25)) scale(1.4); opacity: 1; }
+          45%  { transform: translate(calc(var(--dx) * 0.7), calc(var(--dy) * 0.7)) scale(1); opacity: 0.85; }
+          100% { transform: translate(var(--dx), calc(var(--dy) + 100px)) scale(0.1); opacity: 0; }
         }
         @keyframes fw-sparkle {
           0%, 100% { filter: brightness(1); }
-          50%      { filter: brightness(2.5); }
+          50%      { filter: brightness(3); }
         }
       `}</style>
     </div>
