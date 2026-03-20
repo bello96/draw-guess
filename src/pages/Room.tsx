@@ -370,7 +370,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   return (
     <div className={tx("flex flex-col h-screen bg-gray-50 p-3 gap-3")}>
       {confettiKey > 0 && (
-        <Confetti key={confettiKey} duration={4000} />
+        <Confetti key={confettiKey} />
       )}
       {/* Top bar */}
       <PlayerBar

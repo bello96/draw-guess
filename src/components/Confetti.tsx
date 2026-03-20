@@ -65,17 +65,22 @@ function pickColor() {
 
 function createConfetti(count: number): ConfettiPiece[] {
   const shapes: ConfettiPiece["shape"][] = ["circle", "rect", "strip"];
-  return Array.from({ length: count }, () => ({
-    id: ++uid,
-    left: Math.random() * 100,
-    delay: Math.random() * 2500,
-    duration: 2200 + Math.random() * 2000,
-    color: pickColor(),
-    size: 6 + Math.random() * 8,
-    rotation: Math.random() * 360,
-    sway: -60 + Math.random() * 120,
-    shape: shapes[Math.floor(Math.random() * shapes.length)],
-  }));
+  return Array.from({ length: count }, () => {
+    // Weighted delay: most pieces launch early, fewer launch late → natural thinning
+    const r = Math.random();
+    const delay = r * r * 4500; // quadratic: dense at start, sparse at end
+    return {
+      id: ++uid,
+      left: Math.random() * 100,
+      delay,
+      duration: 2500 + Math.random() * 2500,
+      color: pickColor(),
+      size: 6 + Math.random() * 8,
+      rotation: Math.random() * 360,
+      sway: -60 + Math.random() * 120,
+      shape: shapes[Math.floor(Math.random() * shapes.length)],
+    };
+  });
 }
 
 function createBurst(x: number, y: number, delay: number): Burst {
@@ -107,14 +112,15 @@ function createBurst(x: number, y: number, delay: number): Burst {
   };
 }
 
-export default function Confetti({ duration = 5000 }: { duration?: number }) {
+export default function Confetti() {
   const [confetti, setConfetti] = useState<ConfettiPiece[]>([]);
   const [bursts, setBursts] = useState<Burst[]>([]);
   const [visible, setVisible] = useState(true);
 
   useEffect(() => {
     // --- Confetti rain from top: 150 pieces ---
-    setConfetti(createConfetti(150));
+    const cf = createConfetti(150);
+    setConfetti(cf);
 
     // --- Fireworks from bottom: 16 bursts in 3 waves ---
     const b: Burst[] = [];
@@ -129,9 +135,16 @@ export default function Confetti({ duration = 5000 }: { duration?: number }) {
     }
     setBursts(b);
 
-    const t = setTimeout(() => setVisible(false), duration);
+    // Calculate when ALL animations finish so we don't cut them off
+    const cfEnd = Math.max(...cf.map((p) => p.delay + p.duration));
+    const fwEnd = Math.max(...b.map((burst) =>
+      burst.delay + burst.rocketDur + Math.max(...burst.particles.map((p) => p.duration)),
+    ));
+    const totalDuration = Math.max(cfEnd, fwEnd) + 300; // 300ms buffer
+
+    const t = setTimeout(() => setVisible(false), totalDuration);
     return () => clearTimeout(t);
-  }, [duration]);
+  }, []);
 
   if (!visible) return null;
 
