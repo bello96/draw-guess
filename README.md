@@ -4,14 +4,25 @@
 
 **在线体验：** https://draw-guess.dengjiabei.cn
 
+![工具栏预览](./src/assets/rectangle-icon.svg)
+
 ## 功能特性
 
 - 无需注册，输入昵称即可开始游戏
-- 创建 / 加入房间（6 位房间号），每个房间限 2 人
-- 实时画板同步：支持多色画笔、调整粗细、撤销、清空
-- 画手设定答案后，猜词方可输入猜测，答对即揭晓
-- 画笔权限可在两人之间转移，轮流画画
+- 创建 / 加入房间（6 位房间号），每个房间限 2 人，支持一键复制分享链接
+- 4:3 画板，实时同步每一笔
+- **多种绘图工具**：
+  - ✏️ 画笔（4 档线宽、8 色）
+  - T 文本（小/中/大字号，画完可拖动位置、角点调字号）
+  - □ 矩形（线框 / 填充切换）
+  - ○ 椭圆（同上）
+  - ↗ 箭头（自动画填充三角头）
+- **编辑态统一失焦即确定**：矩形 / 椭圆 / 箭头 / 文本画完后出现虚线框，可拖动整体位置；点虚线框外任意地方即确认
+- **撤销 / 重做**：两端状态同步，新笔画自动失效重做栈
+- 画手设定答案后，猜词方可输入猜测；答对自动揭晓并撒彩带
+- 画笔权限可在两人之间转移，一键转让进入下一轮
 - 右侧实时聊天面板
+- 断线自动重连（指数退避 1s→30s）+ 心跳保活 + 页面刷新 5s 内可恢复身份
 
 ## 技术栈
 
@@ -19,72 +30,90 @@
 |------|------|
 | 前端框架 | React 18 + TypeScript |
 | 样式方案 | Twind (Tailwind CSS-in-JS) |
-| 构建工具 | Vite |
+| 构建工具 | Vite 6 |
 | 后端运行时 | Cloudflare Workers |
-| 状态管理 | Durable Objects (Hibernatable WebSocket) |
-| 实时通信 | WebSocket |
+| 状态管理 | Durable Objects（Hibernatable WebSocket + SQLite backend） |
+| 实时通信 | WebSocket JSON |
 | 前端部署 | Cloudflare Pages |
+| Lint / Format | ESLint 9（flat config）+ Prettier |
 
 ## 项目结构
 
 ```
-├── src/                    # 前端源码
-│   ├── main.tsx            # 入口，Twind 初始化
-│   ├── App.tsx             # 路由（首页 / 房间页）
-│   ├── api.ts              # API / WebSocket 地址管理
+├── src/                          # 前端
+│   ├── main.tsx                  # 入口，Twind install
+│   ├── App.tsx                   # 顶层路由（首页 / 昵称弹窗 / 房间）
+│   ├── api.ts                    # apiUrl / wsUrl 工具
 │   ├── pages/
-│   │   ├── Home.tsx        # 创建 / 加入房间
-│   │   └── Room.tsx        # 游戏房间主页面
+│   │   ├── Home.tsx              # 创建 / 加入房间
+│   │   └── Room.tsx              # 主游戏页，消息分发 + 撤销/重做栈
 │   ├── components/
-│   │   ├── Canvas.tsx      # 画板组件
-│   │   ├── Toolbar.tsx     # 颜色 / 画笔工具栏
-│   │   ├── PlayerBar.tsx   # 房间信息 / 玩家状态栏
-│   │   └── ChatPanel.tsx   # 聊天 / 猜词面板
+│   │   ├── Canvas.tsx            # 画板 + 文字/形状编辑 overlay
+│   │   ├── Toolbar.tsx           # 5 工具 + 每工具独立 popover
+│   │   ├── PlayerBar.tsx         # 顶栏房间号 / 玩家 / 操作按钮
+│   │   ├── ChatPanel.tsx         # 聊天 / 设答案 / 猜词三合一输入
+│   │   ├── Confetti.tsx          # 彩带雨（canvas + RAF）
+│   │   └── Toast.tsx             # 右上角错误提示
 │   ├── hooks/
-│   │   ├── useWebSocket.ts # WebSocket 连接管理
-│   │   └── useCanvas.ts    # 画板绘制逻辑
-│   └── types/
-│       └── protocol.ts     # 消息协议类型定义
-├── worker/                 # Cloudflare Worker 后端
+│   │   ├── useWebSocket.ts       # WS 连接、重连、心跳
+│   │   └── useCanvas.ts          # 画布事件、笔画、离屏缓存
+│   ├── assets/                   # SVG 图标源文件
+│   └── types/protocol.ts         # ⭐ 前后端共享的消息类型契约
+├── worker/                       # Cloudflare Worker 后端
 │   ├── src/
-│   │   ├── index.ts        # Worker 入口，HTTP 路由
-│   │   └── room.ts         # GameRoom Durable Object
-│   ├── wrangler.toml       # Worker 部署配置
+│   │   ├── index.ts              # HTTP 入口 + Origin 白名单 + 路由到 DO
+│   │   ├── room.ts               # ⭐ GameRoom Durable Object
+│   │   ├── types.ts              # DO 内部类型
+│   │   ├── constants.ts          # 可调参数 + PROTOCOL_VERSION
+│   │   └── helpers.ts            # 纯函数 helpers
+│   ├── wrangler.toml             # durable_objects + routes
 │   └── package.json
-├── .github/workflows/      # CI/CD
-│   ├── deploy-pages.yml    # 前端自动部署到 Pages
-│   └── deploy-worker.yml   # Worker 自动部署
-└── .env.development        # 本地开发环境变量
+├── .github/workflows/            # CI/CD
+│   ├── deploy-pages.yml          # 前端自动部署到 Pages
+│   └── deploy-worker.yml         # Worker 自动部署
+├── eslint.config.js              # ESLint flat config
+├── .prettierrc.json              # Prettier 配置
+└── CLAUDE.md                     # AI 助手 / 深入开发文档
 ```
 
 ## 游戏流程
 
 ```
 首页 → 创建房间 → 等待对方加入
-       加入房间 → 输入6位房间号
+       加入房间 → 输入 6 位房间号（或扫描分享链接）
 
-两人就绪 → 画手绘画 → 设定答案 → 猜词方猜测
-                                    ├── 猜对 → 本轮结束
-                                    └── 猜错 → 继续猜
+两人就绪 → 画手选工具 → 画 / 写字 / 画形状 → 设定答案 → 猜词方开始猜
+                                                    ├── 猜对 → 撒彩带 + 本轮结束
+                                                    └── 猜错 → 继续猜
 
-画手可随时「转移画笔」→ 角色互换，新一轮开始
+画手可随时「转让画笔」→ 角色互换，新一轮开始
+画手可随时「继续出题」→ 重新开画同一轮
 ```
 
 ## 本地开发
 
 ```bash
-# 安装依赖
+# 安装依赖（@twind/core peer range 较老，需加 --legacy-peer-deps）
 npm install
 cd worker && npm install && cd ..
 
-# 启动前端（连接线上 Worker）
+# 启动前端（默认连线上 Worker）
 npm run dev
 
-# 如需本地运行 Worker（需要 wrangler 登录）
+# 本地启动 Worker（需 wrangler 登录；同时改 .env.development 里 VITE_API_BASE=http://localhost:8787）
 npm run dev:worker
 ```
 
-本地开发时，前端通过 `.env.development` 中的 `VITE_API_BASE` 直接请求已部署的 Worker，无需本地启动后端。
+### 代码质量
+
+```bash
+npm run lint            # ESLint 检查
+npm run lint:fix        # 自动修复（含 curly: all）
+npm run format          # Prettier 格式化
+npm run format:check    # CI 友好的只读检查
+```
+
+ESLint 规则里 `curly: ["error", "all"]` 强制所有 `if` 加花括号；3 个已知的 `exhaustive-deps` warnings 是有意保留的。
 
 ## 部署
 
@@ -113,20 +142,58 @@ npx wrangler pages deploy dist --project-name=draw-guess
 
 ## 协议与消息
 
-客户端与服务端通过 WebSocket JSON 消息通信，主要消息类型：
+客户端与服务端通过 WebSocket JSON 消息通信。主要消息类型（完整列表见 `src/types/protocol.ts`）：
 
-| 方向 | 消息类型 | 说明 |
-|------|---------|------|
-| C → S | `join` | 加入房间 |
-| C → S | `draw` | 绘画轨迹 (start/move/end) |
-| C → S | `clear` / `undo` | 清空 / 撤销 |
-| C → S | `setAnswer` | 画手设定答案 |
-| C → S | `guess` | 猜词方提交猜测 |
-| C → S | `chat` | 发送聊天消息 |
-| C → S | `transfer` | 转移画笔权限 |
-| S → C | `roomState` | 房间完整状态（加入时下发） |
-| S → C | `phaseChange` | 游戏阶段变更 |
-| S → C | `guessResult` | 猜测结果（对/错） |
+### Client → Server
+
+| 消息 | 说明 |
+|------|------|
+| `join` | 加入房间，带 `v: PROTOCOL_VERSION` 做版本校验 |
+| `ping` | 心跳保活（每 25s） |
+| `draw` | 自由笔画（`start` / `move` / `end`，`move` 支持 RAF 批量 `points[]`） |
+| `textStroke` | 文字笔画 |
+| `shape` | 形状笔画（矩形 / 椭圆 / 箭头） |
+| `clear` | 清空画板 |
+| `undo` / `redo` | 撤销 / 重做 |
+| `setAnswer` | 画手设定答案 |
+| `guess` | 猜词方提交猜测 |
+| `chat` | 发送聊天消息 |
+| `transfer` | 转移画笔权限 |
+| `continueDrawing` | 猜对后继续出题（同一画手） |
+| `leave` | 主动离开 |
+
+### Server → Client
+
+| 消息 | 说明 |
+|------|------|
+| `roomState` | 房间完整状态（加入时下发，含 strokes 和 chatHistory） |
+| `pong` | 心跳响应（前端吞掉不分发 listener） |
+| `playerJoined` / `playerLeft` | 玩家进出 |
+| `draw` / `textStroke` / `shape` / `clear` / `undo` / `redo` | 绘图同步 |
+| `phaseChange` | 游戏阶段变更 |
+| `guessResult` | 猜测结果（对 / 错） |
+| `chat` | 聊天广播 |
+| `transferDone` | 画笔权限转移完成 |
+| `error` | 错误（版本不匹配 / 房间不存在 / 房间已满 / rate limit 等） |
+| `roomClosed` | 房间已关闭（如 10 分钟无活动） |
+
+### 坐标 / 尺寸归一化
+
+- 所有 `{x, y}` 在协议和存储里都是 `[0, 1]` 归一化值，跟画板实际像素解耦
+- 线宽 / 字号按 `REF_WIDTH = 800` 做 `scaleLineWidth`（clamp 0.5~1.5x）
+- 画板实际比例 **4:3**（visible canvas + 离屏缓存尺寸均为 800×600）
+
+## 架构亮点
+
+- **Hibernatable WebSocket**：DO 闲置时可被回收，玩家身份存在 WebSocket attachment 里，醒来自动恢复
+- **两级断线 grace**：正常断线 30s，页面刷新 5s（靠 `pagehide` beacon 识别）
+- **离屏 canvas 缓存**：已完成笔画全部画到固定 800×600 的 offscreen canvas，resize 只需 `drawImage` blit 一次（O(1)）
+- **strokes 分片存储**：每条 stroke 独立 storage key（`stroke:0000000001`），避开 DO 单值 128KB 上限
+- **协议版本号**：`join` 消息带 `v`，服务端拒绝不匹配并提示刷新
+- **Origin 白名单 + rate limit**：所有 API 和 WS upgrade 都校验 Origin；每 WS 1s/150 条消息上限
+- **中文答案归一化**：NFKC + lowercase + 去空格 + 去 Unicode 标点，全角半角 / "你好！" vs "你好" 都能对上
+
+详细实现见 [`CLAUDE.md`](./CLAUDE.md)。
 
 ## License
 

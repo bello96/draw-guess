@@ -13,9 +13,33 @@ function generateRoomCode(): string {
   return code;
 }
 
-function corsHeaders(): Record<string, string> {
+/**
+ * Allowed origins for API and WebSocket access:
+ * - Production domain
+ * - Any localhost / 127.0.0.1 port (for `npm run dev`)
+ *
+ * Requests with a missing or non-whitelisted Origin are rejected with 403.
+ * We currently have no server-to-server callers, so "no Origin" is treated as untrusted.
+ */
+function isAllowedOrigin(origin: string | null): boolean {
+  if (!origin) {
+    return false;
+  }
+  if (origin === "https://draw-guess.dengjiabei.cn") {
+    return true;
+  }
+  if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+    return true;
+  }
+  if (/^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) {
+    return true;
+  }
+  return false;
+}
+
+function corsHeaders(origin: string): Record<string, string> {
   return {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
@@ -24,21 +48,43 @@ function corsHeaders(): Record<string, string> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const origin = request.headers.get("Origin");
 
-    // Handle CORS preflight
+    // Handle CORS preflight — deny non-whitelisted origins up front.
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders() });
+      if (!isAllowedOrigin(origin)) {
+        return new Response(null, { status: 403 });
+      }
+      return new Response(null, { headers: corsHeaders(origin!) });
     }
 
-    // POST /api/rooms - Create a new room
+    // Gate every other route on a known origin. This also blocks non-browser
+    // callers (no Origin header) — we have no server-to-server flows.
+    if (!isAllowedOrigin(origin)) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    const allowedOrigin = origin!;
+
+    // POST /api/rooms - Create a new room with collision retry
     if (url.pathname === "/api/rooms" && request.method === "POST") {
-      const roomCode = generateRoomCode();
-      // Initialize the Durable Object so it knows this room was created
-      const doId = env.GAME_ROOM.idFromName(roomCode);
-      const stub = env.GAME_ROOM.get(doId);
-      await stub.fetch(new Request("http://internal/init?code=" + roomCode, { method: "POST" }));
-      return new Response(JSON.stringify({ roomCode }), {
-        headers: { "Content-Type": "application/json", ...corsHeaders() },
+      const MAX_RETRIES = 5;
+      for (let i = 0; i < MAX_RETRIES; i++) {
+        const roomCode = generateRoomCode();
+        const doId = env.GAME_ROOM.idFromName(roomCode);
+        const stub = env.GAME_ROOM.get(doId);
+        const initResp = await stub.fetch(
+          new Request("http://internal/init?code=" + roomCode, { method: "POST" }),
+        );
+        if (initResp.ok) {
+          return new Response(JSON.stringify({ roomCode }), {
+            headers: { "Content-Type": "application/json", ...corsHeaders(allowedOrigin) },
+          });
+        }
+        // 409 Conflict — room code already in use, try another one
+      }
+      return new Response(JSON.stringify({ error: "房间创建失败，请重试" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json", ...corsHeaders(allowedOrigin) },
       });
     }
 
@@ -49,7 +95,7 @@ export default {
       const doId = env.GAME_ROOM.idFromName(roomCode);
       const stub = env.GAME_ROOM.get(doId);
       await stub.fetch(request);
-      return new Response("OK", { headers: corsHeaders() });
+      return new Response("OK", { headers: corsHeaders(allowedOrigin) });
     }
 
     // GET /api/rooms/:code/ws - WebSocket upgrade
@@ -70,7 +116,7 @@ export default {
       const resp = await stub.fetch(request);
       const body = await resp.text();
       return new Response(body, {
-        headers: { "Content-Type": "application/json", ...corsHeaders() },
+        headers: { "Content-Type": "application/json", ...corsHeaders(allowedOrigin) },
       });
     }
 

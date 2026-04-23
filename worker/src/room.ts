@@ -1,52 +1,27 @@
-// ============ Types ============
-
-type GamePhase = "waiting" | "drawing" | "guessing" | "revealed";
-
-interface PlayerInfo {
-  id: string;
-  name: string;
-  isOwner: boolean;
-}
-
-interface SerializedStroke {
-  points: { x: number; y: number }[];
-  color: string;
-  lineWidth: number;
-  text?: string;
-  fontSize?: number;
-}
-
-// Chat/guess message stored for replay on reconnection
-interface ChatHistoryEntry {
-  kind: "chat" | "guess";
-  playerId: string;
-  playerName: string;
-  text: string;
-  timestamp: number;
-  correct?: boolean;
-}
-
-// Data stored as WebSocket attachment (survives hibernation)
-interface PlayerAttachment {
-  id: string;
-  name: string;
-  isOwner: boolean;
-  quickLeave?: boolean; // Set by quickleave beacon — use short grace on disconnect
-}
-
-// Player info stored during reconnection grace period
-interface DisconnectedPlayer {
-  id: string;
-  name: string;
-  isOwner: boolean;
-  disconnectedAt: number;
-  graceMs: number; // Grace period duration (short for quickleave, long for normal)
-}
-
-const RECONNECT_GRACE_MS = 30_000; // 30 seconds
-const QUICK_LEAVE_GRACE_MS = 5_000; // 5 seconds (enough for page refresh, fast for close/navigate)
-const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const MAX_CHAT_HISTORY = 200;
+import {
+  DELETE_BATCH_SIZE,
+  INACTIVITY_TIMEOUT_MS,
+  MAX_ANSWER_LENGTH,
+  MAX_CHAT_HISTORY,
+  MAX_CHAT_LENGTH,
+  MAX_NAME_LENGTH,
+  MAX_TEXT_STROKE_LENGTH,
+  PROTOCOL_VERSION,
+  QUICK_LEAVE_GRACE_MS,
+  RATE_LIMIT_MAX_MSGS,
+  RATE_LIMIT_WINDOW_MS,
+  RECONNECT_GRACE_MS,
+  STROKE_KEY_PREFIX,
+} from "./constants";
+import { normalizeForCompare, strokeKey } from "./helpers";
+import type {
+  ChatHistoryEntry,
+  DisconnectedPlayer,
+  GamePhase,
+  PlayerAttachment,
+  PlayerInfo,
+  SerializedStroke,
+} from "./types";
 
 // ============ GameRoom Durable Object ============
 
@@ -58,6 +33,9 @@ export class GameRoom implements DurableObject {
   private phase: GamePhase = "waiting";
   private answer: string | null = null;
   private strokes: SerializedStroke[] = [];
+  // Undone strokes, LIFO. Any new stroke invalidates this list. Not persisted —
+  // redo only survives within one active DO session; hibernation resets it.
+  private redoStack: SerializedStroke[] = [];
   private chatHistory: ChatHistoryEntry[] = [];
   private closed = false;
   private roomCode = "";
@@ -68,6 +46,9 @@ export class GameRoom implements DurableObject {
   private currentStrokePoints: { x: number; y: number }[] = [];
   private currentStrokeColor = "#000000";
   private currentStrokeWidth = 3;
+  // Per-ws rolling window counter for rate limiting. WeakMap ensures the
+  // entry is GC'd when the ws is collected, and hibernation resets it naturally.
+  private wsMessageCounts = new WeakMap<WebSocket, { windowStart: number; count: number }>();
 
   constructor(
     private state: DurableObjectState,
@@ -77,12 +58,21 @@ export class GameRoom implements DurableObject {
   // ============ Restore state from storage after hibernation ============
 
   private async ensureLoaded() {
-    if (this.loaded) return;
+    if (this.loaded) {
+      return;
+    }
     this.loaded = true;
 
     const data = await this.state.storage.get<unknown>([
-      "created", "drawerId", "phase", "answer", "closed", "roomCode", "strokes",
-      "chatHistory", "disconnectedPlayers", "lastActivityAt",
+      "created",
+      "drawerId",
+      "phase",
+      "answer",
+      "closed",
+      "roomCode",
+      "chatHistory",
+      "disconnectedPlayers",
+      "lastActivityAt",
     ]);
 
     this.created = (data.get("created") as boolean) ?? false;
@@ -91,8 +81,17 @@ export class GameRoom implements DurableObject {
     this.answer = (data.get("answer") as string | null) ?? null;
     this.closed = (data.get("closed") as boolean) ?? false;
     this.roomCode = (data.get("roomCode") as string) ?? "";
-    this.strokes = (data.get("strokes") as SerializedStroke[]) ?? [];
     this.chatHistory = (data.get("chatHistory") as ChatHistoryEntry[]) ?? [];
+
+    // Strokes live in per-key entries under STROKE_KEY_PREFIX; list() returns
+    // them lexicographically sorted, which matches zero-padded insertion order.
+    const strokeList = await this.state.storage.list<SerializedStroke>({
+      prefix: STROKE_KEY_PREFIX,
+    });
+    this.strokes = Array.from(strokeList.values());
+
+    // One-time cleanup: drop the legacy single-key "strokes" blob. Idempotent.
+    await this.state.storage.delete("strokes");
 
     const dcRaw = data.get("disconnectedPlayers") as [string, DisconnectedPlayer][] | null;
     this.disconnectedPlayers = dcRaw
@@ -101,7 +100,30 @@ export class GameRoom implements DurableObject {
     this.lastActivityAt = (data.get("lastActivityAt") as number) ?? 0;
   }
 
+  /** Rolling-window rate check. Returns false when over limit. */
+  private checkRateLimit(ws: WebSocket): boolean {
+    const now = Date.now();
+    const info = this.wsMessageCounts.get(ws);
+    if (!info || now - info.windowStart >= RATE_LIMIT_WINDOW_MS) {
+      this.wsMessageCounts.set(ws, { windowStart: now, count: 1 });
+      return true;
+    }
+    info.count++;
+    return info.count <= RATE_LIMIT_MAX_MSGS;
+  }
+
+  /** Delete every per-stroke entry from storage. Safe at any point. */
+  private async clearStrokeStorage() {
+    const list = await this.state.storage.list({ prefix: STROKE_KEY_PREFIX });
+    const keys = Array.from(list.keys());
+    for (let i = 0; i < keys.length; i += DELETE_BATCH_SIZE) {
+      await this.state.storage.delete(keys.slice(i, i + DELETE_BATCH_SIZE));
+    }
+  }
+
   private async saveState() {
+    // Note: strokes are NOT saved here — each stroke lives in its own key under
+    // STROKE_KEY_PREFIX, managed by onDraw / onTextStroke / clearStrokeStorage.
     await this.state.storage.put({
       created: this.created,
       drawerId: this.drawerId,
@@ -109,7 +131,6 @@ export class GameRoom implements DurableObject {
       answer: this.answer,
       closed: this.closed,
       roomCode: this.roomCode,
-      strokes: this.strokes,
       chatHistory: this.chatHistory,
       disconnectedPlayers: Array.from(this.disconnectedPlayers.entries()),
       lastActivityAt: this.lastActivityAt,
@@ -183,7 +204,14 @@ export class GameRoom implements DurableObject {
     const url = new URL(request.url);
 
     // Internal: POST /init - mark room as created
+    // Returns 409 if already created, so the parent Worker can retry with a new code.
     if (url.pathname === "/init" && request.method === "POST") {
+      if (this.created) {
+        return new Response(JSON.stringify({ error: "already created" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       const code = url.searchParams.get("code") || "";
       this.created = true;
       this.roomCode = code;
@@ -194,7 +222,9 @@ export class GameRoom implements DurableObject {
     // POST /quickleave — beacon from pagehide, shorten grace period
     if (url.pathname.endsWith("/quickleave") && request.method === "POST") {
       const playerId = url.searchParams.get("playerId");
-      if (!playerId) return new Response("Missing playerId", { status: 400 });
+      if (!playerId) {
+        return new Response("Missing playerId", { status: 400 });
+      }
 
       // Case 1: Player still connected (beacon arrived before WS close) — mark for short grace
       for (const { ws, player } of this.getJoinedWebSockets()) {
@@ -243,8 +273,20 @@ export class GameRoom implements DurableObject {
   // ============ Hibernatable WebSocket API handlers ============
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-    if (typeof message !== "string") return;
+    if (typeof message !== "string") {
+      return;
+    }
     await this.ensureLoaded();
+
+    if (!this.checkRateLimit(ws)) {
+      this.send(ws, { type: "error", message: "消息频率过高，连接已断开" });
+      try {
+        ws.close(1008, "rate limited");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
 
     let msg: Record<string, unknown>;
     try {
@@ -253,30 +295,45 @@ export class GameRoom implements DurableObject {
       return;
     }
 
-    // Update activity on any player message
-    if (msg.type !== "join") {
+    // Update activity on any player message (except join and ping heartbeat).
+    // Ping would otherwise reset the inactivity timer and defeat auto-close.
+    if (msg.type !== "join" && msg.type !== "ping") {
       await this.touchActivity();
     }
 
     switch (msg.type) {
       case "join":
-        await this.onJoin(ws, msg.playerName as string, msg.playerId as string | undefined);
+        await this.onJoin(
+          ws,
+          msg.playerName as string,
+          msg.playerId as string | undefined,
+          typeof msg.v === "number" ? msg.v : undefined,
+        );
+        break;
+      case "ping":
+        this.send(ws, { type: "pong" });
         break;
       case "draw":
-        await this.onDraw(ws, msg as {
-          type: string;
-          action: "start" | "move" | "end";
-          x: number;
-          y: number;
-          color: string;
-          lineWidth: number;
-        });
+        await this.onDraw(
+          ws,
+          msg as {
+            type: string;
+            action: "start" | "move" | "end";
+            x: number;
+            y: number;
+            color: string;
+            lineWidth: number;
+          },
+        );
         break;
       case "clear":
         await this.onClear(ws);
         break;
       case "undo":
         await this.onUndo(ws);
+        break;
+      case "redo":
+        await this.onRedo(ws);
         break;
       case "setAnswer":
         await this.onSetAnswer(ws, msg.answer as string);
@@ -291,14 +348,33 @@ export class GameRoom implements DurableObject {
         await this.onTransfer(ws);
         break;
       case "textStroke":
-        await this.onTextStroke(ws, msg as {
-          type: string;
-          text: string;
-          x: number;
-          y: number;
-          color: string;
-          fontSize: number;
-        });
+        await this.onTextStroke(
+          ws,
+          msg as {
+            type: string;
+            text: string;
+            x: number;
+            y: number;
+            color: string;
+            fontSize: number;
+          },
+        );
+        break;
+      case "shape":
+        await this.onShape(
+          ws,
+          msg as {
+            type: string;
+            shape: "rect" | "ellipse" | "arrow";
+            filled: boolean;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            color: string;
+            lineWidth: number;
+          },
+        );
         break;
       case "continueDrawing":
         await this.onContinueDrawing(ws);
@@ -351,7 +427,11 @@ export class GameRoom implements DurableObject {
       // Close all WebSockets
       for (const { ws } of this.getJoinedWebSockets()) {
         ws.serializeAttachment(null);
-        try { ws.close(1000, "inactivity"); } catch { /* ignore */ }
+        try {
+          ws.close(1000, "inactivity");
+        } catch {
+          /* ignore */
+        }
       }
 
       // Reset room
@@ -361,10 +441,12 @@ export class GameRoom implements DurableObject {
       this.drawerId = null;
       this.answer = null;
       this.strokes = [];
+      this.redoStack = [];
       this.chatHistory = [];
       this.disconnectedPlayers.clear();
       this.lastActivityAt = 0;
       await this.saveState();
+      await this.clearStrokeStorage();
       return;
     }
 
@@ -374,11 +456,36 @@ export class GameRoom implements DurableObject {
 
   // ============ Message Handlers ============
 
-  private async onJoin(ws: WebSocket, playerName: string, playerId?: string) {
+  private async onJoin(
+    ws: WebSocket,
+    playerName: string,
+    playerId?: string,
+    clientVersion?: number,
+  ) {
+    // Protocol version check. `clientVersion == null` is a legacy-client grace
+    // (see PROTOCOL_VERSION comment) — remove the null branch once pre-v1
+    // clients are no longer expected in the wild.
+    if (clientVersion != null && clientVersion !== PROTOCOL_VERSION) {
+      this.send(ws, {
+        type: "error",
+        message: "客户端版本过旧，请刷新页面",
+      });
+      try {
+        ws.close(1000, "version mismatch");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
     // Reject joins to non-existent rooms
     if (!this.created) {
       this.send(ws, { type: "error", message: "房间不存在" });
-      try { ws.close(1000, "room not found"); } catch { /* ignore */ }
+      try {
+        ws.close(1000, "room not found");
+      } catch {
+        /* ignore */
+      }
       return;
     }
 
@@ -422,7 +529,11 @@ export class GameRoom implements DurableObject {
         if (existing.id === playerId && oldWs !== ws) {
           // Take over: close old WS, reuse identity on new WS
           oldWs.serializeAttachment(null);
-          try { oldWs.close(1000, "reconnected"); } catch { /* already closed */ }
+          try {
+            oldWs.close(1000, "reconnected");
+          } catch {
+            /* already closed */
+          }
 
           const player: PlayerAttachment = {
             id: existing.id,
@@ -454,14 +565,18 @@ export class GameRoom implements DurableObject {
     // ---- New player join ----
     if (this.getEffectivePlayerCount() >= 2) {
       this.send(ws, { type: "error", message: "房间已满" });
-      try { ws.close(1000, "room full"); } catch { /* ignore */ }
+      try {
+        ws.close(1000, "room full");
+      } catch {
+        /* ignore */
+      }
       return;
     }
 
     const isOwner = this.getEffectivePlayerCount() === 0;
     const player: PlayerAttachment = {
       id: crypto.randomUUID(),
-      name: playerName || (isOwner ? "玩家1" : "玩家2"),
+      name: (playerName || (isOwner ? "玩家1" : "玩家2")).slice(0, MAX_NAME_LENGTH),
       isOwner,
     };
 
@@ -521,10 +636,13 @@ export class GameRoom implements DurableObject {
       y: number;
       color: string;
       lineWidth: number;
+      points?: { x: number; y: number }[];
     },
   ) {
     const player = this.getPlayer(ws);
-    if (!player || player.id !== this.drawerId) return;
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
 
     // Track stroke for replay
     if (msg.action === "start") {
@@ -532,20 +650,24 @@ export class GameRoom implements DurableObject {
       this.currentStrokeColor = msg.color;
       this.currentStrokeWidth = msg.lineWidth;
     } else if (msg.action === "move") {
-      this.currentStrokePoints.push({ x: msg.x, y: msg.y });
+      // 'move' may carry a batch of points (RAF-throttled) or a single x/y.
+      const movePoints = msg.points ?? [{ x: msg.x, y: msg.y }];
+      this.currentStrokePoints.push(...movePoints);
     } else if (msg.action === "end") {
       this.currentStrokePoints.push({ x: msg.x, y: msg.y });
-      this.strokes.push({
+      const stroke: SerializedStroke = {
         points: [...this.currentStrokePoints],
         color: this.currentStrokeColor,
         lineWidth: this.currentStrokeWidth,
-      });
+      };
+      this.strokes.push(stroke);
+      this.redoStack = []; // new stroke invalidates redo history
       this.currentStrokePoints = [];
-      // Persist strokes only on stroke end
-      await this.state.storage.put("strokes", this.strokes);
+      // Persist only the new stroke (not the whole list) to stay under value limits.
+      await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
     }
 
-    // Forward to the other player
+    // Forward to the other player — preserve points batch when present
     this.broadcast(
       {
         type: "draw",
@@ -554,6 +676,7 @@ export class GameRoom implements DurableObject {
         y: msg.y,
         color: msg.color,
         lineWidth: msg.lineWidth,
+        ...(msg.points ? { points: msg.points } : {}),
       },
       ws,
     );
@@ -571,22 +694,30 @@ export class GameRoom implements DurableObject {
     },
   ) {
     const player = this.getPlayer(ws);
-    if (!player || player.id !== this.drawerId) return;
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+
+    const text = (msg.text || "").slice(0, MAX_TEXT_STROKE_LENGTH);
+    if (!text) {
+      return;
+    }
 
     const stroke: SerializedStroke = {
       points: [{ x: msg.x, y: msg.y }],
       color: msg.color,
       lineWidth: 0,
-      text: msg.text,
+      text,
       fontSize: msg.fontSize,
     };
     this.strokes.push(stroke);
-    await this.state.storage.put("strokes", this.strokes);
+    this.redoStack = []; // new stroke invalidates redo history
+    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
 
     this.broadcast(
       {
         type: "textStroke",
-        text: msg.text,
+        text,
         x: msg.x,
         y: msg.y,
         color: msg.color,
@@ -596,33 +727,118 @@ export class GameRoom implements DurableObject {
     );
   }
 
+  private async onShape(
+    ws: WebSocket,
+    msg: {
+      type: string;
+      shape: "rect" | "ellipse" | "arrow";
+      filled: boolean;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      color: string;
+      lineWidth: number;
+    },
+  ) {
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (msg.shape !== "rect" && msg.shape !== "ellipse" && msg.shape !== "arrow") {
+      return;
+    }
+
+    const stroke: SerializedStroke = {
+      points: [
+        { x: msg.x, y: msg.y },
+        { x: msg.x + msg.width, y: msg.y + msg.height },
+      ],
+      color: msg.color,
+      lineWidth: msg.lineWidth,
+      shape: msg.shape,
+      filled: msg.filled,
+    };
+    this.strokes.push(stroke);
+    this.redoStack = []; // new stroke invalidates redo history
+    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+
+    this.broadcast(
+      {
+        type: "shape",
+        shape: msg.shape,
+        filled: msg.filled,
+        x: msg.x,
+        y: msg.y,
+        width: msg.width,
+        height: msg.height,
+        color: msg.color,
+        lineWidth: msg.lineWidth,
+      },
+      ws,
+    );
+  }
+
   private async onClear(ws: WebSocket) {
     const player = this.getPlayer(ws);
-    if (!player || player.id !== this.drawerId) return;
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
 
     this.strokes = [];
+    this.redoStack = [];
     this.currentStrokePoints = [];
-    await this.state.storage.put("strokes", this.strokes);
+    await this.clearStrokeStorage();
     this.broadcast({ type: "clear" });
   }
 
   private async onUndo(ws: WebSocket) {
     const player = this.getPlayer(ws);
-    if (!player || player.id !== this.drawerId) return;
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
 
     if (this.strokes.length > 0) {
+      const poppedIndex = this.strokes.length - 1;
+      const popped = this.strokes[poppedIndex];
       this.strokes.pop();
-      await this.state.storage.put("strokes", this.strokes);
-      this.broadcast({ type: "undo" });
+      this.redoStack.push(popped);
+      await this.state.storage.delete(strokeKey(poppedIndex));
+      // Exclude sender — drawer already updated locally, a round-trip would pop twice.
+      this.broadcast({ type: "undo" }, ws);
     }
+  }
+
+  private async onRedo(ws: WebSocket) {
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (this.redoStack.length === 0) {
+      return;
+    }
+    const redone = this.redoStack.pop();
+    if (!redone) {
+      return;
+    }
+    this.strokes.push(redone);
+    await this.state.storage.put(strokeKey(this.strokes.length - 1), redone);
+    // Exclude sender — drawer already updated locally, a round-trip would push twice.
+    this.broadcast({ type: "redo" }, ws);
   }
 
   private async onSetAnswer(ws: WebSocket, answer: string) {
     const player = this.getPlayer(ws);
-    if (!player || player.id !== this.drawerId) return;
-    if (!answer || answer.trim().length === 0) return;
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (!answer || answer.trim().length === 0) {
+      return;
+    }
 
-    this.answer = answer.trim().toLowerCase();
+    // Store original text (drawer sees this on "answer: ..." panel and
+    // answerLength is the visible length). Normalization happens at compare-time.
+    this.answer = answer.trim().slice(0, MAX_ANSWER_LENGTH);
     this.phase = "guessing";
 
     await this.saveState();
@@ -637,13 +853,19 @@ export class GameRoom implements DurableObject {
 
   private async onGuess(ws: WebSocket, text: string) {
     const player = this.getPlayer(ws);
-    if (!player || player.id === this.drawerId) return;
-    if (this.phase !== "guessing") return;
-    if (!text || text.trim().length === 0) return;
+    if (!player || player.id === this.drawerId) {
+      return;
+    }
+    if (this.phase !== "guessing") {
+      return;
+    }
+    if (!text || text.trim().length === 0) {
+      return;
+    }
 
-    const trimmed = text.trim();
-    const guess = trimmed.toLowerCase();
-    const correct = guess === this.answer;
+    const trimmed = text.trim().slice(0, MAX_CHAT_LENGTH);
+    const correct =
+      this.answer !== null && normalizeForCompare(trimmed) === normalizeForCompare(this.answer);
 
     this.chatHistory.push({
       kind: "guess",
@@ -681,11 +903,15 @@ export class GameRoom implements DurableObject {
 
   private async onChat(ws: WebSocket, text: string) {
     const player = this.getPlayer(ws);
-    if (!player) return;
-    if (!text || text.trim().length === 0) return;
+    if (!player) {
+      return;
+    }
+    if (!text || text.trim().length === 0) {
+      return;
+    }
 
     const timestamp = Date.now();
-    const trimmed = text.trim();
+    const trimmed = text.trim().slice(0, MAX_CHAT_LENGTH);
 
     this.chatHistory.push({
       kind: "chat",
@@ -710,15 +936,21 @@ export class GameRoom implements DurableObject {
 
   private async onContinueDrawing(ws: WebSocket) {
     const player = this.getPlayer(ws);
-    if (!player || player.id !== this.drawerId) return;
-    if (this.phase !== "revealed") return;
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (this.phase !== "revealed") {
+      return;
+    }
 
     this.phase = "drawing";
     this.answer = null;
     this.strokes = [];
+    this.redoStack = [];
     this.currentStrokePoints = [];
 
     await this.saveState();
+    await this.clearStrokeStorage();
 
     this.broadcast({ type: "clear" });
     this.broadcast({
@@ -730,7 +962,9 @@ export class GameRoom implements DurableObject {
 
   private async onTransfer(ws: WebSocket) {
     const player = this.getPlayer(ws);
-    if (!player || player.id !== this.drawerId) return;
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
 
     // Find the other player
     for (const { player: other } of this.getJoinedWebSockets()) {
@@ -746,9 +980,11 @@ export class GameRoom implements DurableObject {
     this.phase = "drawing";
     this.answer = null;
     this.strokes = [];
+    this.redoStack = [];
     this.currentStrokePoints = [];
 
     await this.saveState();
+    await this.clearStrokeStorage();
 
     this.broadcast({
       type: "transferDone",
@@ -765,7 +1001,9 @@ export class GameRoom implements DurableObject {
   /** Intentional leave — immediate removal, no grace period */
   private async onLeave(ws: WebSocket) {
     const player = this.getPlayer(ws);
-    if (!player) return;
+    if (!player) {
+      return;
+    }
 
     ws.serializeAttachment(null);
 
@@ -778,13 +1016,19 @@ export class GameRoom implements DurableObject {
       graceMs: 0,
     });
 
-    try { ws.close(1000, "left"); } catch { /* ignore */ }
+    try {
+      ws.close(1000, "left");
+    } catch {
+      /* ignore */
+    }
   }
 
   /** Unintentional disconnect — grace period for reconnection */
   private async onDisconnect(ws: WebSocket) {
     const player = this.getPlayer(ws);
-    if (!player) return;
+    if (!player) {
+      return;
+    }
 
     // Clear attachment so this ws is no longer counted as a joined player
     ws.serializeAttachment(null);
@@ -813,10 +1057,7 @@ export class GameRoom implements DurableObject {
     // Also consider other disconnected players still in grace period
     const otherDisconnected = Array.from(this.disconnectedPlayers.values());
 
-    const allRemaining = [
-      ...remaining.map((r) => r.player),
-      ...otherDisconnected,
-    ];
+    const allRemaining = [...remaining.map((r) => r.player), ...otherDisconnected];
 
     if (allRemaining.length > 0) {
       // Notify connected players about the leave
@@ -852,8 +1093,10 @@ export class GameRoom implements DurableObject {
       this.drawerId = null;
       this.answer = null;
       this.strokes = [];
+      this.redoStack = [];
       this.chatHistory = [];
       await this.saveState();
+      await this.clearStrokeStorage();
     }
   }
 

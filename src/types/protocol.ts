@@ -1,5 +1,21 @@
 // ============ Shared Types ============
 
+/**
+ * Wire protocol version.
+ *
+ * Bump only on **breaking** changes:
+ * - removing a message type / required field
+ * - changing the type or semantics of an existing field
+ *
+ * Non-breaking (do NOT bump):
+ * - adding a new message type
+ * - adding an optional field
+ *
+ * Keep in sync with `PROTOCOL_VERSION` in `worker/src/room.ts`.
+ * Clients send `v` in their `join` message; server rejects mismatched versions.
+ */
+export const PROTOCOL_VERSION = 1;
+
 export type GamePhase = "waiting" | "drawing" | "guessing" | "revealed";
 
 export interface PlayerInfo {
@@ -15,6 +31,11 @@ export interface SerializedStroke {
   // Text stroke fields (optional)
   text?: string;
   fontSize?: number;
+  // Shape stroke fields (optional).
+  // - rect/ellipse: points = [topLeft, bottomRight] (normalized, min→max)
+  // - arrow:        points = [start, end]           (normalized, direction preserved)
+  shape?: "rect" | "ellipse" | "arrow";
+  filled?: boolean; // only meaningful for rect/ellipse
 }
 
 // ============ Client → Server Messages ============
@@ -23,6 +44,7 @@ export interface C_Join {
   type: "join";
   playerName: string;
   playerId?: string; // For reconnection — reuse previous player ID
+  v?: number; // Protocol version — server rejects mismatched clients
 }
 
 export interface C_Draw {
@@ -32,6 +54,9 @@ export interface C_Draw {
   y: number;
   color: string;
   lineWidth: number;
+  // Optional batched points for 'move' action (RAF-throttled).
+  // When present, server appends all points; x/y is redundantly the last one.
+  points?: { x: number; y: number }[];
 }
 
 export interface C_Clear {
@@ -40,6 +65,10 @@ export interface C_Clear {
 
 export interface C_Undo {
   type: "undo";
+}
+
+export interface C_Redo {
+  type: "redo";
 }
 
 export interface C_SetAnswer {
@@ -70,6 +99,20 @@ export interface C_TextStroke {
   fontSize: number;
 }
 
+export interface C_Shape {
+  type: "shape";
+  shape: "rect" | "ellipse" | "arrow";
+  filled: boolean;
+  // For rect/ellipse: (x,y) is top-left, width/height ≥ 0
+  // For arrow:        (x,y) is start point; width/height may be negative (end - start)
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  lineWidth: number;
+}
+
 export interface C_ContinueDrawing {
   type: "continueDrawing";
 }
@@ -78,18 +121,25 @@ export interface C_Leave {
   type: "leave";
 }
 
+export interface C_Ping {
+  type: "ping";
+}
+
 export type ClientMessage =
   | C_Join
   | C_Draw
   | C_Clear
   | C_Undo
+  | C_Redo
   | C_SetAnswer
   | C_Guess
   | C_Chat
   | C_TextStroke
+  | C_Shape
   | C_Transfer
   | C_ContinueDrawing
-  | C_Leave;
+  | C_Leave
+  | C_Ping;
 
 // ============ Chat History (persisted on server for replay) ============
 
@@ -134,6 +184,8 @@ export interface S_Draw {
   y: number;
   color: string;
   lineWidth: number;
+  // Batched move points (same semantics as client side).
+  points?: { x: number; y: number }[];
 }
 
 export interface S_Clear {
@@ -142,6 +194,10 @@ export interface S_Clear {
 
 export interface S_Undo {
   type: "undo";
+}
+
+export interface S_Redo {
+  type: "redo";
 }
 
 export interface S_PhaseChange {
@@ -177,6 +233,18 @@ export interface S_TextStroke {
   fontSize: number;
 }
 
+export interface S_Shape {
+  type: "shape";
+  shape: "rect" | "ellipse" | "arrow";
+  filled: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  lineWidth: number;
+}
+
 export interface S_TransferDone {
   type: "transferDone";
   newDrawerId: string;
@@ -192,6 +260,10 @@ export interface S_RoomClosed {
   reason: string;
 }
 
+export interface S_Pong {
+  type: "pong";
+}
+
 export type ServerMessage =
   | S_RoomState
   | S_PlayerJoined
@@ -199,13 +271,16 @@ export type ServerMessage =
   | S_Draw
   | S_Clear
   | S_Undo
+  | S_Redo
   | S_PhaseChange
   | S_GuessResult
   | S_Chat
   | S_TextStroke
+  | S_Shape
   | S_TransferDone
   | S_Error
-  | S_RoomClosed;
+  | S_RoomClosed
+  | S_Pong;
 
 // ============ Frontend State ============
 

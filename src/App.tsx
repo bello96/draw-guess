@@ -30,7 +30,9 @@ export default function App() {
   // Check URL on mount for room code
   useEffect(() => {
     const code = getRoomCodeFromUrl();
-    if (!code) return;
+    if (!code) {
+      return;
+    }
 
     const savedName = sessionStorage.getItem(NICKNAME_KEY);
     const savedPlayerId = sessionStorage.getItem(PLAYER_ID_KEY);
@@ -50,7 +52,9 @@ export default function App() {
   const enterRoom = useCallback((code: string, name: string, existingPlayerId?: string) => {
     setPlayerName(name);
     setRoomCode(code);
-    if (existingPlayerId) setPlayerId(existingPlayerId);
+    if (existingPlayerId) {
+      setPlayerId(existingPlayerId);
+    }
     sessionStorage.setItem(NICKNAME_KEY, name);
     window.history.replaceState(null, "", `/${code}`);
   }, []);
@@ -90,9 +94,7 @@ export default function App() {
           <h2 className={tx("text-xl font-bold text-center mb-2 text-indigo-600")}>
             加入房间 {urlJoinCode}
           </h2>
-          <p className={tx("text-gray-500 text-center mb-6 text-sm")}>
-            请输入你的昵称
-          </p>
+          <p className={tx("text-gray-500 text-center mb-6 text-sm")}>请输入你的昵称</p>
           <input
             type="text"
             value={modalName}
@@ -122,9 +124,7 @@ export default function App() {
               setUrlJoinCode("");
               window.history.replaceState(null, "", "/");
             }}
-            className={tx(
-              "w-full py-2 text-gray-500 hover:text-gray-700 transition text-sm mt-2",
-            )}
+            className={tx("w-full py-2 text-gray-500 hover:text-gray-700 transition text-sm mt-2")}
           >
             返回首页
           </button>
@@ -135,11 +135,7 @@ export default function App() {
 
   // Default: Home page
   return (
-    <div
-      className={tx(
-        "min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50",
-      )}
-    >
+    <div className={tx("min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50")}>
       <Home onEnterRoom={enterRoom} />
     </div>
   );

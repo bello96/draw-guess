@@ -35,20 +35,12 @@ export default function PlayerBar({
   };
 
   return (
-    <div
-      className={tx(
-        "flex items-center justify-between p-3 bg-white rounded-xl shadow-sm",
-      )}
-    >
+    <div className={tx("flex items-center justify-between p-3 bg-white rounded-xl shadow-sm")}>
       {/* Room info */}
       <div className={tx("flex items-center gap-4 w-[300px]")}>
         <div className={tx("flex items-center gap-2")}>
           <span className={tx("text-sm text-gray-500")}>房间号</span>
-          <span
-            className={tx(
-              "font-mono text-lg font-bold text-indigo-600 tracking-wider",
-            )}
-          >
+          <span className={tx("font-mono text-lg font-bold text-indigo-600 tracking-wider")}>
             {roomCode}
           </span>
           {players.length === 1 && (
@@ -91,23 +83,17 @@ export default function PlayerBar({
             key={p.id}
             className={tx(
               "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm",
-              p.id === drawerId
-                ? "bg-indigo-50 text-indigo-700"
-                : "bg-gray-50 text-gray-700",
+              p.id === drawerId ? "bg-indigo-50 text-indigo-700" : "bg-gray-50 text-gray-700",
               p.id === myId && "font-semibold",
             )}
           >
             <span>{p.id === drawerId ? "🎨" : "🤔"}</span>
             <span>{p.name}</span>
-            {p.id === myId && (
-              <span className={tx("text-xs text-gray-400")}>(你)</span>
-            )}
+            {p.id === myId && <span className={tx("text-xs text-gray-400")}>(你)</span>}
           </div>
         ))}
         {players.length < 2 && (
-          <div className={tx("text-sm text-gray-400 animate-pulse")}>
-            等待对方加入...
-          </div>
+          <div className={tx("text-sm text-gray-400 animate-pulse")}>等待对方加入...</div>
         )}
       </div>
 

@@ -1,8 +1,20 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { ClientMessage, ServerMessage } from "../types/protocol";
+import { PROTOCOL_VERSION } from "../types/protocol";
 import { apiUrl, wsUrl } from "../api";
 
 const PLAYER_ID_KEY = "draw-guess-playerId";
+
+// Server-initiated close reasons where reconnecting is pointless (or harmful).
+const TERMINAL_CLOSE_REASONS = new Set([
+  "left", // local user clicked leave
+  "room not found",
+  "room full",
+  "inactivity", // server auto-closed after idle timeout
+  "reconnected", // server take-over from another tab/device
+  "rate limited", // server rate-limited us; reconnecting would just get kicked again
+  "version mismatch", // client and server protocol versions differ — refresh needed
+]);
 
 export function useWebSocket(roomCode: string, playerName: string, playerId?: string) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -15,50 +27,104 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
   useEffect(() => {
     isUnloadingRef.current = false;
     hasLeftRef.current = false;
+    let shouldReconnect = true;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
 
-    const url = wsUrl(`/api/rooms/${roomCode}/ws`);
-
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setConnected(true);
-      const joinMsg: Record<string, unknown> = { type: "join", playerName };
-      if (playerId) joinMsg.playerId = playerId;
-      ws.send(JSON.stringify(joinMsg));
-    };
-
-    ws.onmessage = (event) => {
-      const msg: ServerMessage = JSON.parse(event.data);
-      setLastMessage(msg);
-      for (const listener of listenersRef.current) {
-        listener(msg);
+    const stopPing = () => {
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
       }
     };
 
-    ws.onclose = () => {
-      setConnected(false);
+    const connect = () => {
+      if (!shouldReconnect) {
+        return;
+      }
+
+      const url = wsUrl(`/api/rooms/${roomCode}/ws`);
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setConnected(true);
+        reconnectAttempts = 0;
+        const joinMsg: Record<string, unknown> = {
+          type: "join",
+          playerName,
+          v: PROTOCOL_VERSION,
+        };
+        // Prefer freshest playerId from sessionStorage — the prop is only the
+        // value at mount time; after the first roomState we always have one.
+        const latestPlayerId = playerId || sessionStorage.getItem(PLAYER_ID_KEY) || undefined;
+        if (latestPlayerId) {
+          joinMsg.playerId = latestPlayerId;
+        }
+        ws.send(JSON.stringify(joinMsg));
+
+        // Heartbeat: every 25s to keep intermediate proxies from dropping the
+        // connection. Server swallows ping and returns pong.
+        stopPing();
+        pingTimer = setInterval(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "ping" }));
+          }
+        }, 25_000);
+      };
+
+      ws.onmessage = (event) => {
+        const msg: ServerMessage = JSON.parse(event.data);
+        // Pong is a keepalive — no listener should care.
+        if (msg.type === "pong") {
+          return;
+        }
+        setLastMessage(msg);
+        for (const listener of listenersRef.current) {
+          listener(msg);
+        }
+      };
+
+      ws.onclose = (event) => {
+        setConnected(false);
+        wsRef.current = null;
+        stopPing();
+
+        if (!shouldReconnect || hasLeftRef.current || isUnloadingRef.current) {
+          return;
+        }
+        if (event.code === 1000 && TERMINAL_CLOSE_REASONS.has(event.reason)) {
+          return;
+        }
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (cap).
+        const delay = Math.min(1000 * 2 ** reconnectAttempts, 30000);
+        reconnectAttempts++;
+        reconnectTimer = setTimeout(connect, delay);
+      };
+
+      ws.onerror = () => {
+        // onclose always follows; reconnection is handled there.
+      };
     };
 
-    ws.onerror = () => {
-      setConnected(false);
-    };
+    connect();
 
-    // Detect page unload (refresh / close / navigate to external URL)
     const onBeforeUnload = () => {
       isUnloadingRef.current = true;
     };
 
-    // Send quickleave beacon on page hide — tells server to use a short
-    // grace period (5s) instead of the default 30s.  Enough for refresh
-    // to reconnect, but fast removal for tab close / external navigation.
+    // pagehide + sendBeacon tells server to use QUICK_LEAVE_GRACE_MS (5s)
+    // instead of the default 30s — enough for a refresh to reconnect, fast
+    // for tab close / external navigation.
     const onPageHide = () => {
-      if (hasLeftRef.current) return;
+      if (hasLeftRef.current) {
+        return;
+      }
       const pid = sessionStorage.getItem(PLAYER_ID_KEY);
       if (pid && navigator.sendBeacon) {
-        navigator.sendBeacon(
-          apiUrl(`/api/rooms/${roomCode}/quickleave?playerId=${pid}`),
-        );
+        navigator.sendBeacon(apiUrl(`/api/rooms/${roomCode}/quickleave?playerId=${pid}`));
       }
     };
 
@@ -66,15 +132,25 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
     window.addEventListener("pagehide", onPageHide);
 
     return () => {
+      shouldReconnect = false;
+      stopPing();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
       window.removeEventListener("beforeunload", onBeforeUnload);
       window.removeEventListener("pagehide", onPageHide);
 
-      // SPA navigation (not page unload) — send "leave" for immediate removal
-      if (!isUnloadingRef.current && !hasLeftRef.current && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "leave" }));
+      const ws = wsRef.current;
+      if (ws) {
+        if (ws.readyState === WebSocket.OPEN && !isUnloadingRef.current && !hasLeftRef.current) {
+          ws.send(JSON.stringify({ type: "leave" }));
+        }
+        try {
+          ws.close();
+        } catch {
+          // already closed
+        }
       }
-
-      ws.close();
       wsRef.current = null;
     };
   }, [roomCode, playerName, playerId]);
@@ -92,7 +168,6 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
     };
   }, []);
 
-  /** Send "leave" message before closing — triggers immediate removal on server */
   const leave = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "leave" }));

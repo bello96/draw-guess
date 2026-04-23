@@ -102,7 +102,9 @@ export default function ChatPanel({
   }, [messages]);
 
   const handleSubmit = () => {
-    if (!input.trim()) return;
+    if (!input.trim()) {
+      return;
+    }
     const text = input.trim();
     setInput("");
 
@@ -129,18 +131,12 @@ export default function ChatPanel({
   const cfg = MODE_CONFIG[mode];
 
   return (
-    <div
-      className={tx(
-        "flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden",
-      )}
-    >
+    <div className={tx("flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden")}>
       {/* Header */}
       <div className={tx("px-4 py-3 border-b border-gray-100")}>
         <h3 className={tx("font-semibold text-gray-700")}>聊天</h3>
         {isDrawer && answerText && (phase === "guessing" || phase === "revealed") && (
-          <div className={tx("text-sm text-indigo-600 mt-1")}>
-            答案：{answerText}
-          </div>
+          <div className={tx("text-sm text-indigo-600 mt-1")}>答案：{answerText}</div>
         )}
         {!isDrawer && phase === "guessing" && answerLength && (
           <div className={tx("text-sm text-green-600 mt-1")}>
@@ -150,16 +146,11 @@ export default function ChatPanel({
       </div>
 
       {/* Messages */}
-      <div
-        ref={listRef}
-        className={tx("flex-1 overflow-y-auto p-3 space-y-2 min-h-0")}
-      >
+      <div ref={listRef} className={tx("flex-1 overflow-y-auto p-3 space-y-2 min-h-0")}>
         {messages.map((msg) => (
           <div key={msg.id}>
             {msg.kind === "system" ? (
-              <div className={tx("text-center text-xs text-gray-400 py-1")}>
-                {msg.text}
-              </div>
+              <div className={tx("text-center text-xs text-gray-400 py-1")}>{msg.text}</div>
             ) : msg.kind === "guess" ? (
               <div
                 className={tx(
@@ -169,17 +160,19 @@ export default function ChatPanel({
                     : "bg-red-50 text-red-600 border border-red-200",
                 )}
               >
-                <span className={tx("font-medium")}>{msg.playerName}{msg.playerId === myId && "（你）"}</span>
+                <span className={tx("font-medium")}>
+                  {msg.playerName}
+                  {msg.playerId === myId && "（你）"}
+                </span>
                 <span className={tx("mx-1")}>猜：</span>
                 <span>{msg.text}</span>
-                <span className={tx("ml-2")}>
-                  {msg.correct ? "✅ 正确!" : "❌ 不对"}
-                </span>
+                <span className={tx("ml-2")}>{msg.correct ? "✅ 正确!" : "❌ 不对"}</span>
               </div>
             ) : (
               <div className={tx("text-sm")}>
                 <span className={tx("font-medium text-indigo-600")}>
-                  {msg.playerName}{msg.playerId === myId && "（你）"}
+                  {msg.playerName}
+                  {msg.playerId === myId && "（你）"}
                 </span>
                 <span className={tx("text-gray-400 mx-1")}>:</span>
                 <span className={tx("text-gray-700")}>{msg.text}</span>
@@ -192,9 +185,7 @@ export default function ChatPanel({
       {/* Unified input */}
       <div className={tx("px-3 py-2 border-t border-gray-100")}>
         {mode === "setAnswer" && (
-          <div className={tx("text-xs text-indigo-600 mb-1.5")}>
-            设置答案后对方才能开始猜
-          </div>
+          <div className={tx("text-xs text-indigo-600 mb-1.5")}>设置答案后对方才能开始猜</div>
         )}
         <div className={tx("flex gap-2 items-center")}>
           <input
@@ -203,6 +194,7 @@ export default function ChatPanel({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={cfg.placeholder}
+            maxLength={mode === "setAnswer" ? 20 : 200}
             className={tx(
               "flex-1 px-3 py-2 text-sm border-2 rounded-lg",
               cfg.borderColor,
@@ -229,12 +221,9 @@ export default function ChatPanel({
               title="切换输入模式"
               className={tx(
                 "px-2.5 py-2 text-xs font-medium rounded-lg transition shrink-0",
-                mode === "chat" &&
-                  "bg-gray-100 text-gray-600 hover:bg-gray-200",
-                mode === "setAnswer" &&
-                  "bg-indigo-100 text-indigo-700 hover:bg-indigo-200",
-                mode === "guess" &&
-                  "bg-green-100 text-green-700 hover:bg-green-200",
+                mode === "chat" && "bg-gray-100 text-gray-600 hover:bg-gray-200",
+                mode === "setAnswer" && "bg-indigo-100 text-indigo-700 hover:bg-indigo-200",
+                mode === "guess" && "bg-green-100 text-green-700 hover:bg-green-200",
               )}
             >
               {(() => {

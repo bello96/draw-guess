@@ -3,11 +3,14 @@ import { tx } from "@twind/core";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useCanvas } from "../hooks/useCanvas";
 import Canvas from "../components/Canvas";
-import type { EditingText } from "../components/Canvas";
-import Toolbar from "../components/Toolbar";
+import type { EditingShape, EditingText } from "../components/Canvas";
+import type { DrawnShape } from "../hooks/useCanvas";
+import Toolbar, { TEXT_SIZE_TO_PX } from "../components/Toolbar";
+import type { FillMode, TextSize, ToolMode } from "../components/Toolbar";
 import PlayerBar from "../components/PlayerBar";
 import ChatPanel from "../components/ChatPanel";
 import Confetti from "../components/Confetti";
+import Toast, { type ToastType } from "../components/Toast";
 import type {
   PlayerInfo,
   GamePhase,
@@ -15,7 +18,6 @@ import type {
   ChatHistoryEntry,
   ServerMessage,
 } from "../types/protocol";
-import type { ToolMode } from "../components/Toolbar";
 import { useEffect } from "react";
 
 interface Props {
@@ -32,7 +34,6 @@ function nextMsgId() {
   return `msg-${++msgIdCounter}`;
 }
 
-const DEFAULT_TEXT_FONT_SIZE = 24;
 
 export default function Room({ roomCode, playerName, playerId, onLeave }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -48,19 +49,37 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [confettiKey, setConfettiKey] = useState(0);
   const [joinError, setJoinError] = useState("");
+  const [toast, setToast] = useState<{ message: string; type: ToastType; id: number } | null>(null);
 
   // Drawing state
   const [color, setColor] = useState("#000000");
   const [lineWidth, setLineWidth] = useState(4);
   const [tool, setTool] = useState<ToolMode>("pen");
+  const [fillMode, setFillMode] = useState<FillMode>("stroke");
+  const [textSize, setTextSize] = useState<TextSize>("medium");
 
   // Unified text editing state
   const [editingText, setEditingText] = useState<EditingText | null>(null);
+  // Shape (rect/ellipse) editing state — the drawer has drawn a shape and is
+  // previewing it inside a dashed overlay; commits on click-outside/tool-change.
+  const [editingShape, setEditingShape] = useState<EditingShape | null>(null);
+  // Undone strokes, LIFO. Any new stroke invalidates this stack — mirrors the
+  // server-side redoStack so both sides stay in sync.
+  const redoStackRef = useRef<import("../types/protocol").SerializedStroke[]>([]);
+  // Mirror of "strokes / redoStack non-empty" for toolbar enablement. Kept as
+  // state so React re-renders buttons when the stacks change.
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
 
   const isDrawer = myId !== null && myId === drawerId;
 
   // WebSocket
-  const { connected, send, addListener, leave: wsLeave } = useWebSocket(roomCode, playerName, playerId);
+  const {
+    connected,
+    send,
+    addListener,
+    leave: wsLeave,
+  } = useWebSocket(roomCode, playerName, playerId);
 
   // Wrap onLeave: send "leave" message first for instant server-side removal
   const handleLeave = useCallback(() => {
@@ -68,20 +87,58 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     onLeave();
   }, [wsLeave, onLeave]);
 
+  // Bridge: useCanvas emits a DrawnShape on mouseup; we store it as editingShape.
+  const handleShapeDrawn = useCallback((shape: DrawnShape) => {
+    setEditingShape({
+      shape: shape.shape,
+      filled: shape.filled,
+      points: shape.points,
+      normalizedPoints: shape.normalizedPoints,
+      color: shape.color,
+      lineWidth: shape.lineWidth,
+    });
+  }, []);
+
+  // Refresh undo/redo button enablement. Call after any strokes/redoStack mutation.
+  // Refs aren't reactive, so we mirror the "non-empty" flag into state here.
+  const syncHistoryFlags = useCallback(() => {
+    setCanUndo(strokesRef.current.length > 0);
+    setCanRedo(redoStackRef.current.length > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Local pen stroke finished — any new stroke invalidates redo history.
+  const handleLocalPenEnd = useCallback(() => {
+    redoStackRef.current = [];
+    syncHistoryFlags();
+  }, [syncHistoryFlags]);
+
   // Canvas
-  const { replayDraw, replayAll, clearCanvas, addTextStroke, strokesRef } = useCanvas({
+  const {
+    replayDraw,
+    replayAll,
+    clearCanvas,
+    addTextStroke,
+    addShape,
+    syncVisibleFromOffscreen,
+    strokesRef,
+  } = useCanvas({
     canvasRef,
     isDrawer,
     color,
     lineWidth,
     tool,
+    fillMode,
     send,
+    onShapeDrawn: handleShapeDrawn,
+    onLocalPenEnd: handleLocalPenEnd,
   });
 
-  // Canvas resize handler — replay all strokes from strokesRef
+  // Canvas resize handler — blit the cached offscreen onto the (now resized)
+  // visible canvas. O(1) regardless of stroke count.
   const handleCanvasResize = useCallback(() => {
-    replayAll([...strokesRef.current]);
-  }, [replayAll, strokesRef]);
+    syncVisibleFromOffscreen();
+  }, [syncVisibleFromOffscreen]);
 
   const addSystemMessage = useCallback((text: string) => {
     setMessages((prev) => [
@@ -109,21 +166,28 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           setPlayers(msg.players);
           setDrawerId(msg.drawerId);
           setPhase(msg.phase);
-          if (msg.answerLength) setAnswerLength(msg.answerLength);
-          if (msg.answer) setAnswerText(msg.answer);
+          if (msg.answerLength) {
+            setAnswerLength(msg.answerLength);
+          }
+          if (msg.answer) {
+            setAnswerText(msg.answer);
+          }
           // Replay strokes (strokesRef is saved even if canvas isn't mounted yet)
           replayAll(msg.strokes);
+          syncHistoryFlags();
           // Restore chat history
           if (msg.chatHistory && msg.chatHistory.length > 0) {
-            setMessages(msg.chatHistory.map((entry: ChatHistoryEntry) => ({
-              id: nextMsgId(),
-              playerId: entry.playerId,
-              playerName: entry.playerName,
-              text: entry.text,
-              timestamp: entry.timestamp,
-              kind: entry.kind,
-              correct: entry.correct,
-            })));
+            setMessages(
+              msg.chatHistory.map((entry: ChatHistoryEntry) => ({
+                id: nextMsgId(),
+                playerId: entry.playerId,
+                playerName: entry.playerName,
+                text: entry.text,
+                timestamp: entry.timestamp,
+                kind: entry.kind,
+                correct: entry.correct,
+              })),
+            );
           }
           break;
 
@@ -144,25 +208,63 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
         case "draw":
           replayDraw(msg);
+          if (msg.action === "end") {
+            redoStackRef.current = []; // new stroke invalidates redo history
+            syncHistoryFlags();
+          }
           break;
 
         case "clear":
           clearCanvas();
+          redoStackRef.current = [];
+          syncHistoryFlags();
           break;
 
         case "textStroke":
           addTextStroke(msg.text, msg.x, msg.y, msg.color, msg.fontSize);
+          redoStackRef.current = [];
+          syncHistoryFlags();
           break;
 
-        case "undo":
-          strokesRef.current.pop();
-          replayAll([...strokesRef.current]);
+        case "shape":
+          addShape(
+            { x: msg.x, y: msg.y },
+            { x: msg.x + msg.width, y: msg.y + msg.height },
+            msg.color,
+            msg.lineWidth,
+            msg.shape,
+            msg.filled,
+          );
+          redoStackRef.current = [];
+          syncHistoryFlags();
           break;
+
+        case "undo": {
+          const popped = strokesRef.current.pop();
+          if (popped) {
+            redoStackRef.current.push(popped);
+          }
+          replayAll([...strokesRef.current]);
+          syncHistoryFlags();
+          break;
+        }
+
+        case "redo": {
+          const redone = redoStackRef.current.pop();
+          if (redone) {
+            strokesRef.current.push(redone);
+            replayAll([...strokesRef.current]);
+          }
+          syncHistoryFlags();
+          break;
+        }
 
         case "phaseChange":
           setPhase(msg.phase);
           setDrawerId(msg.drawerId);
-          if (msg.answerLength) setAnswerLength(msg.answerLength);
+          if (msg.answerLength) {
+            setAnswerLength(msg.answerLength);
+          }
           if (msg.phase === "guessing") {
             addSystemMessage("答案已设定，开始猜词！");
           } else if (msg.phase === "revealed") {
@@ -220,7 +322,9 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             setJoinError(msg.message);
             setTimeout(() => onLeave(), 1500);
           } else {
-            addSystemMessage(`⚠️ ${msg.message}`);
+            // Runtime error (rate limit, invalid action, etc.) — toast instead of
+            // noisy system message in the chat log.
+            setToast({ message: msg.message, type: "error", id: Date.now() });
           }
           break;
 
@@ -238,28 +342,59 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     replayAll,
     clearCanvas,
     addTextStroke,
+    addShape,
     addSystemMessage,
     strokesRef,
+    syncHistoryFlags,
     onLeave,
   ]);
 
   const handleClear = () => {
+    setEditingShape(null);
+    redoStackRef.current = [];
     send({ type: "clear" });
     clearCanvas();
+    syncHistoryFlags();
   };
 
   const handleUndo = () => {
-    send({ type: "undo" });
+    if (strokesRef.current.length === 0) {
+      return;
+    }
+    const popped = strokesRef.current[strokesRef.current.length - 1];
     strokesRef.current.pop();
+    redoStackRef.current.push(popped);
     replayAll([...strokesRef.current]);
+    send({ type: "undo" });
+    syncHistoryFlags();
+  };
+
+  const handleRedo = () => {
+    if (redoStackRef.current.length === 0) {
+      return;
+    }
+    const redone = redoStackRef.current.pop();
+    if (!redone) {
+      return;
+    }
+    strokesRef.current.push(redone);
+    replayAll([...strokesRef.current]);
+    send({ type: "redo" });
+    syncHistoryFlags();
   };
 
   const handleTransfer = () => {
+    setEditingShape(null);
+    redoStackRef.current = [];
     send({ type: "transfer" });
+    syncHistoryFlags();
   };
 
   const handleContinueDrawing = () => {
+    setEditingShape(null);
+    redoStackRef.current = [];
     send({ type: "continueDrawing" });
+    syncHistoryFlags();
   };
 
   // Commit editing text to canvas and sync to server
@@ -268,7 +403,13 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       setEditingText(null);
       return;
     }
-    addTextStroke(editingText.text, editingText.normalizedX, editingText.normalizedY, color, editingText.fontSize);
+    addTextStroke(
+      editingText.text,
+      editingText.normalizedX,
+      editingText.normalizedY,
+      color,
+      editingText.fontSize,
+    );
     send({
       type: "textStroke",
       text: editingText.text,
@@ -277,19 +418,25 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       color,
       fontSize: editingText.fontSize,
     });
+    redoStackRef.current = []; // new stroke invalidates redo history
+    syncHistoryFlags();
     setEditingText(null);
-  }, [editingText, color, addTextStroke, send]);
+  }, [editingText, color, addTextStroke, send, syncHistoryFlags]);
 
   // Text tool: click on canvas to create editing text
   const handleCanvasClickForText = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!isDrawer || tool !== "text") return;
+      if (!isDrawer || tool !== "text") {
+        return;
+      }
       // Commit current editing text first
       if (editingText) {
         commitEditingText();
       }
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      if (!canvas) {
+        return;
+      }
       const rect = canvas.getBoundingClientRect();
       const offsetX = e.clientX - rect.left;
       const offsetY = e.clientY - rect.top;
@@ -299,35 +446,112 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         y: offsetY,
         normalizedX: offsetX / rect.width,
         normalizedY: offsetY / rect.height,
-        fontSize: DEFAULT_TEXT_FONT_SIZE,
+        fontSize: TEXT_SIZE_TO_PX[textSize],
       });
     },
-    [isDrawer, tool, canvasRef, editingText, commitEditingText],
+    [isDrawer, tool, canvasRef, editingText, commitEditingText, textSize],
   );
 
   // Update editing text fields
-  const handleEditingTextUpdate = useCallback(
-    (updates: Partial<EditingText>) => {
-      setEditingText((prev) => (prev ? { ...prev, ...updates } : null));
-    },
-    [],
-  );
-
-  // Delete editing text
-  const handleEditingTextDelete = useCallback(() => {
-    setEditingText(null);
+  const handleEditingTextUpdate = useCallback((updates: Partial<EditingText>) => {
+    setEditingText((prev) => (prev ? { ...prev, ...updates } : null));
   }, []);
 
-  // When switching away from text tool, commit editing text
+  // --- Shape editing ---
+
+  // Commit the current editing shape: draw onto canvas + sync to the other player.
+  const commitEditingShape = useCallback(() => {
+    if (!editingShape) {
+      return;
+    }
+    const { shape, filled, color: shapeColor, lineWidth: shapeLineWidth, normalizedPoints } =
+      editingShape;
+    const [p0, p1] = normalizedPoints;
+    addShape(p0, p1, shapeColor, shapeLineWidth, shape, filled);
+    // Wire protocol uses {x,y,width,height}. For arrow: width/height may be
+    // negative (direction preserved). For rect/ellipse: both are ≥ 0.
+    send({
+      type: "shape",
+      shape,
+      filled,
+      x: p0.x,
+      y: p0.y,
+      width: p1.x - p0.x,
+      height: p1.y - p0.y,
+      color: shapeColor,
+      lineWidth: shapeLineWidth,
+    });
+    redoStackRef.current = []; // new stroke invalidates redo history
+    syncHistoryFlags();
+    setEditingShape(null);
+  }, [editingShape, addShape, send, syncHistoryFlags]);
+
+  // Drag the overlay around (pixel + normalized both get updated)
+  const handleEditingShapeUpdate = useCallback((updates: Partial<EditingShape>) => {
+    setEditingShape((prev) => (prev ? { ...prev, ...updates } : null));
+  }, []);
+
+  // When switching tools, commit whichever in-edit item is active.
   const handleToolChange = useCallback(
     (t: ToolMode) => {
       if (t !== "text" && editingText) {
         commitEditingText();
       }
+      if (t !== "rect" && t !== "ellipse" && editingShape) {
+        commitEditingShape();
+      }
       setTool(t);
     },
-    [editingText, commitEditingText],
+    [editingText, editingShape, commitEditingText, commitEditingShape],
   );
+
+  // Click-outside commit: while a text is being edited, clicking anywhere
+  // outside the overlay and outside the canvas (canvas clicks are handled
+  // separately by onCanvasClick which commits and opens a new one) should
+  // commit the current text. This matches expected text-editor behavior.
+  useEffect(() => {
+    if (!editingText) {
+      return;
+    }
+    const handleGlobalMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) {
+        return;
+      }
+      if (target.closest("[data-text-overlay]")) {
+        return;
+      }
+      if (target.tagName === "CANVAS") {
+        return;
+      }
+      commitEditingText();
+    };
+    window.addEventListener("mousedown", handleGlobalMouseDown);
+    return () => window.removeEventListener("mousedown", handleGlobalMouseDown);
+  }, [editingText, commitEditingText]);
+
+  // Click-outside commit for editing shape. Uses CAPTURE phase so this fires
+  // before useCanvas's canvas mousedown handler — that way a click on the
+  // canvas (e.g. starting a new shape) commits the current one first, then
+  // the fresh drag is allowed to proceed on the now-empty editing slot.
+  useEffect(() => {
+    if (!editingShape) {
+      return;
+    }
+    const handleGlobalMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) {
+        return;
+      }
+      // Inside the dashed overlay: it's a drag, not a commit.
+      if (target.closest("[data-shape-overlay]")) {
+        return;
+      }
+      commitEditingShape();
+    };
+    window.addEventListener("mousedown", handleGlobalMouseDown, true);
+    return () => window.removeEventListener("mousedown", handleGlobalMouseDown, true);
+  }, [editingShape, commitEditingShape]);
 
   const handleSendChat = (text: string) => {
     send({ type: "chat", text });
@@ -344,11 +568,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   if (!connected || !myId) {
     return (
-      <div
-        className={tx(
-          "flex items-center justify-center min-h-screen bg-gray-50",
-        )}
-      >
+      <div className={tx("flex items-center justify-center min-h-screen bg-gray-50")}>
         <div className={tx("text-center")}>
           {joinError ? (
             <>
@@ -369,8 +589,14 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   return (
     <div className={tx("flex flex-col h-screen bg-gray-50 p-3 gap-3")}>
-      {confettiKey > 0 && (
-        <Confetti key={confettiKey} />
+      {confettiKey > 0 && <Confetti key={confettiKey} />}
+      {toast && (
+        <Toast
+          key={toast.id}
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
       )}
       {/* Top bar */}
       <PlayerBar
@@ -396,19 +622,26 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             onCanvasClick={handleCanvasClickForText}
             editingText={editingText}
             onEditingTextUpdate={handleEditingTextUpdate}
-            onEditingTextDelete={handleEditingTextDelete}
-            onEditingTextCommit={commitEditingText}
             textColor={color}
+            editingShape={editingShape}
+            onEditingShapeUpdate={handleEditingShapeUpdate}
           />
           <Toolbar
             color={color}
             lineWidth={lineWidth}
             tool={tool}
+            fillMode={fillMode}
+            textSize={textSize}
             onColorChange={setColor}
             onLineWidthChange={setLineWidth}
             onToolChange={handleToolChange}
+            onFillModeChange={setFillMode}
+            onTextSizeChange={setTextSize}
             onClear={handleClear}
             onUndo={handleUndo}
+            onRedo={handleRedo}
+            canUndo={canUndo}
+            canRedo={canRedo}
             disabled={!isDrawer}
           />
         </div>

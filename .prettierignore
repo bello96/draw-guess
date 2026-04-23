@@ -1,0 +1,8 @@
+dist/
+node_modules/
+.wrangler/
+worker/node_modules/
+worker/.wrangler/
+*.md
+package-lock.json
+tsconfig.tsbuildinfo
