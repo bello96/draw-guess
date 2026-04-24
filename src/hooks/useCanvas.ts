@@ -6,12 +6,12 @@ type Point = { x: number; y: number };
 
 /** Raw shape data emitted by the shape/arrow tool on mouseup (before commit). */
 export interface DrawnShape {
-  shape: "rect" | "ellipse" | "arrow";
+  shape: "rect" | "ellipse" | "arrow" | "line";
   filled: boolean;
   /**
    * Raw pixel points in canvas-element space. Semantics:
    * - rect/ellipse: bounding box corners (order doesn't matter; consumers take min/max)
-   * - arrow:        p0 = start, p1 = end (direction matters — the arrow head is at p1)
+   * - arrow/line:   p0 = start, p1 = end (direction matters for arrow; irrelevant for line)
    */
   points: [Point, Point];
   /** Normalized (0..1) counterparts of the points above — used for send / persistence. */
@@ -47,8 +47,75 @@ export function scaleLineWidth(baseWidth: number, canvasWidth: number): number {
   return baseWidth * scale;
 }
 
-/** Draw an arrow (line + triangle head) in pixel coords onto the given ctx. */
+/**
+ * Geometry for a tapered arrow:
+ *   tail (0-width point) → body base (bodyHalf × 2) → head base (headHalf × 2) → head tip
+ * Shared by drawArrow and the SVG overlay preview so both renderings stay in sync.
+ */
+export function computeArrowGeometry(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  scaledLineWidth: number,
+): {
+  ux: number;
+  uy: number;
+  perpX: number;
+  perpY: number;
+  baseX: number;
+  baseY: number;
+  bodyHalf: number;
+  headHalf: number;
+} | null {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1) {
+    return null;
+  }
+  const ux = dx / dist;
+  const uy = dy / dist;
+  const perpX = -uy;
+  const perpY = ux;
+  const lw = scaledLineWidth;
+  const bodyHalf = lw;
+  const headHalf = lw * 2;
+  // Clamp head length so it never overruns the arrow itself on short drags.
+  const headLen = Math.min(Math.max(lw * 4, 16), dist * 0.6);
+  const baseX = x1 - ux * headLen;
+  const baseY = y1 - uy * headLen;
+  return { ux, uy, perpX, perpY, baseX, baseY, bodyHalf, headHalf };
+}
+
+/** Draw a tapered arrow (tail tip → widening body → arrow head) as a filled polygon. */
 function drawArrow(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  color: string,
+  scaledLineWidth: number,
+): void {
+  const g = computeArrowGeometry(x0, y0, x1, y1, scaledLineWidth);
+  if (!g) {
+    return;
+  }
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(g.baseX + g.perpX * g.bodyHalf, g.baseY + g.perpY * g.bodyHalf);
+  ctx.lineTo(g.baseX + g.perpX * g.headHalf, g.baseY + g.perpY * g.headHalf);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(g.baseX - g.perpX * g.headHalf, g.baseY - g.perpY * g.headHalf);
+  ctx.lineTo(g.baseX - g.perpX * g.bodyHalf, g.baseY - g.perpY * g.bodyHalf);
+  ctx.closePath();
+  ctx.fill();
+}
+
+/** Draw a straight stroke line (no arrow head) in pixel coords. */
+function drawLine(
   ctx: CanvasRenderingContext2D,
   x0: number,
   y0: number,
@@ -59,42 +126,132 @@ function drawArrow(
 ): void {
   const dx = x1 - x0;
   const dy = y1 - y0;
-  const dist = Math.hypot(dx, dy);
-  if (dist < 1) {
+  if (Math.hypot(dx, dy) < 1) {
     return;
   }
-  const ux = dx / dist;
-  const uy = dy / dist;
-  // Head proportional to line width, with a sensible minimum.
-  const headLen = Math.max(scaledLineWidth * 4, 12);
-  const headWidth = headLen * 0.8;
-  // Back off the line end so it doesn't peek through the filled triangle.
-  const backed = Math.min(headLen * 0.75, dist);
-  const lineEndX = x1 - ux * backed;
-  const lineEndY = y1 - uy * backed;
-
   ctx.strokeStyle = color;
-  ctx.fillStyle = color;
   ctx.lineWidth = scaledLineWidth;
   ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
   ctx.beginPath();
   ctx.moveTo(x0, y0);
-  ctx.lineTo(lineEndX, lineEndY);
+  ctx.lineTo(x1, y1);
   ctx.stroke();
+}
 
-  // Filled triangle at the tip
-  const baseX = x1 - ux * headLen;
-  const baseY = y1 - uy * headLen;
-  const perpX = -uy * (headWidth / 2);
-  const perpY = ux * (headWidth / 2);
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(baseX + perpX, baseY + perpY);
-  ctx.lineTo(baseX - perpX, baseY - perpY);
-  ctx.closePath();
-  ctx.fill();
+/** Parse "#rrggbb" / "#rgb" to [r,g,b,a=255]. */
+function hexToRgba(hex: string): [number, number, number, number] {
+  let h = hex.replace("#", "");
+  if (h.length === 3) {
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
+  }
+  const r = parseInt(h.slice(0, 2), 16) || 0;
+  const g = parseInt(h.slice(2, 4), 16) || 0;
+  const b = parseInt(h.slice(4, 6), 16) || 0;
+  return [r, g, b, 255];
+}
+
+/**
+ * Scanline flood fill in-place on a RGBA pixel buffer. Replaces all pixels
+ * connected to (sx, sy) whose color is within per-channel `tolerance` of the
+ * seed color with (fr,fg,fb,255). O(N) worst case.
+ *
+ * Already-filled pixels naturally fail the `matches` test (they've been
+ * rewritten to fill color, which is only equal to the target if we bailed
+ * early at the caller), so no explicit visited set needed.
+ */
+function scanlineFill(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  sx: number,
+  sy: number,
+  fr: number,
+  fg: number,
+  fb: number,
+  tolerance: number,
+): void {
+  const idx0 = (sy * w + sx) * 4;
+  const tr = data[idx0];
+  const tg = data[idx0 + 1];
+  const tb = data[idx0 + 2];
+  // Seed already matches fill → nothing to do (also prevents infinite loop).
+  if (tr === fr && tg === fg && tb === fb) {
+    return;
+  }
+  const tol = tolerance;
+  const matches = (idx: number): boolean => {
+    const dr = data[idx] - tr;
+    const dg = data[idx + 1] - tg;
+    const db = data[idx + 2] - tb;
+    return dr >= -tol && dr <= tol && dg >= -tol && dg <= tol && db >= -tol && db <= tol;
+  };
+  const paint = (idx: number): void => {
+    data[idx] = fr;
+    data[idx + 1] = fg;
+    data[idx + 2] = fb;
+    data[idx + 3] = 255;
+  };
+  const stack: number[] = [sx, sy];
+  while (stack.length > 0) {
+    const y = stack.pop()!;
+    const x = stack.pop()!;
+    let lx = x;
+    while (lx >= 0 && matches((y * w + lx) * 4)) {
+      lx--;
+    }
+    lx++;
+    let rx = x;
+    while (rx < w && matches((y * w + rx) * 4)) {
+      rx++;
+    }
+    rx--;
+    let aboveMatch = false;
+    let belowMatch = false;
+    for (let i = lx; i <= rx; i++) {
+      paint((y * w + i) * 4);
+      if (y > 0) {
+        const up = ((y - 1) * w + i) * 4;
+        const m = matches(up);
+        if (m && !aboveMatch) {
+          stack.push(i, y - 1);
+          aboveMatch = true;
+        } else if (!m) {
+          aboveMatch = false;
+        }
+      }
+      if (y < h - 1) {
+        const down = ((y + 1) * w + i) * 4;
+        const m = matches(down);
+        if (m && !belowMatch) {
+          stack.push(i, y + 1);
+          belowMatch = true;
+        } else if (!m) {
+          belowMatch = false;
+        }
+      }
+    }
+  }
+}
+
+/** Flood-fill an offscreen-sized context at the given (pixel) seed point. */
+function drawFillOnContext(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  sx: number,
+  sy: number,
+  fillColor: string,
+  tolerance: number,
+): void {
+  if (sx < 0 || sy < 0 || sx >= canvas.width || sy >= canvas.height) {
+    return;
+  }
+  const [fr, fg, fb] = hexToRgba(fillColor);
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  scanlineFill(img.data, canvas.width, canvas.height, sx, sy, fr, fg, fb, tolerance);
+  ctx.putImageData(img, 0, 0);
 }
 
 /** Render a single stroke onto an arbitrary context (visible canvas or offscreen). */
@@ -103,8 +260,21 @@ function renderStrokeToCtx(
   canvas: HTMLCanvasElement,
   stroke: SerializedStroke,
 ): void {
-  // Shape strokes: rect / ellipse / arrow
-  if (stroke.shape === "rect" || stroke.shape === "ellipse" || stroke.shape === "arrow") {
+  // Bucket-fill stroke: seed point (normalized) + color + tolerance
+  if (stroke.fill && stroke.points.length > 0) {
+    const sx = Math.floor(stroke.points[0].x * canvas.width);
+    const sy = Math.floor(stroke.points[0].y * canvas.height);
+    drawFillOnContext(ctx, canvas, sx, sy, stroke.color, stroke.fill.tolerance);
+    return;
+  }
+
+  // Shape strokes: rect / ellipse / arrow / line
+  if (
+    stroke.shape === "rect" ||
+    stroke.shape === "ellipse" ||
+    stroke.shape === "arrow" ||
+    stroke.shape === "line"
+  ) {
     if (stroke.points.length < 2) {
       return;
     }
@@ -113,6 +283,19 @@ function renderStrokeToCtx(
 
     if (stroke.shape === "arrow") {
       drawArrow(
+        ctx,
+        p0.x * canvas.width,
+        p0.y * canvas.height,
+        p1.x * canvas.width,
+        p1.y * canvas.height,
+        stroke.color,
+        lw,
+      );
+      return;
+    }
+
+    if (stroke.shape === "line") {
+      drawLine(
         ctx,
         p0.x * canvas.width,
         p0.y * canvas.height,
@@ -192,7 +375,7 @@ function renderStrokeToCtx(
   ctx.stroke();
 }
 
-/** Draw a live preview of an in-progress shape/arrow onto the visible context. */
+/** Draw a live preview of an in-progress shape/arrow/line onto the visible context. */
 function drawShapePreview(
   ctx: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
@@ -200,13 +383,26 @@ function drawShapePreview(
   end: Point,
   color: string,
   lineWidth: number,
-  shape: "rect" | "ellipse" | "arrow",
+  shape: "rect" | "ellipse" | "arrow" | "line",
   filled: boolean,
 ): void {
   const lw = scaleLineWidth(lineWidth, canvas.width);
 
   if (shape === "arrow") {
     drawArrow(
+      ctx,
+      start.x * canvas.width,
+      start.y * canvas.height,
+      end.x * canvas.width,
+      end.y * canvas.height,
+      color,
+      lw,
+    );
+    return;
+  }
+
+  if (shape === "line") {
+    drawLine(
       ctx,
       start.x * canvas.width,
       start.y * canvas.height,
@@ -269,11 +465,18 @@ export function useCanvas({
   const rafIdRef = useRef<number | null>(null);
 
   // Offscreen canvas — single source of truth for committed strokes.
+  // Initialized with an opaque white background so the bucket tool has
+  // real pixels to read (transparent pixels would make every fill degenerate).
   const offscreenRef = useRef<HTMLCanvasElement | null>(null);
   if (offscreenRef.current === null && typeof document !== "undefined") {
     const off = document.createElement("canvas");
     off.width = REF_WIDTH;
     off.height = REF_HEIGHT;
+    const offCtx = off.getContext("2d");
+    if (offCtx) {
+      offCtx.fillStyle = "#ffffff";
+      offCtx.fillRect(0, 0, REF_WIDTH, REF_HEIGHT);
+    }
     offscreenRef.current = off;
   }
 
@@ -312,11 +515,43 @@ export function useCanvas({
     if (!offCtx) {
       return;
     }
-    offCtx.clearRect(0, 0, offs.width, offs.height);
+    offCtx.fillStyle = "#ffffff";
+    offCtx.fillRect(0, 0, offs.width, offs.height);
     for (const stroke of strokes) {
       renderStrokeToCtx(offCtx, offs, stroke);
     }
   }, []);
+
+  /**
+   * Apply a bucket-fill stroke (from local tool click OR a remote S_Fill message).
+   * Runs flood fill on the offscreen, mirrors to the visible canvas, and records
+   * the stroke so replay / undo are correct. Does NOT send a wire message — the
+   * caller is responsible for that when appropriate.
+   */
+  const addFill = useCallback(
+    (normX: number, normY: number, fillColor: string, tolerance: number) => {
+      const offs = offscreenRef.current;
+      if (!offs) {
+        return;
+      }
+      const offCtx = offs.getContext("2d");
+      if (!offCtx) {
+        return;
+      }
+      const sx = Math.floor(normX * offs.width);
+      const sy = Math.floor(normY * offs.height);
+      drawFillOnContext(offCtx, offs, sx, sy, fillColor, tolerance);
+      syncVisibleFromOffscreen();
+      const stroke: SerializedStroke = {
+        points: [{ x: normX, y: normY }],
+        color: fillColor,
+        lineWidth: 0,
+        fill: { tolerance },
+      };
+      strokesRef.current.push(stroke);
+    },
+    [syncVisibleFromOffscreen],
+  );
 
   // Canvas pointer events — routed by tool
   useEffect(() => {
@@ -435,12 +670,27 @@ export function useCanvas({
       };
     }
 
+    // ========== Bucket (flood fill) tool ==========
+    // One click = one fill. No drag, no editing overlay.
+    if (tool === "bucket") {
+      const FILL_TOLERANCE = 32;
+      const onClick = (e: MouseEvent) => {
+        const normX = e.offsetX / canvas.width;
+        const normY = e.offsetY / canvas.height;
+        addFill(normX, normY, color, FILL_TOLERANCE);
+        send({ type: "fill", x: normX, y: normY, color, tolerance: FILL_TOLERANCE });
+        onLocalPenEnd?.();
+      };
+      canvas.addEventListener("click", onClick);
+      return () => canvas.removeEventListener("click", onClick);
+    }
+
     // ========== Shape / arrow tools ==========
     // mousedown: record start
     // mousemove: repaint visible (clear + blit offscreen + preview), never writes to offscreen
     // mouseup: emit DrawnShape — upstream holds it in editingShape state
     const filled = fillMode === "fill";
-    const shapeKind: "rect" | "ellipse" | "arrow" = tool;
+    const shapeKind: "rect" | "ellipse" | "arrow" | "line" = tool;
     let shapeStart: Point | null = null;
 
     const onShapeDown = (e: MouseEvent) => {
@@ -524,6 +774,7 @@ export function useCanvas({
     syncVisibleFromOffscreen,
     onShapeDrawn,
     onLocalPenEnd,
+    addFill,
   ]);
 
   // Replay a remote draw event (pen)
@@ -595,7 +846,8 @@ export function useCanvas({
     if (offs) {
       const offCtx = offs.getContext("2d");
       if (offCtx) {
-        offCtx.clearRect(0, 0, offs.width, offs.height);
+        offCtx.fillStyle = "#ffffff";
+        offCtx.fillRect(0, 0, offs.width, offs.height);
       }
     }
     strokesRef.current = [];
@@ -624,14 +876,14 @@ export function useCanvas({
     [canvasRef, commitToOffscreen],
   );
 
-  /** Add a shape/arrow stroke (from local commit OR remote). Accepts normalized points. */
+  /** Add a shape/arrow/line stroke (from local commit OR remote). Accepts normalized points. */
   const addShape = useCallback(
     (
       p0: Point,
       p1: Point,
       shapeColor: string,
       shapeLineWidth: number,
-      shape: "rect" | "ellipse" | "arrow",
+      shape: "rect" | "ellipse" | "arrow" | "line",
       filled: boolean,
     ) => {
       const stroke: SerializedStroke = {
@@ -660,6 +912,7 @@ export function useCanvas({
     clearCanvas,
     addTextStroke,
     addShape,
+    addFill,
     syncVisibleFromOffscreen,
     strokesRef,
   };

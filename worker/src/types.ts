@@ -20,9 +20,11 @@ export interface SerializedStroke {
   fontSize?: number;
   // Shape stroke fields (optional).
   // - rect/ellipse: points = [topLeft, bottomRight] (min→max)
-  // - arrow:        points = [start, end] (direction preserved; no min/max normalization)
-  shape?: "rect" | "ellipse" | "arrow";
+  // - arrow/line:   points = [start, end] (direction preserved for arrow; irrelevant for line)
+  shape?: "rect" | "ellipse" | "arrow" | "line";
   filled?: boolean; // only meaningful for rect/ellipse
+  // Bucket-fill stroke: points = [{ x, y }] seed, color = fill color.
+  fill?: { tolerance: number };
 }
 
 // Chat/guess message stored for replay on reconnection.

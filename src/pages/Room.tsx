@@ -34,7 +34,6 @@ function nextMsgId() {
   return `msg-${++msgIdCounter}`;
 }
 
-
 export default function Room({ roomCode, playerName, playerId, onLeave }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -120,6 +119,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     clearCanvas,
     addTextStroke,
     addShape,
+    addFill,
     syncVisibleFromOffscreen,
     strokesRef,
   } = useCanvas({
@@ -239,6 +239,12 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           syncHistoryFlags();
           break;
 
+        case "fill":
+          addFill(msg.x, msg.y, msg.color, msg.tolerance);
+          redoStackRef.current = [];
+          syncHistoryFlags();
+          break;
+
         case "undo": {
           const popped = strokesRef.current.pop();
           if (popped) {
@@ -343,6 +349,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     clearCanvas,
     addTextStroke,
     addShape,
+    addFill,
     addSystemMessage,
     strokesRef,
     syncHistoryFlags,
@@ -464,8 +471,13 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     if (!editingShape) {
       return;
     }
-    const { shape, filled, color: shapeColor, lineWidth: shapeLineWidth, normalizedPoints } =
-      editingShape;
+    const {
+      shape,
+      filled,
+      color: shapeColor,
+      lineWidth: shapeLineWidth,
+      normalizedPoints,
+    } = editingShape;
     const [p0, p1] = normalizedPoints;
     addShape(p0, p1, shapeColor, shapeLineWidth, shape, filled);
     // Wire protocol uses {x,y,width,height}. For arrow: width/height may be

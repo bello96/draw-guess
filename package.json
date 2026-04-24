@@ -11,7 +11,9 @@
     "lint": "eslint \"src/**/*.{ts,tsx}\" \"worker/src/**/*.ts\"",
     "lint:fix": "eslint \"src/**/*.{ts,tsx}\" \"worker/src/**/*.ts\" --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx}\" \"worker/src/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"worker/src/**/*.ts\""
+    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"worker/src/**/*.ts\"",
+    "deploy:serve": "cd worker && npx wrangler deploy",
+    "deploy:page": "npm run build && npx wrangler pages deploy dist --project-name=draw-guess --commit-message \"deploy\""
   },
   "dependencies": {
     "@twind/core": "^1.1.3",

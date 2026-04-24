@@ -33,9 +33,12 @@ export interface SerializedStroke {
   fontSize?: number;
   // Shape stroke fields (optional).
   // - rect/ellipse: points = [topLeft, bottomRight] (normalized, min→max)
-  // - arrow:        points = [start, end]           (normalized, direction preserved)
-  shape?: "rect" | "ellipse" | "arrow";
+  // - arrow/line:   points = [start, end]           (normalized; arrow preserves direction)
+  shape?: "rect" | "ellipse" | "arrow" | "line";
   filled?: boolean; // only meaningful for rect/ellipse
+  // Bucket-fill stroke (flood fill from a seed point).
+  // When present: points = [{ x, y }] normalized seed, color = fill color.
+  fill?: { tolerance: number };
 }
 
 // ============ Client → Server Messages ============
@@ -101,16 +104,24 @@ export interface C_TextStroke {
 
 export interface C_Shape {
   type: "shape";
-  shape: "rect" | "ellipse" | "arrow";
+  shape: "rect" | "ellipse" | "arrow" | "line";
   filled: boolean;
   // For rect/ellipse: (x,y) is top-left, width/height ≥ 0
-  // For arrow:        (x,y) is start point; width/height may be negative (end - start)
+  // For arrow/line:   (x,y) is start point; width/height may be negative (end - start)
   x: number;
   y: number;
   width: number;
   height: number;
   color: string;
   lineWidth: number;
+}
+
+export interface C_Fill {
+  type: "fill";
+  x: number; // normalized seed, 0..1
+  y: number;
+  color: string;
+  tolerance: number; // per-channel RGB diff threshold
 }
 
 export interface C_ContinueDrawing {
@@ -136,6 +147,7 @@ export type ClientMessage =
   | C_Chat
   | C_TextStroke
   | C_Shape
+  | C_Fill
   | C_Transfer
   | C_ContinueDrawing
   | C_Leave
@@ -235,7 +247,7 @@ export interface S_TextStroke {
 
 export interface S_Shape {
   type: "shape";
-  shape: "rect" | "ellipse" | "arrow";
+  shape: "rect" | "ellipse" | "arrow" | "line";
   filled: boolean;
   x: number;
   y: number;
@@ -243,6 +255,14 @@ export interface S_Shape {
   height: number;
   color: string;
   lineWidth: number;
+}
+
+export interface S_Fill {
+  type: "fill";
+  x: number;
+  y: number;
+  color: string;
+  tolerance: number;
 }
 
 export interface S_TransferDone {
@@ -277,6 +297,7 @@ export type ServerMessage =
   | S_Chat
   | S_TextStroke
   | S_Shape
+  | S_Fill
   | S_TransferDone
   | S_Error
   | S_RoomClosed

@@ -365,7 +365,7 @@ export class GameRoom implements DurableObject {
           ws,
           msg as {
             type: string;
-            shape: "rect" | "ellipse" | "arrow";
+            shape: "rect" | "ellipse" | "arrow" | "line";
             filled: boolean;
             x: number;
             y: number;
@@ -373,6 +373,18 @@ export class GameRoom implements DurableObject {
             height: number;
             color: string;
             lineWidth: number;
+          },
+        );
+        break;
+      case "fill":
+        await this.onFill(
+          ws,
+          msg as {
+            type: string;
+            x: number;
+            y: number;
+            color: string;
+            tolerance: number;
           },
         );
         break;
@@ -731,7 +743,7 @@ export class GameRoom implements DurableObject {
     ws: WebSocket,
     msg: {
       type: string;
-      shape: "rect" | "ellipse" | "arrow";
+      shape: "rect" | "ellipse" | "arrow" | "line";
       filled: boolean;
       x: number;
       y: number;
@@ -745,7 +757,12 @@ export class GameRoom implements DurableObject {
     if (!player || player.id !== this.drawerId) {
       return;
     }
-    if (msg.shape !== "rect" && msg.shape !== "ellipse" && msg.shape !== "arrow") {
+    if (
+      msg.shape !== "rect" &&
+      msg.shape !== "ellipse" &&
+      msg.shape !== "arrow" &&
+      msg.shape !== "line"
+    ) {
       return;
     }
 
@@ -774,6 +791,43 @@ export class GameRoom implements DurableObject {
         height: msg.height,
         color: msg.color,
         lineWidth: msg.lineWidth,
+      },
+      ws,
+    );
+  }
+
+  private async onFill(
+    ws: WebSocket,
+    msg: {
+      type: string;
+      x: number;
+      y: number;
+      color: string;
+      tolerance: number;
+    },
+  ) {
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+
+    const stroke: SerializedStroke = {
+      points: [{ x: msg.x, y: msg.y }],
+      color: msg.color,
+      lineWidth: 0,
+      fill: { tolerance: msg.tolerance },
+    };
+    this.strokes.push(stroke);
+    this.redoStack = [];
+    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+
+    this.broadcast(
+      {
+        type: "fill",
+        x: msg.x,
+        y: msg.y,
+        color: msg.color,
+        tolerance: msg.tolerance,
       },
       ws,
     );
