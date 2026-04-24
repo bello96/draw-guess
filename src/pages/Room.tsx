@@ -3,7 +3,7 @@ import { tx } from "@twind/core";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { useCanvas } from "../hooks/useCanvas";
 import Canvas from "../components/Canvas";
-import type { EditingShape, EditingText } from "../components/Canvas";
+import type { EditingSelection, EditingShape, EditingText } from "../components/Canvas";
 import type { DrawnShape } from "../hooks/useCanvas";
 import Toolbar, { TEXT_SIZE_TO_PX } from "../components/Toolbar";
 import type { FillMode, TextSize, ToolMode } from "../components/Toolbar";
@@ -62,6 +62,9 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   // Shape (rect/ellipse) editing state — the drawer has drawn a shape and is
   // previewing it inside a dashed overlay; commits on click-outside/tool-change.
   const [editingShape, setEditingShape] = useState<EditingShape | null>(null);
+  // Selection (marquee move) editing state — offscreen src region has already
+  // been whitened and the patch is held in memory; commits on click-outside.
+  const [editingSelection, setEditingSelection] = useState<EditingSelection | null>(null);
   // Undone strokes, LIFO. Any new stroke invalidates this stack — mirrors the
   // server-side redoStack so both sides stay in sync.
   const redoStackRef = useRef<import("../types/protocol").SerializedStroke[]>([]);
@@ -112,6 +115,19 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     syncHistoryFlags();
   }, [syncHistoryFlags]);
 
+  // Bridge: useCanvas finished drawing a marquee + extracted the patch.
+  // We open the selection overlay here; commit happens on click-outside.
+  const handleSelectionDrawn = useCallback(
+    (srcNorm: { x: number; y: number; w: number; h: number }, patch: HTMLCanvasElement) => {
+      setEditingSelection({
+        srcNorm,
+        patch,
+        dragOffsetPx: { dx: 0, dy: 0 },
+      });
+    },
+    [],
+  );
+
   // Canvas
   const {
     replayDraw,
@@ -120,6 +136,9 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     addTextStroke,
     addShape,
     addFill,
+    addSelection,
+    commitLocalSelection,
+    cancelLocalSelection,
     syncVisibleFromOffscreen,
     strokesRef,
   } = useCanvas({
@@ -132,6 +151,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     send,
     onShapeDrawn: handleShapeDrawn,
     onLocalPenEnd: handleLocalPenEnd,
+    onSelectionDrawn: handleSelectionDrawn,
   });
 
   // Canvas resize handler — blit the cached offscreen onto the (now resized)
@@ -245,6 +265,15 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           syncHistoryFlags();
           break;
 
+        case "selection":
+          addSelection(
+            { x: msg.srcX, y: msg.srcY, w: msg.w, h: msg.h },
+            { x: msg.dstX, y: msg.dstY },
+          );
+          redoStackRef.current = [];
+          syncHistoryFlags();
+          break;
+
         case "undo": {
           const popped = strokesRef.current.pop();
           if (popped) {
@@ -350,6 +379,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     addTextStroke,
     addShape,
     addFill,
+    addSelection,
     addSystemMessage,
     strokesRef,
     syncHistoryFlags,
@@ -358,6 +388,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   const handleClear = () => {
     setEditingShape(null);
+    setEditingSelection(null);
     redoStackRef.current = [];
     send({ type: "clear" });
     clearCanvas();
@@ -392,6 +423,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   const handleTransfer = () => {
     setEditingShape(null);
+    if (editingSelection) {
+      cancelLocalSelection();
+      setEditingSelection(null);
+    }
     redoStackRef.current = [];
     send({ type: "transfer" });
     syncHistoryFlags();
@@ -399,6 +434,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   const handleContinueDrawing = () => {
     setEditingShape(null);
+    if (editingSelection) {
+      cancelLocalSelection();
+      setEditingSelection(null);
+    }
     redoStackRef.current = [];
     send({ type: "continueDrawing" });
     syncHistoryFlags();
@@ -503,6 +542,42 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     setEditingShape((prev) => (prev ? { ...prev, ...updates } : null));
   }, []);
 
+  // --- Selection editing ---
+
+  // Commit the current editing selection: paste patch at final dst + sync peer.
+  const commitEditingSelection = useCallback(() => {
+    if (!editingSelection) {
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const { srcNorm, patch, dragOffsetPx } = editingSelection;
+    const dstNorm = {
+      x: srcNorm.x + dragOffsetPx.dx / canvas.width,
+      y: srcNorm.y + dragOffsetPx.dy / canvas.height,
+    };
+    commitLocalSelection(patch, srcNorm, dstNorm);
+    send({
+      type: "selection",
+      srcX: srcNorm.x,
+      srcY: srcNorm.y,
+      w: srcNorm.w,
+      h: srcNorm.h,
+      dstX: dstNorm.x,
+      dstY: dstNorm.y,
+    });
+    redoStackRef.current = [];
+    syncHistoryFlags();
+    setEditingSelection(null);
+  }, [editingSelection, commitLocalSelection, send, syncHistoryFlags]);
+
+  // Drag the selection overlay (pixel offset only — no resize).
+  const handleEditingSelectionUpdate = useCallback((updates: Partial<EditingSelection>) => {
+    setEditingSelection((prev) => (prev ? { ...prev, ...updates } : null));
+  }, []);
+
   // When switching tools, commit whichever in-edit item is active.
   const handleToolChange = useCallback(
     (t: ToolMode) => {
@@ -512,9 +587,19 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       if (t !== "rect" && t !== "ellipse" && editingShape) {
         commitEditingShape();
       }
+      if (t !== "selection" && editingSelection) {
+        commitEditingSelection();
+      }
       setTool(t);
     },
-    [editingText, editingShape, commitEditingText, commitEditingShape],
+    [
+      editingText,
+      editingShape,
+      editingSelection,
+      commitEditingText,
+      commitEditingShape,
+      commitEditingSelection,
+    ],
   );
 
   // Click-outside commit: while a text is being edited, clicking anywhere
@@ -564,6 +649,27 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     window.addEventListener("mousedown", handleGlobalMouseDown, true);
     return () => window.removeEventListener("mousedown", handleGlobalMouseDown, true);
   }, [editingShape, commitEditingShape]);
+
+  // Click-outside commit for editing selection. Capture phase — same reason as
+  // shape overlay: any new marquee starting on the canvas must commit the
+  // current selection first.
+  useEffect(() => {
+    if (!editingSelection) {
+      return;
+    }
+    const handleGlobalMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) {
+        return;
+      }
+      if (target.closest("[data-selection-overlay]")) {
+        return;
+      }
+      commitEditingSelection();
+    };
+    window.addEventListener("mousedown", handleGlobalMouseDown, true);
+    return () => window.removeEventListener("mousedown", handleGlobalMouseDown, true);
+  }, [editingSelection, commitEditingSelection]);
 
   const handleSendChat = (text: string) => {
     send({ type: "chat", text });
@@ -637,6 +743,8 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             textColor={color}
             editingShape={editingShape}
             onEditingShapeUpdate={handleEditingShapeUpdate}
+            editingSelection={editingSelection}
+            onEditingSelectionUpdate={handleEditingSelectionUpdate}
           />
           <Toolbar
             color={color}

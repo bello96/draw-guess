@@ -25,6 +25,15 @@ export interface SerializedStroke {
   filled?: boolean; // only meaningful for rect/ellipse
   // Bucket-fill stroke: points = [{ x, y }] seed, color = fill color.
   fill?: { tolerance: number };
+  // Selection-move stroke: copy src rect → whiten src → paste at dst (normalized).
+  selection?: {
+    srcX: number;
+    srcY: number;
+    w: number;
+    h: number;
+    dstX: number;
+    dstY: number;
+  };
 }
 
 // Chat/guess message stored for replay on reconnection.

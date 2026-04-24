@@ -39,6 +39,16 @@ export interface SerializedStroke {
   // Bucket-fill stroke (flood fill from a seed point).
   // When present: points = [{ x, y }] normalized seed, color = fill color.
   fill?: { tolerance: number };
+  // Selection-move stroke: copy pixels from src rect, whiten src, paste at dst.
+  // All values normalized 0..1 relative to canvas.
+  selection?: {
+    srcX: number;
+    srcY: number;
+    w: number;
+    h: number;
+    dstX: number;
+    dstY: number;
+  };
 }
 
 // ============ Client → Server Messages ============
@@ -124,6 +134,16 @@ export interface C_Fill {
   tolerance: number; // per-channel RGB diff threshold
 }
 
+export interface C_Selection {
+  type: "selection";
+  srcX: number; // all normalized 0..1
+  srcY: number;
+  w: number;
+  h: number;
+  dstX: number;
+  dstY: number;
+}
+
 export interface C_ContinueDrawing {
   type: "continueDrawing";
 }
@@ -148,6 +168,7 @@ export type ClientMessage =
   | C_TextStroke
   | C_Shape
   | C_Fill
+  | C_Selection
   | C_Transfer
   | C_ContinueDrawing
   | C_Leave
@@ -265,6 +286,16 @@ export interface S_Fill {
   tolerance: number;
 }
 
+export interface S_Selection {
+  type: "selection";
+  srcX: number;
+  srcY: number;
+  w: number;
+  h: number;
+  dstX: number;
+  dstY: number;
+}
+
 export interface S_TransferDone {
   type: "transferDone";
   newDrawerId: string;
@@ -298,6 +329,7 @@ export type ServerMessage =
   | S_TextStroke
   | S_Shape
   | S_Fill
+  | S_Selection
   | S_TransferDone
   | S_Error
   | S_RoomClosed

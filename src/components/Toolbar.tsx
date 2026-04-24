@@ -1,7 +1,15 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { tx } from "@twind/core";
 
-export type ToolMode = "rect" | "ellipse" | "line" | "arrow" | "pen" | "text" | "bucket";
+export type ToolMode =
+  | "rect"
+  | "ellipse"
+  | "line"
+  | "arrow"
+  | "pen"
+  | "text"
+  | "bucket"
+  | "selection";
 export type FillMode = "stroke" | "fill";
 export type TextSize = "small" | "medium" | "large";
 
@@ -13,9 +21,9 @@ const TEXT_SIZE_TO_PX: Record<TextSize, number> = { small: 16, medium: 24, large
 const TEXT_SIZE_LABEL: Record<TextSize, string> = { small: "小", medium: "中", large: "大" };
 
 // Tools are split into two visual groups separated by a divider.
-// Primary (pen / text) sits first; shapes (bucket / rect / ellipse / line / arrow) second.
+// Primary (pen / text) sits first; shapes group (bucket / rect / ellipse / line / arrow / selection) second.
 const PRIMARY_TOOLS: ToolMode[] = ["pen", "text"];
-const SHAPE_TOOLS: ToolMode[] = ["bucket", "rect", "ellipse", "line", "arrow"];
+const SHAPE_TOOLS: ToolMode[] = ["bucket", "rect", "ellipse", "line", "arrow", "selection"];
 
 // ---------- Icons ----------
 // SVG path data mirrored from src/assets/*.svg. Inlining (instead of importing
@@ -68,6 +76,12 @@ const IconBucket = () => (
     <path d="M662.94 130.133l-52.46-52.437c-46.229-46.72-129.493-46.72-175.7 0l-312.32 315.05c-36.118 36.48-45.953 89.323-28.971 133.334l-5.227 9.408c-2.859 5.184-7.68 14.293-13.803 26.56-10.112 20.31-20.224 42.24-29.674 65.067a738.112 738.112 0 0 0-30.635 87.85C-0.74 769.664-4.687 816.512 6.513 854.912c15.53 53.141 58.965 83.755 122.432 83.755 63.701 0 106.986-30.912 121.6-84.523 10.453-38.443 5.589-85.248-10.368-139.925-3.755-12.864-8.107-26.027-12.971-39.403l268.245 270.635c24.171 24.426 54.379 35.882 89.536 35.882 31.83 0 60.459-12.053 86.187-32.853l3.35-3.03 312.32-315.05c49.663-50.133 49.663-131.307-0.129-176.512L723.27 190.464l74.965-74.965a42.667 42.667 0 0 0-60.33-60.331l-74.966 74.965z m0.98 119.68l262.977 262.87c16.042 14.592 16.042 42.069-1.536 59.797L617.883 882.645C606.278 891.648 595.441 896 584.753 896c-14.166 0-23.36-3.477-31.446-11.648l-370.73-373.888c-16.043-14.592-16.043-42.07 1.536-59.819l309.184-311.85c14.272-14.422 45.269-14.422 59.69 0.149l50.56 50.56-121.664 121.664a42.667 42.667 0 0 0 60.331 60.33l121.685-121.685zM123.59 659.584a893.867 893.867 0 0 1 2.773-6.635 818.32 818.32 0 0 1 3.947 8.96 664.512 664.512 0 0 1 27.968 76.075c11.947 40.981 15.381 73.877 9.941 93.888-4.224 15.467-13.013 21.76-39.274 21.76-45.526 0-55.168-33.024-32.47-116.395 6.614-24.362 15.894-50.56 27.115-77.653z" />
   </svg>
 );
+const IconSelectBox = () => (
+  <svg viewBox="0 0 1024 1024" width="18" height="18" fill="currentColor">
+    <path d="M429.8 890.7h-77.2v-38.2h77.2v38.2z m-154.4 0h-77.2v-38.2h77.2v38.2zM121 890.7H63.7v-57.2h38.2v19.1H121zM101.9 756.3H63.7v-77.2h38.2v77.2z m0-154.4H63.7v-77.2h38.2v77.2z m0-154.4H63.7v-77.2h38.2v77.2z m0-154.4H63.7v-77.2h38.2v77.2zM101.9 138.7H63.7V81.5H121v38.2h-19.1zM738.5 119.7h-77.2V81.5h77.2v38.2z m-154.4 0H507V81.5h77.2v38.2z m-154.3 0h-77.2V81.5h77.2v38.2z m-154.4 0h-77.2V81.5h77.2v38.2zM873 138.7h-38.2v-19h-19.1V81.5H873zM873 447.5h-38.2v-77.2H873v77.2z m0-154.4h-38.2v-77.2H873v77.2z" />
+    <path d="M835.2 947.1c-0.8 0-1.5 0-2.3-0.1-4.7-0.6-9.1-3.1-12-6.8l-128.5-166-58.8 45.5c-4.8 3.7-11.2 4.8-17 2.8-5.8-2-10.1-6.8-11.6-12.7L523.1 476c-1.7-6.9 0.8-14.2 6.5-18.6 5.6-4.4 13.3-5 19.6-1.6L852 618.5c5.4 2.9 8.9 8.3 9.4 14.4s-2.1 12-6.9 15.7l-58.8 45.5 128.5 166c6.1 7.9 4.7 19.2-3.2 25.3l-74.7 57.9c-3.2 2.5-7.1 3.8-11.1 3.8zM695.7 730.8c5.4 0 10.7 2.4 14.3 7l128.5 166 46.2-35.8-128.5-166c-2.9-3.8-4.2-8.6-3.6-13.3s3.1-9.1 6.8-12l51.1-39.6-242.6-130.5 65.6 267.5 51.1-39.6c3.3-2.5 7.2-3.7 11.1-3.7z" />
+  </svg>
+);
 const IconClear = () => (
   <svg viewBox="0 0 1024 1024" width="18" height="18" fill="currentColor">
     <path d="M274.56 798.997333l19.434667-25.130666-33.792 68.565333a18.133333 18.133333 0 0 0 11.562666 25.536l59.733334 16a18.133333 18.133333 0 0 0 17.28-4.48c20.522667-19.818667 35.626667-35.989333 45.290666-48.469333l19.456-25.130667-33.813333 68.565333a18.133333 18.133333 0 0 0 11.562667 25.536l84.48 22.634667a18.133333 18.133333 0 0 0 17.28-4.48c20.522667-19.84 35.626667-35.989333 45.269333-48.469333l19.456-25.130667-33.813333 68.565333A18.133333 18.133333 0 0 0 535.530667 938.666667l72.106666 19.328a18.133333 18.133333 0 0 0 17.28-4.48c20.522667-19.84 35.626667-36.010667 45.269334-48.490667l19.456-25.130667-33.813334 68.586667a18.133333 18.133333 0 0 0 11.584 25.514667l86.421334 23.338666 3.84-0.213333c13.269333-0.704 29.056-5.034667 43.84-12.8 29.781333-15.701333 48.170667-43.2 52.181333-78.250667 2.133333-18.517333 4.778667-38.549333 8.405333-63.530666 1.642667-11.221333 2.944-20.010667 6.229334-41.834667 11.050667-73.322667 14.634667-101.034667 17.130666-133.674667l0.938667-12.373333 2.837333-2.922667 12.330667-1.344a41.813333 41.813333 0 0 0 24.810667-11.221333c10.730667-10.24 14.805333-25.386667 11.093333-42.197333l-37.546667-171.584c-3.029333-13.696-11.264-27.946667-23.146666-39.829334-11.648-11.626667-25.92-20.138667-39.893334-23.893333L723.626667 331.306667l-2.261334-3.925334L774.250667 130.133333c8.32-31.061333-11.754667-63.744-44.970667-72.64l-79.509333-21.312c-33.194667-8.896-66.922667 9.365333-75.264 40.426667l-52.842667 197.269333-3.925333 2.261334-118.101334-31.637334c-13.994667-3.754667-30.634667-3.498667-46.506666 0.746667-16.256 4.352-30.506667 12.586667-39.957334 22.933333l-118.314666 129.792c-11.605333 12.714667-15.658667 27.84-11.52 42.090667 4.16 14.229333 15.850667 25.194667 32.896 30.528l13.610666 4.266667 2.133334 3.882666-3.626667 13.802667c-21.12 79.850667-52.885333 136.917333-85.717333 150.890667-47.530667 20.202667-72.938667 49.429333-78.421334 85.034666-5.034667 32.682667 9.28 67.114667 37.589334 91.541334l22.037333 8.341333 74.666667 20.010667a42.666667 42.666667 0 0 0 41.216-11.050667c15.274667-15.274667 26.88-28.032 34.837333-38.293333z m551.381333-396.565333c14.144 3.797333 29.952 19.2 32.768 32l34.56 157.781333a10.666667 10.666667 0 0 1-13.184 12.586667L240.64 433.493333a10.666667 10.666667 0 0 1-5.12-17.493333l108.8-119.36c8.832-9.685333 30.229333-15.146667 44.373333-11.349333l141.333334 37.866666a21.333333 21.333333 0 0 0 26.133333-15.082666l58.304-217.642667a21.333333 21.333333 0 0 1 26.133333-15.082667l77.056 20.650667a21.333333 21.333333 0 0 1 15.082667 26.133333l-58.325333 217.642667a21.333333 21.333333 0 0 0 15.082666 26.112l136.448 36.565333zM315.456 701.568c-33.664 45.141333-64.597333 79.082667-92.8 101.802667l-5.909333 4.778666-2.837334 0.597334-88.106666-24.106667-2.922667-3.2c-13.034667-14.165333-19.370667-31.04-16.981333-46.592 3.285333-21.333333 22.058667-39.338667 53.205333-52.586667 31.722667-13.482667 59.818667-47.104 82.922667-99.904 10.026667-22.954667 18.88-48.725333 26.389333-76.586666l3.882667-14.4 3.904-2.261334 566.165333 151.701334 2.346667 3.306666-0.789334 12.224c-1.984 30.592-30.336 229.397333-32.128 244.906667-2.346667 20.416-11.306667 34.986667-27.605333 44.394667a73.237333 73.237333 0 0 1-21.397333 8.106666l-5.013334 0.725334-60.373333-16.170667 11.242667-20.288c8.277333-14.976 22.656-43.84 43.093333-86.613333a21.12 21.12 0 0 0-9.962667-28.16l-3.136-1.493334a21.333333 21.333333 0 0 0-26.261333 6.485334c-33.642667 45.056-64.533333 78.912-92.672 101.546666l-5.909333 4.757334-2.837334 0.597333-52.544-14.08 11.114667-20.266667c3.562667-6.485333 7.04-13.013333 10.453333-19.626666 7.04-13.504 17.898667-35.797333 32.597334-66.816a21.290667 21.290667 0 0 0-9.984-28.309334l-3.029334-1.450666a21.333333 21.333333 0 0 0-26.368 6.442666c-33.6 45.013333-64.469333 78.826667-92.608 101.482667l-5.909333 4.757333-2.837333 0.597334-52.138667-13.973334 11.114667-20.266666c3.242667-5.888 6.72-12.416 10.453333-19.626667 6.997333-13.461333 17.962667-35.946667 32.896-67.434667a20.970667 20.970667 0 0 0-10.112-28.010666l-3.328-1.536a21.333333 21.333333 0 0 0-26.069333 6.613333c-33.642667 45.056-64.554667 78.976-92.778667 101.696l-5.909333 4.757333-2.837334 0.597334-32.64-8.746667 11.093334-20.245333c3.541333-6.506667 7.04-13.034667 10.453333-19.626667 6.976-13.482667 17.941333-35.968 32.874667-67.456a21.056 21.056 0 0 0-10.069334-28.074667l-3.242666-1.514666a21.333333 21.333333 0 0 0-26.154667 6.549333z" />
@@ -76,18 +90,41 @@ const IconClear = () => (
 
 type PickerKind = "lineWidth" | "textSize" | "none";
 
-const TOOL_META: Record<
-  ToolMode,
-  { icon: () => JSX.Element; label: string; hasFill: boolean; picker: PickerKind }
-> = {
-  rect: { icon: IconRect, label: "矩形", hasFill: true, picker: "lineWidth" },
-  ellipse: { icon: IconEllipse, label: "椭圆", hasFill: true, picker: "lineWidth" },
-  line: { icon: IconLine, label: "直线", hasFill: false, picker: "lineWidth" },
-  arrow: { icon: IconArrow, label: "箭头", hasFill: false, picker: "lineWidth" },
-  pen: { icon: IconPen, label: "画笔", hasFill: false, picker: "lineWidth" },
-  text: { icon: IconText, label: "文本", hasFill: false, picker: "textSize" },
-  bucket: { icon: IconBucket, label: "油漆桶", hasFill: false, picker: "none" },
+type ToolMeta = {
+  icon: () => JSX.Element;
+  label: string;
+  hasFill: boolean;
+  picker: PickerKind;
+  /** Whether this tool cares about the color pool (bucket does; selection doesn't). */
+  hasColor: boolean;
 };
+
+const TOOL_META: Record<ToolMode, ToolMeta> = {
+  rect: { icon: IconRect, label: "矩形", hasFill: true, picker: "lineWidth", hasColor: true },
+  ellipse: {
+    icon: IconEllipse,
+    label: "椭圆",
+    hasFill: true,
+    picker: "lineWidth",
+    hasColor: true,
+  },
+  line: { icon: IconLine, label: "直线", hasFill: false, picker: "lineWidth", hasColor: true },
+  arrow: { icon: IconArrow, label: "箭头", hasFill: false, picker: "lineWidth", hasColor: true },
+  pen: { icon: IconPen, label: "画笔", hasFill: false, picker: "lineWidth", hasColor: true },
+  text: { icon: IconText, label: "文本", hasFill: false, picker: "textSize", hasColor: true },
+  bucket: { icon: IconBucket, label: "油漆桶", hasFill: false, picker: "none", hasColor: true },
+  selection: {
+    icon: IconSelectBox,
+    label: "框选移动",
+    hasFill: false,
+    picker: "none",
+    hasColor: false,
+  },
+};
+
+function hasAnyPopoverContent(meta: ToolMeta): boolean {
+  return meta.picker !== "none" || meta.hasFill || meta.hasColor;
+}
 
 // ---------- Shared pickers ----------
 
@@ -332,6 +369,7 @@ export default function Toolbar({
     pen: null,
     text: null,
     bucket: null,
+    selection: null,
   });
 
   // Close popover on outside click
@@ -354,13 +392,17 @@ export default function Toolbar({
   }, [openPopover]);
 
   const handleToolClick = (t: ToolMode) => {
+    const meta = TOOL_META[t];
+    const canPopover = hasAnyPopoverContent(meta);
     if (tool !== t) {
       onToolChange(t);
-      setOpenPopover(t);
+      setOpenPopover(canPopover ? t : null);
       return;
     }
-    // Same tool clicked again — toggle its popover.
-    setOpenPopover((cur) => (cur === t ? null : t));
+    // Same tool clicked again — toggle its popover (only if it has one).
+    if (canPopover) {
+      setOpenPopover((cur) => (cur === t ? null : t));
+    }
   };
 
   // Render a single tool button (+ its popover when open). Shared helper so
@@ -406,10 +448,10 @@ export default function Toolbar({
                 />
               </>
             )}
-            {(meta.picker !== "none" || meta.hasFill) && (
+            {meta.hasColor && (meta.picker !== "none" || meta.hasFill) && (
               <div className={tx("w-px h-6 bg-gray-200")} />
             )}
-            <ColorPicker value={color} onChange={onColorChange} />
+            {meta.hasColor && <ColorPicker value={color} onChange={onColorChange} />}
           </ToolPopover>
         )}
       </div>

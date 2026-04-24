@@ -25,6 +25,15 @@ export interface EditingShape {
   lineWidth: number;
 }
 
+export interface EditingSelection {
+  /** Source rectangle on the canvas, normalized 0..1. */
+  srcNorm: { x: number; y: number; w: number; h: number };
+  /** Extracted patch bitmap (off-DOM canvas at offscreen resolution). */
+  patch: HTMLCanvasElement;
+  /** Translate offset in visible canvas pixels (dx, dy from src position). */
+  dragOffsetPx: { dx: number; dy: number };
+}
+
 interface Props {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   isDrawer: boolean;
@@ -38,6 +47,9 @@ interface Props {
   // Shape editing
   editingShape?: EditingShape | null;
   onEditingShapeUpdate?: (updates: Partial<EditingShape>) => void;
+  // Selection (marquee move)
+  editingSelection?: EditingSelection | null;
+  onEditingSelectionUpdate?: (updates: Partial<EditingSelection>) => void;
 }
 
 /** Measure the pixel width of the longest line in a string */
@@ -220,6 +232,8 @@ export default function Canvas({
   textColor = "#000000",
   editingShape,
   onEditingShapeUpdate,
+  editingSelection,
+  onEditingSelectionUpdate,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -239,6 +253,14 @@ export default function Canvas({
   const [shapeInteractionKind, setShapeInteractionKind] = useState<ShapeInteraction["kind"] | null>(
     null,
   );
+
+  const selDragRef = useRef<{
+    startClientX: number;
+    startClientY: number;
+    origDragOffsetPx: { dx: number; dy: number };
+  } | null>(null);
+  const [isSelDragging, setIsSelDragging] = useState(false);
+  const selPatchCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Canvas is 4:3. Height-driven; fall back to width-driven if the container is
   // too narrow to fit 4:3 at its clientHeight.
@@ -594,6 +616,67 @@ export default function Canvas({
     };
   }, [shapeInteractionKind, canvasRef, onEditingShapeUpdate]);
 
+  // --- Selection (marquee move) editing: translate only, no resize ---
+
+  const startSelectionTranslate = useCallback(
+    (e: React.MouseEvent) => {
+      if (!editingSelection) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      selDragRef.current = {
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        origDragOffsetPx: { ...editingSelection.dragOffsetPx },
+      };
+      setIsSelDragging(true);
+    },
+    [editingSelection],
+  );
+
+  useEffect(() => {
+    if (!isSelDragging) {
+      return;
+    }
+    const handleMove = (e: MouseEvent) => {
+      const ref = selDragRef.current;
+      if (!ref) {
+        return;
+      }
+      const dx = e.clientX - ref.startClientX;
+      const dy = e.clientY - ref.startClientY;
+      onEditingSelectionUpdate?.({
+        dragOffsetPx: { dx: ref.origDragOffsetPx.dx + dx, dy: ref.origDragOffsetPx.dy + dy },
+      });
+    };
+    const handleUp = () => {
+      selDragRef.current = null;
+      setIsSelDragging(false);
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [isSelDragging, onEditingSelectionUpdate]);
+
+  // Paint the selection's patch bitmap into the DOM preview canvas whenever
+  // the patch source changes. Uses fixed offscreen resolution; CSS scales it.
+  useEffect(() => {
+    const previewCanvas = selPatchCanvasRef.current;
+    if (!previewCanvas || !editingSelection) {
+      return;
+    }
+    previewCanvas.width = editingSelection.patch.width;
+    previewCanvas.height = editingSelection.patch.height;
+    const ctx = previewCanvas.getContext("2d");
+    if (ctx) {
+      ctx.drawImage(editingSelection.patch, 0, 0);
+    }
+  }, [editingSelection]);
+
   // Shape overlay bbox (in pixel) — always Math.min/max so the visual bbox is
   // correct regardless of the points' internal ordering (which may be
   // non-LT-RB in the middle of a resize drag).
@@ -860,6 +943,57 @@ export default function Canvas({
               )}
             </div>
           )}
+
+        {/* Selection (marquee move) overlay — translate only, no resize handles */}
+        {editingSelection &&
+          canvasRef.current &&
+          (() => {
+            const vis = canvasRef.current;
+            if (!vis) {
+              return null;
+            }
+            const srcLeftPx = editingSelection.srcNorm.x * vis.width;
+            const srcTopPx = editingSelection.srcNorm.y * vis.height;
+            const srcWPx = editingSelection.srcNorm.w * vis.width;
+            const srcHPx = editingSelection.srcNorm.h * vis.height;
+            const left = srcLeftPx + editingSelection.dragOffsetPx.dx;
+            const top = srcTopPx + editingSelection.dragOffsetPx.dy;
+            return (
+              <div
+                className={tx("absolute select-none")}
+                data-selection-overlay="true"
+                onMouseDown={startSelectionTranslate}
+                style={{
+                  left,
+                  top,
+                  width: srcWPx,
+                  height: srcHPx,
+                  cursor: isSelDragging ? "grabbing" : "move",
+                }}
+              >
+                <canvas
+                  ref={selPatchCanvasRef}
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    pointerEvents: "none",
+                    display: "block",
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    border: "2px dashed #818cf8",
+                    boxSizing: "border-box",
+                    pointerEvents: "none",
+                  }}
+                />
+              </div>
+            );
+          })()}
       </div>
     </div>
   );

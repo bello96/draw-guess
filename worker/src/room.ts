@@ -388,6 +388,20 @@ export class GameRoom implements DurableObject {
           },
         );
         break;
+      case "selection":
+        await this.onSelection(
+          ws,
+          msg as {
+            type: string;
+            srcX: number;
+            srcY: number;
+            w: number;
+            h: number;
+            dstX: number;
+            dstY: number;
+          },
+        );
+        break;
       case "continueDrawing":
         await this.onContinueDrawing(ws);
         break;
@@ -828,6 +842,54 @@ export class GameRoom implements DurableObject {
         y: msg.y,
         color: msg.color,
         tolerance: msg.tolerance,
+      },
+      ws,
+    );
+  }
+
+  private async onSelection(
+    ws: WebSocket,
+    msg: {
+      type: string;
+      srcX: number;
+      srcY: number;
+      w: number;
+      h: number;
+      dstX: number;
+      dstY: number;
+    },
+  ) {
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+
+    const stroke: SerializedStroke = {
+      points: [],
+      color: "",
+      lineWidth: 0,
+      selection: {
+        srcX: msg.srcX,
+        srcY: msg.srcY,
+        w: msg.w,
+        h: msg.h,
+        dstX: msg.dstX,
+        dstY: msg.dstY,
+      },
+    };
+    this.strokes.push(stroke);
+    this.redoStack = [];
+    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+
+    this.broadcast(
+      {
+        type: "selection",
+        srcX: msg.srcX,
+        srcY: msg.srcY,
+        w: msg.w,
+        h: msg.h,
+        dstX: msg.dstX,
+        dstY: msg.dstY,
       },
       ws,
     );

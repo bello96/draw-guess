@@ -32,6 +32,16 @@ interface UseCanvasOptions {
   onShapeDrawn?: (shape: DrawnShape) => void;
   /** Fired when a local pen stroke finishes (commit path without editing-overlay). */
   onLocalPenEnd?: () => void;
+  /**
+   * Mouseup after drawing a selection rectangle. The hook has already extracted
+   * the patch from the offscreen and whitened the src region; the callback
+   * receives both the src rect (normalized) and the patch bitmap so upstream
+   * can open the selection overlay.
+   */
+  onSelectionDrawn?: (
+    srcNorm: { x: number; y: number; w: number; h: number },
+    patch: HTMLCanvasElement,
+  ) => void;
 }
 
 // Reference canvas dimensions (4:3) for lineWidth scaling and offscreen cache
@@ -254,6 +264,43 @@ function drawFillOnContext(
   ctx.putImageData(img, 0, 0);
 }
 
+/**
+ * Apply a selection-move in three steps directly on the given canvas/ctx:
+ *   1. copy src rect pixels to a temp canvas
+ *   2. fill white over src rect
+ *   3. draw temp canvas onto dst rect
+ *
+ * All coordinates are normalized 0..1; they're scaled to the canvas's pixel size.
+ * Works even when src and dst overlap (temp canvas holds the original pixels).
+ */
+function performSelectionOnContext(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  srcNorm: { x: number; y: number; w: number; h: number },
+  dstNorm: { x: number; y: number },
+): void {
+  const srcPxX = Math.round(srcNorm.x * canvas.width);
+  const srcPxY = Math.round(srcNorm.y * canvas.height);
+  const srcPxW = Math.round(srcNorm.w * canvas.width);
+  const srcPxH = Math.round(srcNorm.h * canvas.height);
+  const dstPxX = Math.round(dstNorm.x * canvas.width);
+  const dstPxY = Math.round(dstNorm.y * canvas.height);
+  if (srcPxW < 1 || srcPxH < 1) {
+    return;
+  }
+  const patch = document.createElement("canvas");
+  patch.width = srcPxW;
+  patch.height = srcPxH;
+  const pctx = patch.getContext("2d");
+  if (!pctx) {
+    return;
+  }
+  pctx.drawImage(canvas, srcPxX, srcPxY, srcPxW, srcPxH, 0, 0, srcPxW, srcPxH);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(srcPxX, srcPxY, srcPxW, srcPxH);
+  ctx.drawImage(patch, 0, 0, srcPxW, srcPxH, dstPxX, dstPxY, srcPxW, srcPxH);
+}
+
 /** Render a single stroke onto an arbitrary context (visible canvas or offscreen). */
 function renderStrokeToCtx(
   ctx: CanvasRenderingContext2D,
@@ -265,6 +312,18 @@ function renderStrokeToCtx(
     const sx = Math.floor(stroke.points[0].x * canvas.width);
     const sy = Math.floor(stroke.points[0].y * canvas.height);
     drawFillOnContext(ctx, canvas, sx, sy, stroke.color, stroke.fill.tolerance);
+    return;
+  }
+
+  // Selection-move stroke: bitmap cut & paste on the current canvas.
+  if (stroke.selection) {
+    const sel = stroke.selection;
+    performSelectionOnContext(
+      ctx,
+      canvas,
+      { x: sel.srcX, y: sel.srcY, w: sel.w, h: sel.h },
+      { x: sel.dstX, y: sel.dstY },
+    );
     return;
   }
 
@@ -453,6 +512,7 @@ export function useCanvas({
   send,
   onShapeDrawn,
   onLocalPenEnd,
+  onSelectionDrawn,
 }: UseCanvasOptions) {
   const isDrawingRef = useRef(false);
   const strokesRef = useRef<SerializedStroke[]>([]);
@@ -521,6 +581,135 @@ export function useCanvas({
       renderStrokeToCtx(offCtx, offs, stroke);
     }
   }, []);
+
+  /**
+   * Drawer-side: open a selection. Extracts a patch from the offscreen src rect,
+   * whitens src on the offscreen, mirrors to visible, and returns the patch
+   * canvas (upstream holds it in React state for the overlay preview). Nothing
+   * is pushed to strokes yet — that happens at commit time.
+   */
+  const beginSelection = useCallback(
+    (srcNorm: { x: number; y: number; w: number; h: number }): HTMLCanvasElement | null => {
+      const offs = offscreenRef.current;
+      if (!offs) {
+        return null;
+      }
+      const offCtx = offs.getContext("2d");
+      if (!offCtx) {
+        return null;
+      }
+      const srcPxX = Math.round(srcNorm.x * offs.width);
+      const srcPxY = Math.round(srcNorm.y * offs.height);
+      const srcPxW = Math.round(srcNorm.w * offs.width);
+      const srcPxH = Math.round(srcNorm.h * offs.height);
+      if (srcPxW < 1 || srcPxH < 1) {
+        return null;
+      }
+      const patch = document.createElement("canvas");
+      patch.width = srcPxW;
+      patch.height = srcPxH;
+      const pctx = patch.getContext("2d");
+      if (!pctx) {
+        return null;
+      }
+      pctx.drawImage(offs, srcPxX, srcPxY, srcPxW, srcPxH, 0, 0, srcPxW, srcPxH);
+      offCtx.fillStyle = "#ffffff";
+      offCtx.fillRect(srcPxX, srcPxY, srcPxW, srcPxH);
+      syncVisibleFromOffscreen();
+      return patch;
+    },
+    [syncVisibleFromOffscreen],
+  );
+
+  /**
+   * Drawer-side: commit a selection in progress. Offscreen already has src
+   * whitened (from beginSelection), so we just paste the patch at dst.
+   */
+  const commitLocalSelection = useCallback(
+    (
+      patch: HTMLCanvasElement,
+      srcNorm: { x: number; y: number; w: number; h: number },
+      dstNorm: { x: number; y: number },
+    ) => {
+      const offs = offscreenRef.current;
+      if (!offs) {
+        return;
+      }
+      const offCtx = offs.getContext("2d");
+      if (!offCtx) {
+        return;
+      }
+      const srcPxW = Math.round(srcNorm.w * offs.width);
+      const srcPxH = Math.round(srcNorm.h * offs.height);
+      const dstPxX = Math.round(dstNorm.x * offs.width);
+      const dstPxY = Math.round(dstNorm.y * offs.height);
+      offCtx.drawImage(patch, 0, 0, patch.width, patch.height, dstPxX, dstPxY, srcPxW, srcPxH);
+      syncVisibleFromOffscreen();
+      const stroke: SerializedStroke = {
+        points: [],
+        color: "",
+        lineWidth: 0,
+        selection: {
+          srcX: srcNorm.x,
+          srcY: srcNorm.y,
+          w: srcNorm.w,
+          h: srcNorm.h,
+          dstX: dstNorm.x,
+          dstY: dstNorm.y,
+        },
+      };
+      strokesRef.current.push(stroke);
+    },
+    [syncVisibleFromOffscreen],
+  );
+
+  /**
+   * Drawer-side: abort an in-progress selection. Restores the offscreen by
+   * rebuilding from the committed strokes (which don't include the pending
+   * selection). Called when the user switches away or clears without commit.
+   */
+  const cancelLocalSelection = useCallback(() => {
+    rebuildOffscreen(strokesRef.current);
+    syncVisibleFromOffscreen();
+  }, [rebuildOffscreen, syncVisibleFromOffscreen]);
+
+  /**
+   * Apply a selection-move stroke from a remote S_Selection message. Runs the
+   * full three-step cut-and-paste on the offscreen, mirrors to visible, and
+   * records the stroke.
+   */
+  const addSelection = useCallback(
+    (
+      srcNorm: { x: number; y: number; w: number; h: number },
+      dstNorm: { x: number; y: number },
+    ) => {
+      const offs = offscreenRef.current;
+      if (!offs) {
+        return;
+      }
+      const offCtx = offs.getContext("2d");
+      if (!offCtx) {
+        return;
+      }
+      performSelectionOnContext(offCtx, offs, srcNorm, dstNorm);
+      syncVisibleFromOffscreen();
+      const stroke: SerializedStroke = {
+        points: [],
+        color: "",
+        lineWidth: 0,
+        selection: {
+          srcX: srcNorm.x,
+          srcY: srcNorm.y,
+          w: srcNorm.w,
+          h: srcNorm.h,
+          dstX: dstNorm.x,
+          dstY: dstNorm.y,
+        },
+      };
+      strokesRef.current.push(stroke);
+    },
+    [syncVisibleFromOffscreen],
+  );
 
   /**
    * Apply a bucket-fill stroke (from local tool click OR a remote S_Fill message).
@@ -685,6 +874,77 @@ export function useCanvas({
       return () => canvas.removeEventListener("click", onClick);
     }
 
+    // ========== Selection (marquee) tool ==========
+    // mousedown + drag → dashed rectangle preview. mouseup (with non-trivial
+    // size) emits srcNorm upstream; upstream opens the selection overlay.
+    if (tool === "selection") {
+      const MIN_SIZE_PX = 20;
+      let startPx: Point | null = null;
+      const onDown = (e: MouseEvent) => {
+        startPx = { x: e.offsetX, y: e.offsetY };
+      };
+      const onMove = (e: MouseEvent) => {
+        if (!startPx) {
+          return;
+        }
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const offs = offscreenRef.current;
+        if (offs) {
+          ctx.drawImage(offs, 0, 0, canvas.width, canvas.height);
+        }
+        ctx.strokeStyle = "#818cf8";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(startPx.x, startPx.y, e.offsetX - startPx.x, e.offsetY - startPx.y);
+        ctx.setLineDash([]);
+      };
+      const onUp = (e: MouseEvent) => {
+        if (!startPx) {
+          return;
+        }
+        const start = startPx;
+        startPx = null;
+        const bx = Math.min(start.x, e.offsetX);
+        const by = Math.min(start.y, e.offsetY);
+        const bw = Math.abs(e.offsetX - start.x);
+        const bh = Math.abs(e.offsetY - start.y);
+        if (bw < MIN_SIZE_PX || bh < MIN_SIZE_PX) {
+          // Clear any preview stroke off the visible canvas and abort.
+          syncVisibleFromOffscreen();
+          return;
+        }
+        const srcNorm = {
+          x: bx / canvas.width,
+          y: by / canvas.height,
+          w: bw / canvas.width,
+          h: bh / canvas.height,
+        };
+        // beginSelection extracts the patch, whitens src on the offscreen, and
+        // syncs visible — no need to explicitly clear the preview stroke.
+        const patch = beginSelection(srcNorm);
+        if (patch) {
+          onSelectionDrawn?.(srcNorm, patch);
+        }
+      };
+      const onLeave = () => {
+        if (!startPx) {
+          return;
+        }
+        startPx = null;
+        syncVisibleFromOffscreen();
+      };
+      canvas.addEventListener("mousedown", onDown);
+      canvas.addEventListener("mousemove", onMove);
+      canvas.addEventListener("mouseup", onUp);
+      canvas.addEventListener("mouseleave", onLeave);
+      return () => {
+        canvas.removeEventListener("mousedown", onDown);
+        canvas.removeEventListener("mousemove", onMove);
+        canvas.removeEventListener("mouseup", onUp);
+        canvas.removeEventListener("mouseleave", onLeave);
+      };
+    }
+
     // ========== Shape / arrow tools ==========
     // mousedown: record start
     // mousemove: repaint visible (clear + blit offscreen + preview), never writes to offscreen
@@ -774,7 +1034,9 @@ export function useCanvas({
     syncVisibleFromOffscreen,
     onShapeDrawn,
     onLocalPenEnd,
+    onSelectionDrawn,
     addFill,
+    beginSelection,
   ]);
 
   // Replay a remote draw event (pen)
@@ -913,6 +1175,10 @@ export function useCanvas({
     addTextStroke,
     addShape,
     addFill,
+    addSelection,
+    beginSelection,
+    commitLocalSelection,
+    cancelLocalSelection,
     syncVisibleFromOffscreen,
     strokesRef,
   };
