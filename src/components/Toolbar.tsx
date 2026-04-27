@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { tx } from "@twind/core";
-import { Saturation, Hue, Alpha, hexToHsva, hsvaToHex, hsvaToHexa } from "@uiw/react-color";
-import { normalizeColor, stripAlpha } from "../utils/color";
+import { Saturation, Hue, hexToHsva, hsvaToHex } from "@uiw/react-color";
+import { normalizeColor } from "../utils/color";
 
 export type ToolMode =
   | "rect"
@@ -133,13 +133,11 @@ function hasAnyPopoverContent(meta: ToolMeta): boolean {
 function CustomColorPanel({
   draft,
   onDraftChange,
-  withAlpha,
   onConfirm,
   onCancel,
 }: {
   draft: string;
   onDraftChange: (c: string) => void;
-  withAlpha: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -156,7 +154,7 @@ function CustomColorPanel({
       setHexInput(draft); // 非法 → 回滚
       return;
     }
-    onDraftChange(withAlpha ? normalized : stripAlpha(normalized));
+    onDraftChange(normalized);
   };
 
   // 吸色：浏览器原生 EyeDropper API（Chrome 95+ / Edge 95+；Firefox / Safari 不支持）。
@@ -171,24 +169,14 @@ function CustomColorPanel({
     try {
       const ed = new w.EyeDropper();
       const result = await ed.open();
-      const picked = result.sRGBHex; // "#rrggbb"，无 alpha
-      if (withAlpha) {
-        // 保留当前 draft 的 alpha
-        const aHex = draft.length === 9 ? draft.slice(7, 9) : "ff";
-        onDraftChange(picked + aHex);
-      } else {
-        onDraftChange(picked);
-      }
+      onDraftChange(result.sRGBHex); // "#rrggbb"
     } catch {
       // 用户按 Esc 取消 → ignore
     }
   };
 
-  // hex → hsva for the @uiw/react-color components
+  // hex → hsva for the @uiw/react-color components（只取前 7 位，忽略历史 8 位输入）
   const hsva = hexToHsva(draft.length >= 7 ? draft.slice(0, 7) : "#000000");
-  // 解析 alpha from hex string (#rrggbbaa 格式)
-  const alphaFromHex = draft.length === 9 ? parseInt(draft.slice(7, 9), 16) / 255 : 1;
-  const hsvaWithAlpha = { ...hsva, a: alphaFromHex };
 
   return (
     <div
@@ -196,64 +184,37 @@ function CustomColorPanel({
       className={tx(
         "absolute bottom-full right-0 mb-2 p-3 bg-white rounded-lg shadow-lg border border-gray-200 z-50",
       )}
-      style={{ width: 260 }}
+      style={{ width: 280 }}
       onMouseDown={(e) => e.stopPropagation()}
     >
       {/* 顶部行：SV 方块（左）+ 垂直 Hue 条（右） */}
       <div className={tx("flex gap-1.5")}>
         <Saturation
-          hsva={hsvaWithAlpha}
+          hsva={hsva}
           onChange={(newColor) => {
-            // newColor 是 HsvaColor，保留当前 alpha
-            const merged = { ...newColor, a: hsvaWithAlpha.a };
-            onDraftChange(withAlpha ? hsvaToHexa(merged) : hsvaToHex(merged));
+            onDraftChange(hsvaToHex(newColor));
           }}
-          style={{ width: 220, height: 140, borderRadius: 4 }}
+          style={{ width: 240, height: 140, borderRadius: 4 }}
         />
         <Hue
-          hue={hsvaWithAlpha.h}
+          hue={hsva.h}
           direction="vertical"
           onChange={(newHue) => {
-            const merged = { ...hsvaWithAlpha, h: newHue.h };
-            onDraftChange(withAlpha ? hsvaToHexa(merged) : hsvaToHex(merged));
+            onDraftChange(hsvaToHex({ ...hsva, h: newHue.h }));
           }}
           style={{ width: 14, height: 140, borderRadius: 4 }}
         />
       </div>
 
-      {/* Alpha 横条（仅 withAlpha 时渲染），SV 下方 */}
-      {withAlpha && (
-        <div className={tx("mt-1.5")} style={{ width: 236 }}>
-          <Alpha
-            hsva={hsvaWithAlpha}
-            direction="horizontal"
-            onChange={(newAlpha) => {
-              const merged = { ...hsvaWithAlpha, a: newAlpha.a };
-              onDraftChange(hsvaToHexa(merged));
-            }}
-            style={{ height: 14, borderRadius: 4 }}
-          />
-        </div>
-      )}
-
-      {/* 预览色块 + 吸色按钮 + hex 输入框 */}
+      {/* 底栏：吸管 + hex 输入（左） / 清空 + 确定（右） */}
       <div className={tx("flex items-center gap-2 mt-3")}>
-        <div
-          className={tx("w-8 h-6 rounded border border-gray-300 relative overflow-hidden")}
-          style={{
-            backgroundImage: "repeating-conic-gradient(#e5e7eb 0% 25%, #ffffff 0% 50%)",
-            backgroundSize: "8px 8px",
-          }}
-        >
-          <div className={tx("absolute inset-0")} style={{ background: draft }} />
-        </div>
         {eyedropperSupported && (
           <button
             type="button"
             onClick={pickFromScreen}
             title="吸取屏幕颜色"
             className={tx(
-              "w-7 h-6 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-50 transition",
+              "w-7 h-7 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-50 transition flex-shrink-0",
             )}
           >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
@@ -272,18 +233,14 @@ function CustomColorPanel({
             }
           }}
           className={tx(
-            "flex-1 px-2 py-1 border border-gray-300 rounded text-sm font-mono outline-none focus:border-indigo-400",
+            "flex-1 min-w-0 px-2 py-1 border border-gray-300 rounded text-sm font-mono outline-none focus:border-indigo-400",
           )}
           spellCheck={false}
         />
-      </div>
-
-      {/* 按钮 */}
-      <div className={tx("flex justify-end gap-2 mt-3")}>
         <button
           onClick={onCancel}
           className={tx(
-            "px-3 py-1 text-sm rounded border border-gray-300 hover:bg-gray-50 transition",
+            "px-3 py-1 text-sm rounded border border-gray-300 hover:bg-gray-50 transition flex-shrink-0",
           )}
         >
           清空
@@ -291,7 +248,7 @@ function CustomColorPanel({
         <button
           onClick={onConfirm}
           className={tx(
-            "px-3 py-1 text-sm rounded bg-indigo-500 text-white hover:bg-indigo-600 transition",
+            "px-3 py-1 text-sm rounded bg-indigo-500 text-white hover:bg-indigo-600 transition flex-shrink-0",
           )}
         >
           确定
@@ -304,13 +261,11 @@ function CustomColorPanel({
 function ColorPalette({
   value,
   onChange,
-  withAlpha,
   customColor,
   onCustomColorChange,
 }: {
   value: string;
   onChange: (c: string) => void;
-  withAlpha: boolean;
   // 自定义已确认色（提升到 Toolbar 层级）：仅当用户在自定义面板点「确定」时才更新；选预设不影响。
   // null = 用户尚未确认过任何自定义色；色块用棋盘格白底显示。
   customColor: string | null;
@@ -322,10 +277,9 @@ function ColorPalette({
   // 面板打开时种 draft：优先复用上次自定义色，否则用当前画布色
   useEffect(() => {
     if (panelOpen) {
-      const seed = customColor ?? value;
-      setDraft(withAlpha ? seed : stripAlpha(seed));
+      setDraft(customColor ?? value);
     }
-  }, [panelOpen, customColor, value, withAlpha]);
+  }, [panelOpen, customColor, value]);
 
   // 外点关闭：捕获阶段，避免被画布 mousedown 抢跑
   useEffect(() => {
@@ -347,13 +301,12 @@ function ColorPalette({
   }, [panelOpen]);
 
   const handleSelect = (c: string) => {
-    onChange(withAlpha ? c : stripAlpha(c));
+    onChange(c);
   };
 
   const handleConfirm = () => {
-    const final = withAlpha ? draft : stripAlpha(draft);
-    onCustomColorChange(final);
-    onChange(final);
+    onCustomColorChange(draft);
+    onChange(draft);
     setPanelOpen(false);
   };
 
@@ -399,7 +352,6 @@ function ColorPalette({
         <CustomColorPanel
           draft={draft}
           onDraftChange={setDraft}
-          withAlpha={withAlpha}
           onConfirm={handleConfirm}
           onCancel={() => setPanelOpen(false)}
         />
@@ -720,7 +672,6 @@ export default function Toolbar({
               <ColorPalette
                 value={color}
                 onChange={onColorChange}
-                withAlpha={t !== "bucket"}
                 customColor={customColor}
                 onCustomColorChange={setCustomColor}
               />
