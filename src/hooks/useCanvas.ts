@@ -50,7 +50,10 @@ interface UseCanvasOptions {
 // stroke looks the same regardless of where the canvas is rendered.
 const REF_WIDTH = 800;
 const MIN_SCALE = 0.5;
-const MAX_SCALE = 1.5;
+// 上限提到 2.0：OFFSCREEN_WIDTH=1600 时 offscreen 渲染的天然倍率就是 2×，
+// 旧值 1.5 会把 offscreen 的 lineWidth 钳成 0.75 倍，commit 后视觉上线突然变细。
+// visible canvas 通常 533~1067px（4:3，533 是 CSS min），仍不触上限。
+const MAX_SCALE = 2.0;
 
 // Physical offscreen canvas dimensions (4:3). Larger than REF for finer
 // anti-aliasing on curves: pen strokes are rendered at 2× linear resolution,
