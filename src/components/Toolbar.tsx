@@ -1,5 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { tx } from "@twind/core";
+import { HexColorPicker, HexAlphaColorPicker } from "react-colorful";
+import { useRecentColors } from "../hooks/useRecentColors";
+import { normalizeColor, stripAlpha } from "../utils/color";
 
 export type ToolMode =
   | "rect"
@@ -128,20 +131,198 @@ function hasAnyPopoverContent(meta: ToolMeta): boolean {
 
 // ---------- Shared pickers ----------
 
-function ColorPicker({ value, onChange }: { value: string; onChange: (c: string) => void }) {
+function CustomColorPanel({
+  initial,
+  withAlpha,
+  onCancel,
+  onConfirm,
+}: {
+  initial: string;
+  withAlpha: boolean;
+  onCancel: () => void;
+  onConfirm: (color: string) => void;
+}) {
+  const [draft, setDraft] = useState<string>(() => (withAlpha ? initial : stripAlpha(initial)));
+  const [hexInput, setHexInput] = useState<string>(draft);
+
+  // draft 变化时同步 hex 输入框
+  useEffect(() => {
+    setHexInput(draft);
+  }, [draft]);
+
+  const commitHexInput = () => {
+    const normalized = normalizeColor(hexInput);
+    if (normalized === null) {
+      setHexInput(draft); // 非法 → 回滚
+      return;
+    }
+    setDraft(withAlpha ? normalized : stripAlpha(normalized));
+  };
+
+  const Picker = withAlpha ? HexAlphaColorPicker : HexColorPicker;
+
   return (
-    <div className={tx("flex gap-1.5 items-center")}>
+    <div
+      data-color-panel="true"
+      className={tx(
+        "absolute bottom-full right-0 mb-2 p-3 bg-white rounded-lg shadow-lg border border-gray-200 z-50",
+      )}
+      style={{ width: 240 }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <Picker
+        color={withAlpha ? draft : draft.slice(0, 7)}
+        onChange={(c: string) => setDraft(withAlpha ? c : stripAlpha(c))}
+        style={{ width: "100%" }}
+      />
+      <div className={tx("flex items-center gap-2 mt-3")}>
+        <div
+          className={tx("w-8 h-6 rounded border border-gray-300 relative overflow-hidden")}
+          style={{
+            backgroundImage: "repeating-conic-gradient(#e5e7eb 0% 25%, #ffffff 0% 50%)",
+            backgroundSize: "8px 8px",
+          }}
+        >
+          <div className={tx("absolute inset-0")} style={{ background: draft }} />
+        </div>
+        <input
+          type="text"
+          value={hexInput}
+          onChange={(e) => setHexInput(e.target.value)}
+          onBlur={commitHexInput}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              commitHexInput();
+            }
+          }}
+          className={tx(
+            "flex-1 px-2 py-1 border border-gray-300 rounded text-sm font-mono outline-none focus:border-indigo-400",
+          )}
+          spellCheck={false}
+        />
+      </div>
+      <div className={tx("flex justify-end gap-2 mt-3")}>
+        <button
+          onClick={onCancel}
+          className={tx(
+            "px-3 py-1 text-sm rounded border border-gray-300 hover:bg-gray-50 transition",
+          )}
+        >
+          清空
+        </button>
+        <button
+          onClick={() => onConfirm(draft)}
+          className={tx(
+            "px-3 py-1 text-sm rounded bg-indigo-500 text-white hover:bg-indigo-600 transition",
+          )}
+        >
+          确定
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ColorPalette({
+  value,
+  onChange,
+  withAlpha,
+}: {
+  value: string;
+  onChange: (c: string) => void;
+  withAlpha: boolean;
+}) {
+  const { recent, push } = useRecentColors();
+  const [panelOpen, setPanelOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  // 外点关闭：捕获阶段，避免被画布 mousedown 抢跑
+  useEffect(() => {
+    if (!panelOpen) {
+      return;
+    }
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest("[data-color-panel]")) {
+        return;
+      }
+      if (t?.closest("[data-color-trigger]")) {
+        return;
+      }
+      setPanelOpen(false);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
+  }, [panelOpen]);
+
+  const handleSelect = (c: string) => {
+    onChange(withAlpha ? c : stripAlpha(c));
+  };
+
+  const handleConfirm = (c: string) => {
+    const final = withAlpha ? c : stripAlpha(c);
+    push(final);
+    onChange(final);
+    setPanelOpen(false);
+  };
+
+  const isActive = (c: string) => c.toLowerCase() === value.toLowerCase();
+
+  return (
+    <div className={tx("flex gap-1.5 items-center relative")}>
       {COLORS.map((c) => (
         <button
           key={c}
-          onClick={() => onChange(c)}
+          onClick={() => handleSelect(c)}
           className={tx(
             "w-5 h-5 rounded transition border",
-            c === value ? "ring-2 ring-indigo-400 scale-110" : "border-gray-300",
+            isActive(c) ? "ring-2 ring-indigo-400 scale-110" : "border-gray-300",
           )}
           style={{ backgroundColor: c }}
         />
       ))}
+      {recent.length > 0 && (
+        <>
+          <div className={tx("w-px h-5 bg-gray-200 mx-1")} />
+          {recent.map((c) => (
+            <button
+              key={c}
+              onClick={() => handleSelect(c)}
+              className={tx(
+                "w-5 h-5 rounded transition border relative overflow-hidden",
+                isActive(c) ? "ring-2 ring-indigo-400 scale-110" : "border-gray-300",
+              )}
+              style={{
+                backgroundImage: "repeating-conic-gradient(#e5e7eb 0% 25%, #ffffff 0% 50%)",
+                backgroundSize: "6px 6px",
+              }}
+              title={c}
+            >
+              <span className={tx("absolute inset-0")} style={{ background: c }} />
+            </button>
+          ))}
+        </>
+      )}
+      <div className={tx("w-px h-5 bg-gray-200 mx-1")} />
+      <button
+        ref={triggerRef}
+        data-color-trigger="true"
+        onClick={() => setPanelOpen((v) => !v)}
+        className={tx(
+          "w-5 h-5 rounded border border-gray-300 flex items-center justify-center text-gray-500 hover:bg-gray-50 transition text-sm leading-none",
+        )}
+        title="自定义颜色"
+      >
+        +
+      </button>
+      {panelOpen && (
+        <CustomColorPanel
+          initial={value}
+          withAlpha={withAlpha}
+          onCancel={() => setPanelOpen(false)}
+          onConfirm={handleConfirm}
+        />
+      )}
     </div>
   );
 }
@@ -451,7 +632,9 @@ export default function Toolbar({
             {meta.hasColor && (meta.picker !== "none" || meta.hasFill) && (
               <div className={tx("w-px h-6 bg-gray-200")} />
             )}
-            {meta.hasColor && <ColorPicker value={color} onChange={onColorChange} />}
+            {meta.hasColor && (
+              <ColorPalette value={color} onChange={onColorChange} withAlpha={t !== "bucket"} />
+            )}
           </ToolPopover>
         )}
       </div>
