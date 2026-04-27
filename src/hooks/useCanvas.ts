@@ -1081,11 +1081,18 @@ export function useCanvas({
       shapeStart = normalize(e);
     };
 
+    // 把鼠标坐标钳到画布范围内：mouseleave 时 offsetX/Y 会超出边界，
+    // 否则形状会画到 canvas 之外（normalized > 1 或 < 0）。
+    const clampToCanvas = (e: MouseEvent): Point => ({
+      x: Math.max(0, Math.min(canvas.width, e.offsetX)) / canvas.width,
+      y: Math.max(0, Math.min(canvas.height, e.offsetY)) / canvas.height,
+    });
+
     const onShapeMove = (e: MouseEvent) => {
       if (!shapeStart) {
         return;
       }
-      const current = normalize(e);
+      const current = clampToCanvas(e);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const offs = offscreenRef.current;
       if (offs) {
@@ -1094,12 +1101,14 @@ export function useCanvas({
       drawShapePreview(ctx, canvas, shapeStart, current, color, lineWidth, shapeKind, filled);
     };
 
+    // mouseup 与 mouseleave 都走这里——参考 pen 的做法：鼠标离开边界 =
+    // 在边界处提交形状（坐标已被 clampToCanvas 钳到画布内），而不是清空预览。
     const onShapeUp = (e: MouseEvent) => {
       if (!shapeStart) {
         return;
       }
       const start = shapeStart;
-      const end = normalize(e);
+      const end = clampToCanvas(e);
       shapeStart = null;
       // Wipe the preview — editing overlay replaces it.
       syncVisibleFromOffscreen();
@@ -1124,24 +1133,16 @@ export function useCanvas({
       });
     };
 
-    const onShapeLeave = () => {
-      if (!shapeStart) {
-        return;
-      }
-      shapeStart = null;
-      syncVisibleFromOffscreen();
-    };
-
     canvas.addEventListener("mousedown", onShapeDown);
     canvas.addEventListener("mousemove", onShapeMove);
     canvas.addEventListener("mouseup", onShapeUp);
-    canvas.addEventListener("mouseleave", onShapeLeave);
+    canvas.addEventListener("mouseleave", onShapeUp);
 
     return () => {
       canvas.removeEventListener("mousedown", onShapeDown);
       canvas.removeEventListener("mousemove", onShapeMove);
       canvas.removeEventListener("mouseup", onShapeUp);
-      canvas.removeEventListener("mouseleave", onShapeLeave);
+      canvas.removeEventListener("mouseleave", onShapeUp);
       if (shapeStart !== null) {
         syncVisibleFromOffscreen();
       }
