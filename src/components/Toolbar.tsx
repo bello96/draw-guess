@@ -182,7 +182,7 @@ function CustomColorPanel({
     <div
       data-color-panel="true"
       className={tx(
-        "absolute bottom-full right-0 mb-2 p-3 bg-white rounded-lg shadow-lg border border-gray-200 z-50",
+        "absolute bottom-full mb-4 p-3 bg-white rounded-lg shadow-lg border border-gray-200 z-50",
       )}
       style={{ width: 280 }}
       onMouseDown={(e) => e.stopPropagation()}
@@ -207,7 +207,7 @@ function CustomColorPanel({
       </div>
 
       {/* 底栏：吸管 + hex 输入（左） / 清空 + 确定（右） */}
-      <div className={tx("flex items-center gap-2 mt-3")}>
+      <div className={tx("flex items-center gap-2 mt-4")}>
         {eyedropperSupported && (
           <button
             type="button"
@@ -347,6 +347,17 @@ function ColorPalette({
         {swatchColor !== null && (
           <span className={tx("absolute inset-0")} style={{ background: swatchColor }} />
         )}
+        {/* 自定义色标识：右下角彩虹三角，区分于固定预设色块 */}
+        <span
+          className={tx("absolute right-0 bottom-0 pointer-events-none")}
+          style={{
+            width: 8,
+            height: 8,
+            background:
+              "linear-gradient(135deg, #ff0040 0%, #ff7f00 20%, #ffd700 40%, #00cc4a 60%, #00b3ff 80%, #a020ff 100%)",
+            clipPath: "polygon(100% 0, 100% 100%, 0 100%)",
+          }}
+        />
       </button>
       {panelOpen && (
         <CustomColorPanel
