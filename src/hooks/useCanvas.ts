@@ -44,13 +44,22 @@ interface UseCanvasOptions {
   ) => void;
 }
 
-// Reference canvas dimensions (4:3) for lineWidth scaling and offscreen cache
-// resolution. lineWidth values in the protocol are authored against this width;
-// text fontSize likewise.
+// Logical reference canvas width (paired conceptually with a 4:3 height of
+// 600). lineWidth and fontSize values in the protocol are authored against
+// this width — they're scaled by canvas.width / REF_WIDTH so a `lineWidth=4`
+// stroke looks the same regardless of where the canvas is rendered.
 const REF_WIDTH = 800;
-const REF_HEIGHT = 600;
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 1.5;
+
+// Physical offscreen canvas dimensions (4:3). Larger than REF for finer
+// anti-aliasing on curves: pen strokes are rendered at 2× linear resolution,
+// then downsampled when blitted onto the visible canvas (which is typically
+// smaller than OFFSCREEN_WIDTH). This dramatically reduces stair-step
+// aliasing on curved fills/strokes vs. rendering directly at REF_*.
+// Aspect ratio MUST match RATIO_W:RATIO_H in Canvas.tsx and REF_WIDTH:REF_HEIGHT.
+const OFFSCREEN_WIDTH = 1600;
+const OFFSCREEN_HEIGHT = 1200;
 
 export function scaleLineWidth(baseWidth: number, canvasWidth: number): number {
   const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, canvasWidth / REF_WIDTH));
@@ -246,6 +255,89 @@ function scanlineFill(
   }
 }
 
+/**
+ * Anti-alias the boundary of a freshly-filled region. For each unfilled pixel
+ * adjacent to a filled pixel, alpha-blend the fill color in based on how close
+ * the pixel is to the original target (background) color. This eliminates the
+ * 1–2 px "halo" gap that scanlineFill leaves between fill and anti-aliased
+ * pen strokes.
+ *
+ * Deterministic: depends only on RGBA inputs + integer arithmetic, so both
+ * peers produce identical pixels without transmitting bitmaps.
+ */
+function antiAliasFillEdges(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  tr: number,
+  tg: number,
+  tb: number,
+  fr: number,
+  fg: number,
+  fb: number,
+): void {
+  // Pixels within this max-channel-distance of background get partial fill.
+  // Beyond it (deep into stroke), no blending. Tuned to cover typical canvas
+  // anti-aliasing halo without bleeding into stroke cores.
+  const FALLOFF = 96;
+  const snap = new Uint8ClampedArray(data);
+  const rowStride = w * 4;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = (y * w + x) * 4;
+      if (snap[idx] === fr && snap[idx + 1] === fg && snap[idx + 2] === fb) {
+        continue;
+      }
+      let hasFilledNeighbor = false;
+      if (y > 0) {
+        const up = idx - rowStride;
+        if (snap[up] === fr && snap[up + 1] === fg && snap[up + 2] === fb) {
+          hasFilledNeighbor = true;
+        }
+      }
+      if (!hasFilledNeighbor && y < h - 1) {
+        const down = idx + rowStride;
+        if (snap[down] === fr && snap[down + 1] === fg && snap[down + 2] === fb) {
+          hasFilledNeighbor = true;
+        }
+      }
+      if (!hasFilledNeighbor && x > 0) {
+        const left = idx - 4;
+        if (snap[left] === fr && snap[left + 1] === fg && snap[left + 2] === fb) {
+          hasFilledNeighbor = true;
+        }
+      }
+      if (!hasFilledNeighbor && x < w - 1) {
+        const right = idx + 4;
+        if (snap[right] === fr && snap[right + 1] === fg && snap[right + 2] === fb) {
+          hasFilledNeighbor = true;
+        }
+      }
+      if (!hasFilledNeighbor) {
+        continue;
+      }
+      const drv = snap[idx] - tr;
+      const dgv = snap[idx + 1] - tg;
+      const dbv = snap[idx + 2] - tb;
+      const adr = drv >= 0 ? drv : -drv;
+      const adg = dgv >= 0 ? dgv : -dgv;
+      const adb = dbv >= 0 ? dbv : -dbv;
+      const dist = adr > adg ? (adr > adb ? adr : adb) : adg > adb ? adg : adb;
+      let alpha = 1 - dist / FALLOFF;
+      if (alpha <= 0) {
+        continue;
+      }
+      if (alpha > 1) {
+        alpha = 1;
+      }
+      const inv = 1 - alpha;
+      data[idx] = snap[idx] * inv + fr * alpha;
+      data[idx + 1] = snap[idx + 1] * inv + fg * alpha;
+      data[idx + 2] = snap[idx + 2] * inv + fb * alpha;
+    }
+  }
+}
+
 /** Flood-fill an offscreen-sized context at the given (pixel) seed point. */
 function drawFillOnContext(
   ctx: CanvasRenderingContext2D,
@@ -260,7 +352,15 @@ function drawFillOnContext(
   }
   const [fr, fg, fb] = hexToRgba(fillColor);
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const seedIdx = (sy * canvas.width + sx) * 4;
+  const tr = img.data[seedIdx];
+  const tg = img.data[seedIdx + 1];
+  const tb = img.data[seedIdx + 2];
+  if (tr === fr && tg === fg && tb === fb) {
+    return;
+  }
   scanlineFill(img.data, canvas.width, canvas.height, sx, sy, fr, fg, fb, tolerance);
+  antiAliasFillEdges(img.data, canvas.width, canvas.height, tr, tg, tb, fr, fg, fb);
   ctx.putImageData(img, 0, 0);
 }
 
@@ -530,12 +630,12 @@ export function useCanvas({
   const offscreenRef = useRef<HTMLCanvasElement | null>(null);
   if (offscreenRef.current === null && typeof document !== "undefined") {
     const off = document.createElement("canvas");
-    off.width = REF_WIDTH;
-    off.height = REF_HEIGHT;
+    off.width = OFFSCREEN_WIDTH;
+    off.height = OFFSCREEN_HEIGHT;
     const offCtx = off.getContext("2d");
     if (offCtx) {
       offCtx.fillStyle = "#ffffff";
-      offCtx.fillRect(0, 0, REF_WIDTH, REF_HEIGHT);
+      offCtx.fillRect(0, 0, OFFSCREEN_WIDTH, OFFSCREEN_HEIGHT);
     }
     offscreenRef.current = off;
   }
