@@ -13,7 +13,7 @@
     "format": "prettier --write \"src/**/*.{ts,tsx}\" \"worker/src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"worker/src/**/*.ts\"",
     "deploy:worker": "cd worker && npx wrangler deploy",
-    "deploy:pages": "npm run build && npx wrangler pages deploy dist --project-name=draw-guess --commit-message \"deploy\"",
+    "deploy:pages": "npm run build && npx wrangler pages deploy dist --project-name=draw-guess",
     "deploy:all": "npm run deploy:worker && npm run deploy:pages"
   },
   "dependencies": {
