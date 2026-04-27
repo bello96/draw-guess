@@ -26,15 +26,17 @@
 │   │   ├── Home.tsx              # 创建 / 加入房间
 │   │   └── Room.tsx              # 主游戏页，消息分发 + 撤销/重做栈
 │   ├── components/
-│   │   ├── Canvas.tsx            # 画板容器 + 文字/形状编辑 overlay
-│   │   ├── Toolbar.tsx           # 5 工具 + 每工具独立 popover + undo/redo/clear
+│   │   ├── Canvas.tsx            # 画板容器 + 文字/形状/框选编辑 overlay
+│   │   ├── Toolbar.tsx           # 8 工具 + ColorPalette/CustomColorPanel 颜色选择 + undo/redo/clear
 │   │   ├── PlayerBar.tsx         # 顶栏房间号、玩家、操作按钮
 │   │   ├── ChatPanel.tsx         # 聊天 / 设答案 / 猜词三合一输入
 │   │   ├── Confetti.tsx          # 猜对时的彩带雨（canvas + RAF）
 │   │   └── Toast.tsx             # 右上角错误提示（取代粗糙的 system message）
 │   ├── hooks/
 │   │   ├── useWebSocket.ts       # WS 连接、重连、心跳、leave/pagehide
-│   │   └── useCanvas.ts          # 画布事件、笔画、归一化坐标、离屏缓存
+│   │   └── useCanvas.ts          # 画布事件、笔画、归一化坐标、离屏缓存、flood fill
+│   ├── utils/
+│   │   └── color.ts              # normalizeColor（hex 字符串规范化）
 │   ├── assets/                   # 图标源文件（SVG），当前用 inline path 镜像到 Toolbar
 │   └── types/protocol.ts         # ⭐ 前后端共享的消息类型契约
 ├── worker/
@@ -89,36 +91,51 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 ```
 状态只在 `room.ts` 服务端变更，客户端通过 `phaseChange` 被动同步。
 
-### 6. 画板坐标归一化
-所有 `{x, y}` 在线上协议和存储里都是 `[0, 1]` 归一化值。画布实际像素 = 归一化 × `canvas.width`。lineWidth 也会根据 canvas 大小缩放（`scaleLineWidth`，clamp 到 0.5~1.5 倍）。
+### 6. 画板坐标归一化与分辨率
+- 所有 `{x, y}` 在线上协议和存储里都是 `[0, 1]` 归一化值。画布实际像素 = 归一化 × `canvas.width`
+- `REF_WIDTH = 800` 是逻辑参考宽度，用于 `scaleLineWidth` / 字号缩放（clamp 0.5~2.0 倍）
+- `OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT = 1600 × 1200`（4:3，与 visible 比例一致）：实际离屏画布尺寸，2× 线性分辨率，曲线/油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible，显著减少阶梯锯齿
+- 两个常量解耦：visible 渲染用 `canvas.width / REF_WIDTH` 算 scale；offscreen 渲染用 `1600 / 800 = 2.0` 算 scale；最终 drawImage 缩到 visible 后两者视觉粗细一致
 
-### 7. 工具系统（5 种 + 编辑态）
+### 7. 工具系统（8 种 + 编辑态）
 
 工具栏左→右分 4 组（用竖线分隔）：
 ```
-[画笔 | 文本] │ [矩形 | 椭圆 | 箭头] │ [撤销 | 重做] │ [清除]
+[画笔 | 文本] │ [油漆桶 | 矩形 | 椭圆 | 直线 | 箭头 | 框选] │ [撤销 | 重做] │ [清除]
 ```
 
 每个工具按钮点击时**弹出独立 popover**（参考微信截图风格）：
-- 画笔 / 矩形 / 椭圆 / 箭头：线宽选项 + 颜色池
+- 画笔 / 矩形 / 椭圆 / 直线 / 箭头：线宽选项 + 颜色选择
 - 矩形 / 椭圆 额外：**线框 / 填充** 切换
-- 文本：**小 / 中 / 大** 字号 + 颜色池
+- 文本：**小 / 中 / 大** 字号 + 颜色选择
+- 油漆桶：仅颜色选择（无线宽、无 alpha）
+- 框选：无 popover（直接进入框选模式）
+
+颜色选择行（适用于带 `hasColor: true` 的工具）= `ColorPalette` 组件：
+- 7 个固定预设色（黑/蓝/绿/黄/红/紫/白）
+- 分隔条
+- 1 个**自定义色块**：右下角带彩虹三角标识；背景棋盘格 + 当前 customColor 覆盖；面板打开时 background 跟随 draft 实时变化；面板关闭后若 `customColor === value` 则显示高亮 ring（表示当前画布色就是上次确认的自定义色）
+
+`customColor` state 提升到 `Toolbar` 函数层级（不在 `ColorPalette` 内部），保证 popover 反复开关时上次确认的自定义色不丢失。
 
 再次点同一工具按钮 toggle 关闭 popover。popover 的 `ToolPopover`（Toolbar.tsx 内）会用 `useLayoutEffect` 测量 popover 宽度，**clamp 到视窗边缘**，同时三角反向偏移以持续指向被点击的按钮。
 
 ### 8. 编辑态（失焦即 commit）
 
-文字 / 矩形 / 椭圆 / 箭头 **画完后不立即 commit**，而是进入编辑态（dashed overlay），支持：
-- **拖拽整体平移**（`editingText` / `editingShape` 的 points 同步更新 pixel + normalized）
+文字 / 矩形 / 椭圆 / 直线 / 箭头 / 框选 **画完后不立即 commit**，而是进入编辑态（dashed overlay），支持：
+- **拖拽整体平移**（`editingText` / `editingShape` / `editingSelection` 的 points 同步更新 pixel + normalized）
 - **点击 overlay 外任何地方** → commit 并同步到对端
 - **切换工具 / 清除 / 转让画笔 / 继续出题** → commit 或丢弃
 - 文字 overlay 额外保留角点调字号（corner handles）
+- 矩形 / 椭圆 overlay 保留 4 角点缩放
+- 箭头 / 直线 overlay 保留 2 端点拖拽（改长度 + 角度）
+- 框选 overlay 仅支持平移（不缩放，不旋转）
 
 实现要点：
-- 两类编辑态都用 `data-text-overlay` / `data-shape-overlay` 标记 DOM
-- Room.tsx 全局 `mousedown` 监听，editingShape 用 **capture 阶段**（先于 canvas 的 mousedown commit 旧 shape，再让新 drag 开始）
-- arrow 的 `points` 是 `[start, end]`，**方向保留**；rect/ellipse 的 `points` 是 `[bbox 的两角]`，**顺序不重要**（消费方 min/max）
-- arrow 编辑 overlay 用 SVG（`overflow: visible` 处理退化 bbox），rect/ellipse 用 DOM `div` + border/background
+- 三类编辑态分别用 `data-text-overlay` / `data-shape-overlay` / `data-selection-overlay` 标记 DOM
+- Room.tsx 全局 `mousedown` 监听，editingShape / editingSelection 用 **capture 阶段**（先于 canvas 的 mousedown commit 旧 overlay，再让新 drag 开始）
+- arrow / line 的 `points` 是 `[start, end]`，**方向保留**；rect/ellipse 的 `points` 是 `[bbox 的两角]`，**顺序不重要**（消费方 min/max）
+- arrow / line 编辑 overlay 用 SVG（`overflow: visible` 处理退化 bbox），rect/ellipse 用 DOM `div` + border/background
 
 ### 9. 撤销 / 重做
 
@@ -271,13 +288,14 @@ cd worker && npx wrangler dev
 
 **画板比例 4:3**：visible canvas 是 **4:3**（width:height）。`Canvas.tsx` 的 `resizeCanvas` **高度驱动**：先取 `container.clientHeight` 作为高度，宽度 = 高度 × 4/3；如果宽度溢出 container 就回退成宽度驱动（高度 = 宽度 × 3/4）。`container` 的 CSS 最小尺寸改成 `min-w-[533px] min-h-[400px]`（533 = 400 × 4/3）。
 
-**离屏 canvas 缓存**：`useCanvas.ts` 维护一个固定 **800×600 (4:3)** 的 `offscreenRef`，作为"已完成笔画"的单一来源。所有 stroke end 分支（本地 onMouseUp / 远程 replayDraw 的 end / addTextStroke）都会把完成的 stroke **commit 到 offscreen**。resize 时 Room 的 `handleCanvasResize` 调 `syncVisibleFromOffscreen`，直接 `drawImage(offs, 0, 0, canvas.width, canvas.height)` 一次 blit 搞定，**O(1)** 而不是 O(总点数) full replay。
+**离屏 canvas 缓存**：`useCanvas.ts` 维护一个固定 **1600×1200 (4:3，OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT)** 的 `offscreenRef`，作为"已完成笔画"的单一来源。2× 线性分辨率，曲线 / 油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible canvas，显著减少阶梯锯齿。所有 stroke end 分支（本地 onMouseUp / 远程 replayDraw 的 end / addTextStroke / addFill / addSelection）都会把完成的 stroke **commit 到 offscreen**。resize 时 Room 的 `handleCanvasResize` 调 `syncVisibleFromOffscreen`，直接 `drawImage(offs, 0, 0, canvas.width, canvas.height)` 一次 blit 搞定，**O(1)** 而不是 O(总点数) full replay。
 
 关键约束：
-- offscreen 尺寸固定 800×600（REF_WIDTH × REF_HEIGHT，比例 4:3），任何 visible canvas 尺寸都是 drawImage 缩放放大/缩小来显示；aspect ratio 必须与 visible 一致，否则图形会被拉伸
+- offscreen 尺寸固定 1600×1200（OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT，比例 4:3）；REF_WIDTH=800 是用于 lineWidth/字号缩放的「逻辑参考」，与离屏物理尺寸**解耦**。`scaleLineWidth` clamp 范围 0.5~**2.0**（上限 2.0 是为了让 offscreen 的 1600/800 = 2× 倍率不被钳掉，否则 commit 后线突然变细）
+- aspect ratio 必须与 visible 一致，否则图形会被拉伸；`Canvas.tsx` 的 `RATIO_W/RATIO_H = 4/3` 必须等于 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT`
 - **live drawing（mousemove 中）不写 offscreen**，只在 stroke end 时 flush —— 如果用户一边 resize 一边还在画，当前未完成的 in-progress stroke 的已绘像素会丢失。这种 edge case 不处理（用户几乎不会这样操作）
 - `replayAll` / `clearCanvas` / `undo` 仍然 O(N)（rebuild offscreen），因为 canvas 无法"反绘"某条笔画
-- **改画板比例要联动改 REF_WIDTH/REF_HEIGHT**：Canvas.tsx 的 `RATIO_W/RATIO_H` 必须与 useCanvas 的 `REF_WIDTH:REF_HEIGHT` 比例相同，否则缩放会变形
+- **改画板比例要三处联动**：Canvas.tsx 的 `RATIO_W/RATIO_H`、useCanvas 的 `OFFSCREEN_WIDTH/OFFSCREEN_HEIGHT`、字号/线宽参考 `REF_WIDTH`
 
 **Confetti 性能版**：`src/components/Confetti.tsx` 是单 canvas + requestAnimationFrame 粒子系统，替代了旧版 150 confetti DOM + 16 rocket × 60 粒子 ≈ **1100 个 DOM 节点 + CSS 动画**。现在只有一个 `<canvas fixed inset-0 pointer-events-none>`。
 - 所有粒子在 useEffect 里创建，RAF 循环 tick 更新 + 绘制
@@ -324,10 +342,98 @@ cd worker && npx wrangler dev
 
 2. **服务端 redoStack 不持久化**：Hibernate 后丢失。极端场景：drawer undo 后 idle 超过 DO hibernate 时间再点 redo，服务端 redoStack 空 → 不广播 → 对端画面不同步 drawer 本地状态，造成 diverge。当前接受此 trade-off（触发条件苛刻）；真要解决就把 redoStack 加入 `saveState()`。
 
-3. **画板 aspect ratio 联动**：`Canvas.tsx` 的 `RATIO_W/H = 4/3` 和 `useCanvas.ts` 的 `REF_WIDTH × REF_HEIGHT = 800×600` 必须**比例一致**，否则离屏 drawImage 缩放会让图形变形。改画板比例时两处必须同步。
+3. **画板 aspect ratio 联动**：`Canvas.tsx` 的 `RATIO_W/H = 4/3` 与 `useCanvas.ts` 的 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT = 1600:1200` 必须**比例一致**，否则离屏 drawImage 缩放会让图形变形。改画板比例时两处必须同步；`REF_WIDTH = 800` 是逻辑参考（不影响比例）但如果要改也要联动调整。
 
 4. **`src/assets/*.svg` 只是源文件**：真正渲染用的 path 是**内联在 `Toolbar.tsx`** 的。svg 文件被修改后要手动同步到 tsx。想自动化就装 `vite-plugin-svgr`，当前没装。
 
 5. **`editingShape` 拖动时 pixel + normalized 都更新**：overlay 用 pixel 做 CSS 定位，但 commit 时 send 用 normalized。两者通过 `rect.width` / `rect.height` 换算。resize canvas 期间拖动会 drift，但实际不会发生（用户不会一边 resize 一边拖）。
 
 6. **Toolbar 的 popover outside click 监听 vs editingShape 的全局监听**：前者 `bubble` 阶段用于关闭 popover，后者 `capture` 阶段用于 commit shape。capture 先触发不冲突。但如果以后两者都用 capture 要想清楚执行顺序。
+
+---
+
+## 十、自定义颜色拾取器（Toolbar.tsx）
+
+**库**：`@uiw/react-color`（不是 react-colorful，因为后者 hue 行为是 horizontal-only，不支持竖向 hue）。导出 `Saturation` / `Hue` / `Alpha` 原子组件 + `hexToHsva` / `hsvaToHex` 工具。peer dep 需要 `@babel/runtime`（已加）。
+
+**组件结构**（都内联在 Toolbar.tsx）：
+- `ColorPalette`：色行容器。7 固定色 + 分隔条 + 1 个自定义色块
+- `CustomColorPanel`：二级浮层。SV 方块（240×140）+ 竖向 Hue 条（14×140）+ hex 输入 + 屏幕吸色按钮 + 清空 / 确定。**不包含 Alpha**（透明度功能已移除，颜色一律 6 位 hex）
+- `customColor: string | null` state 提升到 `Toolbar` 函数层级（不是 ColorPalette 内部 state），保证 popover 反复开关后上次确认的自定义色不丢
+
+**自定义色块视觉**：
+- 背景：棋盘格 + customColor 覆盖（`panelOpen ? draft : customColor`，面板打开时实时跟随 draft）
+- 右下角 8×8 彩虹三角（`linear-gradient(135deg, ...) + clip-path: polygon(100% 0, 100% 100%, 0 100%)`）—— 标识这是自定义入口
+- 高亮 ring：仅当 panel 关闭、customColor 非 null、且 `value.toLowerCase() === customColor.toLowerCase()` 时显示
+
+**屏幕吸色**：浏览器原生 `window.EyeDropper` API（Chrome 95+ / Edge 95+）。Firefox / Safari 不支持时按钮自动隐藏（`"EyeDropper" in window` 检测）。返回 `{ sRGBHex: "#rrggbb" }`，写入 draft 不再走 alpha 合成。
+
+**Twind 抑制告警**：`@uiw/react-color` 给内部 div 加的 `w-color-*` 类（`w-color-saturation` / `w-color-hue` / `w-color-alpha-*` 等）以 `w-` 开头，会被 Twind runtime 当 width 工具类解析失败 → `[TWIND_INVALID_CLASS]`。在 `src/main.tsx` 的 `install` 配置里加了 `ignorelist: [/^w-color-/]`。
+
+**色行 outside click**：`ColorPalette` 用 capture 阶段的全局 `mousedown` 监听关闭二级浮层。`data-color-panel` / `data-color-trigger` 标记浮层和触发按钮，`closest()` 命中则不关。
+
+---
+
+## 十一、油漆桶（bucket flood fill）
+
+**协议**：`C_Fill` / `S_Fill`：`{ x, y, color, tolerance }`。`SerializedStroke.fill = { tolerance }`，`stroke.points = [{x, y}]` 存种子。
+
+**算法**（`useCanvas.ts` 的 `scanlineFill`）：标准 scanline flood fill（4-邻域 + span tracking + 早返检查 target == fill）。tolerance per-channel（默认 32）。
+
+**边缘抗锯齿**（`antiAliasFillEdges`）：scanline 完成后做一遍 1px 边界 alpha 混合 pass：
+- 遍历所有未填充像素
+- 若有任意 4 邻居是填充色，按「该像素离背景色的最大通道距离」算 α（FALLOFF=96）
+- alpha-blend 填充色到该像素，消除填充与抗锯齿描边之间的 1~2px 白晕
+- 双端确定性：纯整数运算 + Uint8ClampedArray clamp，A/B 两端跑出的像素完全一致，不需要传位图
+
+**白底初始化**：offscreen 在所有"重置"路径都要 `fillStyle = "#ffffff"; fillRect(...)` —— 否则 flood fill 在未初始化（透明黑）的画布上会无限蔓延。
+
+**桶不带 alpha**：fill 只用 `(fr, fg, fb)`，paint 时 `data[idx+3] = 255`。透明度反直觉（多次填充会叠加），永远不应用。
+
+---
+
+## 十二、画笔逐帧重绘（pen overdraw 修复）
+
+**旧 bug**：`onMouseDown` 调 `ctx.beginPath() + ctx.moveTo(...)`，每次 `onMouseMove` 调 `ctx.lineTo(...) + ctx.stroke()`。后者 stroke 的是从 beginPath 起的**整条累积路径** → 每个像素被反复涂 → alpha < 1 时透明度叠加成不透明。在 alpha 还存在时这是用户报的 bug，移除 alpha 后是 dead code 路径但依然修了（行为更直观）。
+
+**修法**（`tool === "pen"` 块）：
+- `onMouseDown`：仅记录起点 + send `start`，不动 ctx
+- `onMouseMove`：push 点到 `currentStrokeRef.points` + `pendingPointsRef`，scheduleFlush
+- `flushPendingMove`（RAF 帧）：先 send 网络批量 move，然后 `syncVisibleFromOffscreen()`（committed strokes）+ `drawInProgressStroke()`（当前 stroke 一次性 beginPath + 所有 lineTo + stroke）。**每帧重画 = 每个像素只涂一次**
+- `onMouseUp`：commitToOffscreen + syncVisibleFromOffscreen + send end
+- `replayDraw`（peer 端）同样改成「sync offscreen + 重绘 in-progress」
+
+**代价**：每 RAF 帧多一次 `drawImage(offs, 0, 0, w, h)`（~0.5ms 量级 @ 1067px wide）+ 一次完整路径重绘。60fps 持续 ~30ms/sec，可忽略。
+
+---
+
+## 十三、形状工具越界处理
+
+**旧行为**：`onShapeLeave`（mouseleave）把 `shapeStart = null + syncVisibleFromOffscreen` 清空预览 → 鼠标一滑出画布形状就消失，UX 突兀。
+
+**新行为**（参考 pen 的「mouseleave = 在边界处提交」）：
+- `mouseleave` 直接绑到 `onShapeUp`（同一 handler，与 mouseup 共用）
+- `clampToCanvas(e)` helper 把 `offsetX/Y` 钳到 `[0, canvas.width/height]`，替代裸 `normalize()`。`onShapeMove` / `onShapeUp` 都用它
+- 越界时 `offsetX/Y` 必然超出，钳到边缘后形状的终点正好落在画布边界 → 弹 editing overlay，用户可继续调整
+
+**注意**：selection 工具的 `onLeave` 行为没改（语义不同，涉及 patch 提取）。
+
+---
+
+## 十四、协议追加（v1，非破坏性）
+
+`SerializedStroke` 新增可选字段（`PROTOCOL_VERSION` 仍为 1，纯加字段不算破坏性）：
+- `fill?: { tolerance: number }` —— 油漆桶填充。`stroke.points = [{x, y}]` 是种子点；`stroke.color` 是填充色
+- `selection?: { srcX, srcY, w, h, dstX, dstY }` —— 框选移动。所有值归一化 `[0, 1]`。canvas 三步：从 src 取 patch → 把 src whiten 成白 → 把 patch 贴到 dst
+- `shape: "line"` 加入 shape 联合（原有 rect/ellipse/arrow）
+
+`worker/src/types.ts` / `worker/src/room.ts` 镜像加这些字段；`onShape` / `onFill` / `onSelection` 三个 handler 同型——存进 strokes、清 redoStack、broadcast exclude sender、saveState。
+
+---
+
+## 十五、依赖管理
+
+- **新增**：`@uiw/react-color`（颜色拾取器）+ `@babel/runtime`（@uiw 的 peer dep）
+- **历史新增过又移除**：`react-colorful` —— 一开始用，后来因不支持竖向 hue 换成 @uiw（commit `2da549e`）
+- **历史新增过又移除**：`useRecentColors` hook + `stripAlpha` 工具 —— 最近色和透明度功能都被用户砍掉
+- 装包统一加 `--legacy-peer-deps`（`@twind/core` peer 范围旧）
