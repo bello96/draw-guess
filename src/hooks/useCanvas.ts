@@ -157,10 +157,10 @@ function drawLine(
   ctx.stroke();
 }
 
-/** Parse "#rrggbb" / "#rgb" to [r,g,b,a=255]. */
+/** Parse "#rrggbb" / "#rgb" / "#rrggbbaa" / "#rgba" to [r,g,b,a]. */
 function hexToRgba(hex: string): [number, number, number, number] {
   let h = hex.replace("#", "");
-  if (h.length === 3) {
+  if (h.length === 3 || h.length === 4) {
     h = h
       .split("")
       .map((c) => c + c)
@@ -169,7 +169,8 @@ function hexToRgba(hex: string): [number, number, number, number] {
   const r = parseInt(h.slice(0, 2), 16) || 0;
   const g = parseInt(h.slice(2, 4), 16) || 0;
   const b = parseInt(h.slice(4, 6), 16) || 0;
-  return [r, g, b, 255];
+  const a = h.length >= 8 ? parseInt(h.slice(6, 8), 16) : 255;
+  return [r, g, b, a];
 }
 
 /**
