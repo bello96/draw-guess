@@ -273,13 +273,17 @@ function ColorPalette({
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [draft, setDraft] = useState<string>(value);
+  // 自定义已确认色：仅当用户在自定义面板点「确定」时才更新；选预设不影响。
+  // null = 用户尚未确认过任何自定义色；色块用棋盘格白底显示。
+  const [customColor, setCustomColor] = useState<string | null>(null);
 
-  // 每次面板打开时同步 draft = 当前 committed 色
+  // 面板打开时种 draft：优先复用上次自定义色，否则用当前画布色
   useEffect(() => {
     if (panelOpen) {
-      setDraft(withAlpha ? value : stripAlpha(value));
+      const seed = customColor ?? value;
+      setDraft(withAlpha ? seed : stripAlpha(seed));
     }
-  }, [panelOpen, value, withAlpha]);
+  }, [panelOpen, customColor, value, withAlpha]);
 
   // 外点关闭：捕获阶段，避免被画布 mousedown 抢跑
   useEffect(() => {
@@ -306,11 +310,16 @@ function ColorPalette({
 
   const handleConfirm = () => {
     const final = withAlpha ? draft : stripAlpha(draft);
+    setCustomColor(final);
     onChange(final);
     setPanelOpen(false);
   };
 
-  const triggerColor = panelOpen ? draft : value;
+  // 色块显示色：面板开 → draft 实时预览；面板关 → 上次确认的自定义色（无则保持空棋盘）
+  const swatchColor = panelOpen ? draft : customColor;
+  // 高亮：面板关闭、有自定义色、且当前画布色 === 自定义色（即用户用的是自定义而非预设）
+  const customActive =
+    !panelOpen && customColor !== null && value.toLowerCase() === customColor.toLowerCase();
   const isActive = (c: string) => c.toLowerCase() === value.toLowerCase();
 
   return (
@@ -331,7 +340,8 @@ function ColorPalette({
         data-color-trigger="true"
         onClick={() => setPanelOpen((v) => !v)}
         className={tx(
-          "w-5 h-5 rounded border border-gray-300 transition relative overflow-hidden hover:scale-110",
+          "w-5 h-5 rounded transition relative overflow-hidden hover:scale-110",
+          customActive ? "ring-2 ring-indigo-400 scale-110" : "border border-gray-300",
         )}
         style={{
           backgroundImage: "repeating-conic-gradient(#e5e7eb 0% 25%, #ffffff 0% 50%)",
@@ -339,7 +349,9 @@ function ColorPalette({
         }}
         title="自定义颜色"
       >
-        <span className={tx("absolute inset-0")} style={{ background: triggerColor }} />
+        {swatchColor !== null && (
+          <span className={tx("absolute inset-0")} style={{ background: swatchColor }} />
+        )}
       </button>
       {panelOpen && (
         <CustomColorPanel
