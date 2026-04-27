@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { tx } from "@twind/core";
-import { HexColorPicker, HexAlphaColorPicker } from "react-colorful";
-import { useRecentColors } from "../hooks/useRecentColors";
+import { Saturation, Hue, Alpha, hexToHsva, hsvaToHex, hsvaToHexa } from "@uiw/react-color";
 import { normalizeColor, stripAlpha } from "../utils/color";
 
 export type ToolMode =
@@ -132,17 +131,18 @@ function hasAnyPopoverContent(meta: ToolMeta): boolean {
 // ---------- Shared pickers ----------
 
 function CustomColorPanel({
-  initial,
+  draft,
+  onDraftChange,
   withAlpha,
-  onCancel,
   onConfirm,
+  onCancel,
 }: {
-  initial: string;
+  draft: string;
+  onDraftChange: (c: string) => void;
   withAlpha: boolean;
+  onConfirm: () => void;
   onCancel: () => void;
-  onConfirm: (color: string) => void;
 }) {
-  const [draft, setDraft] = useState<string>(() => (withAlpha ? initial : stripAlpha(initial)));
   const [hexInput, setHexInput] = useState<string>(draft);
 
   // draft 变化时同步 hex 输入框
@@ -156,10 +156,14 @@ function CustomColorPanel({
       setHexInput(draft); // 非法 → 回滚
       return;
     }
-    setDraft(withAlpha ? normalized : stripAlpha(normalized));
+    onDraftChange(withAlpha ? normalized : stripAlpha(normalized));
   };
 
-  const Picker = withAlpha ? HexAlphaColorPicker : HexColorPicker;
+  // hex → hsva for the @uiw/react-color components
+  const hsva = hexToHsva(draft.length >= 7 ? draft.slice(0, 7) : "#000000");
+  // 解析 alpha from hex string (#rrggbbaa 格式)
+  const alphaFromHex = draft.length === 9 ? parseInt(draft.slice(7, 9), 16) / 255 : 1;
+  const hsvaWithAlpha = { ...hsva, a: alphaFromHex };
 
   return (
     <div
@@ -167,14 +171,47 @@ function CustomColorPanel({
       className={tx(
         "absolute bottom-full right-0 mb-2 p-3 bg-white rounded-lg shadow-lg border border-gray-200 z-50",
       )}
-      style={{ width: 240 }}
+      style={{ width: 260 }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <Picker
-        color={withAlpha ? draft : draft.slice(0, 7)}
-        onChange={(c: string) => setDraft(withAlpha ? c : stripAlpha(c))}
-        style={{ width: "100%" }}
-      />
+      {/* 顶部行：SV 方块（左）+ 垂直 Hue 条（右） */}
+      <div className={tx("flex gap-1.5")}>
+        <Saturation
+          hsva={hsvaWithAlpha}
+          onChange={(newColor) => {
+            // newColor 是 HsvaColor，保留当前 alpha
+            const merged = { ...newColor, a: hsvaWithAlpha.a };
+            onDraftChange(withAlpha ? hsvaToHexa(merged) : hsvaToHex(merged));
+          }}
+          style={{ width: 220, height: 140, borderRadius: 4 }}
+        />
+        <Hue
+          hue={hsvaWithAlpha.h}
+          direction="vertical"
+          onChange={(newHue) => {
+            const merged = { ...hsvaWithAlpha, h: newHue.h };
+            onDraftChange(withAlpha ? hsvaToHexa(merged) : hsvaToHex(merged));
+          }}
+          style={{ width: 14, height: 140, borderRadius: 4 }}
+        />
+      </div>
+
+      {/* Alpha 横条（仅 withAlpha 时渲染），SV 下方 */}
+      {withAlpha && (
+        <div className={tx("mt-1.5")} style={{ width: 236 }}>
+          <Alpha
+            hsva={hsvaWithAlpha}
+            direction="horizontal"
+            onChange={(newAlpha) => {
+              const merged = { ...hsvaWithAlpha, a: newAlpha.a };
+              onDraftChange(hsvaToHexa(merged));
+            }}
+            style={{ height: 14, borderRadius: 4 }}
+          />
+        </div>
+      )}
+
+      {/* 预览色块 + hex 输入框 */}
       <div className={tx("flex items-center gap-2 mt-3")}>
         <div
           className={tx("w-8 h-6 rounded border border-gray-300 relative overflow-hidden")}
@@ -201,6 +238,8 @@ function CustomColorPanel({
           spellCheck={false}
         />
       </div>
+
+      {/* 按钮 */}
       <div className={tx("flex justify-end gap-2 mt-3")}>
         <button
           onClick={onCancel}
@@ -211,7 +250,7 @@ function CustomColorPanel({
           清空
         </button>
         <button
-          onClick={() => onConfirm(draft)}
+          onClick={onConfirm}
           className={tx(
             "px-3 py-1 text-sm rounded bg-indigo-500 text-white hover:bg-indigo-600 transition",
           )}
@@ -232,9 +271,15 @@ function ColorPalette({
   onChange: (c: string) => void;
   withAlpha: boolean;
 }) {
-  const { recent, push } = useRecentColors();
   const [panelOpen, setPanelOpen] = useState(false);
-  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [draft, setDraft] = useState<string>(value);
+
+  // 每次面板打开时同步 draft = 当前 committed 色
+  useEffect(() => {
+    if (panelOpen) {
+      setDraft(withAlpha ? value : stripAlpha(value));
+    }
+  }, [panelOpen, value, withAlpha]);
 
   // 外点关闭：捕获阶段，避免被画布 mousedown 抢跑
   useEffect(() => {
@@ -259,13 +304,13 @@ function ColorPalette({
     onChange(withAlpha ? c : stripAlpha(c));
   };
 
-  const handleConfirm = (c: string) => {
-    const final = withAlpha ? c : stripAlpha(c);
-    push(final);
+  const handleConfirm = () => {
+    const final = withAlpha ? draft : stripAlpha(draft);
     onChange(final);
     setPanelOpen(false);
   };
 
+  const triggerColor = panelOpen ? draft : value;
   const isActive = (c: string) => c.toLowerCase() === value.toLowerCase();
 
   return (
@@ -281,46 +326,28 @@ function ColorPalette({
           style={{ backgroundColor: c }}
         />
       ))}
-      {recent.length > 0 && (
-        <>
-          <div className={tx("w-px h-5 bg-gray-200 mx-1")} />
-          {recent.map((c) => (
-            <button
-              key={c}
-              onClick={() => handleSelect(c)}
-              className={tx(
-                "w-5 h-5 rounded transition border relative overflow-hidden",
-                isActive(c) ? "ring-2 ring-indigo-400 scale-110" : "border-gray-300",
-              )}
-              style={{
-                backgroundImage: "repeating-conic-gradient(#e5e7eb 0% 25%, #ffffff 0% 50%)",
-                backgroundSize: "6px 6px",
-              }}
-              title={c}
-            >
-              <span className={tx("absolute inset-0")} style={{ background: c }} />
-            </button>
-          ))}
-        </>
-      )}
       <div className={tx("w-px h-5 bg-gray-200 mx-1")} />
       <button
-        ref={triggerRef}
         data-color-trigger="true"
         onClick={() => setPanelOpen((v) => !v)}
         className={tx(
-          "w-5 h-5 rounded border border-gray-300 flex items-center justify-center text-gray-500 hover:bg-gray-50 transition text-sm leading-none",
+          "w-5 h-5 rounded border border-gray-300 transition relative overflow-hidden hover:scale-110",
         )}
+        style={{
+          backgroundImage: "repeating-conic-gradient(#e5e7eb 0% 25%, #ffffff 0% 50%)",
+          backgroundSize: "6px 6px",
+        }}
         title="自定义颜色"
       >
-        +
+        <span className={tx("absolute inset-0")} style={{ background: triggerColor }} />
       </button>
       {panelOpen && (
         <CustomColorPanel
-          initial={value}
+          draft={draft}
+          onDraftChange={setDraft}
           withAlpha={withAlpha}
-          onCancel={() => setPanelOpen(false)}
           onConfirm={handleConfirm}
+          onCancel={() => setPanelOpen(false)}
         />
       )}
     </div>
