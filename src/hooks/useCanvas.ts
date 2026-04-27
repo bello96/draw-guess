@@ -868,6 +868,32 @@ export function useCanvas({
 
     // ========== Pen tool ==========
     if (tool === "pen") {
+      // 关键：在 visible canvas 上重绘当前 in-progress stroke。
+      // 配合 syncVisibleFromOffscreen 使用，每帧 visible = offscreen + 单次绘制的当前 stroke。
+      // 旧实现是 ctx.beginPath() once + 每次 mousemove 调 ctx.lineTo + ctx.stroke()，
+      // 这会让累积路径反复 stroke，alpha < 1 时透明度叠加成不透明 → 修复。
+      const drawInProgressStroke = () => {
+        const stroke = currentStrokeRef.current;
+        if (!stroke || stroke.points.length === 0) {
+          return;
+        }
+        ctx.beginPath();
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = scaleLineWidth(stroke.lineWidth, canvas.width);
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        for (let i = 0; i < stroke.points.length; i++) {
+          const px = stroke.points[i].x * canvas.width;
+          const py = stroke.points[i].y * canvas.height;
+          if (i === 0) {
+            ctx.moveTo(px, py);
+          } else {
+            ctx.lineTo(px, py);
+          }
+        }
+        ctx.stroke();
+      };
+
       const flushPendingMove = () => {
         rafIdRef.current = null;
         const points = pendingPointsRef.current;
@@ -885,6 +911,9 @@ export function useCanvas({
           lineWidth,
           points,
         });
+        // 视觉重绘：每 RAF 帧一次（最高 60Hz），避免 mousemove 高频触发的浪费
+        syncVisibleFromOffscreen();
+        drawInProgressStroke();
       };
 
       const scheduleFlush = () => {
@@ -896,12 +925,6 @@ export function useCanvas({
       const onMouseDown = (e: MouseEvent) => {
         isDrawingRef.current = true;
         const { x, y } = normalize(e);
-        ctx.beginPath();
-        ctx.moveTo(e.offsetX, e.offsetY);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = scaleLineWidth(lineWidth, canvas.width);
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
         currentStrokeRef.current = { points: [{ x, y }], color, lineWidth };
         send({ type: "draw", action: "start", x, y, color, lineWidth });
       };
@@ -911,8 +934,6 @@ export function useCanvas({
           return;
         }
         const { x, y } = normalize(e);
-        ctx.lineTo(e.offsetX, e.offsetY);
-        ctx.stroke();
         currentStrokeRef.current?.points.push({ x, y });
         pendingPointsRef.current.push({ x, y });
         scheduleFlush();
@@ -924,13 +945,12 @@ export function useCanvas({
         }
         isDrawingRef.current = false;
         const { x, y } = normalize(e);
-        ctx.lineTo(e.offsetX, e.offsetY);
-        ctx.stroke();
         if (currentStrokeRef.current) {
           currentStrokeRef.current.points.push({ x, y });
           const finalized = currentStrokeRef.current as SerializedStroke;
           strokesRef.current.push(finalized);
           commitToOffscreen(finalized);
+          syncVisibleFromOffscreen();
           currentStrokeRef.current = null;
         }
         if (rafIdRef.current !== null) {
@@ -1140,7 +1160,8 @@ export function useCanvas({
     beginSelection,
   ]);
 
-  // Replay a remote draw event (pen)
+  // Replay a remote draw event (pen). 与本地 pen 同样的 alpha 修复：
+  // 不再增量 stroke 累积路径，而是每帧 sync offscreen + 单次重绘当前 in-progress stroke。
   const replayDraw = useCallback(
     (msg: S_Draw) => {
       const canvas = canvasRef.current;
@@ -1152,13 +1173,29 @@ export function useCanvas({
         return;
       }
 
-      if (msg.action === "start") {
+      const drawInProgressStroke = () => {
+        const stroke = currentStrokeRef.current;
+        if (!stroke || stroke.points.length === 0) {
+          return;
+        }
         ctx.beginPath();
-        ctx.moveTo(msg.x * canvas.width, msg.y * canvas.height);
-        ctx.strokeStyle = msg.color;
-        ctx.lineWidth = scaleLineWidth(msg.lineWidth, canvas.width);
+        ctx.strokeStyle = stroke.color;
+        ctx.lineWidth = scaleLineWidth(stroke.lineWidth, canvas.width);
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
+        for (let i = 0; i < stroke.points.length; i++) {
+          const px = stroke.points[i].x * canvas.width;
+          const py = stroke.points[i].y * canvas.height;
+          if (i === 0) {
+            ctx.moveTo(px, py);
+          } else {
+            ctx.lineTo(px, py);
+          }
+        }
+        ctx.stroke();
+      };
+
+      if (msg.action === "start") {
         currentStrokeRef.current = {
           points: [{ x: msg.x, y: msg.y }],
           color: msg.color,
@@ -1166,26 +1203,23 @@ export function useCanvas({
         };
       } else if (msg.action === "move") {
         const points = msg.points ?? [{ x: msg.x, y: msg.y }];
-        for (const p of points) {
-          ctx.lineTo(p.x * canvas.width, p.y * canvas.height);
-        }
-        ctx.stroke();
         if (currentStrokeRef.current) {
           currentStrokeRef.current.points.push(...points);
         }
+        syncVisibleFromOffscreen();
+        drawInProgressStroke();
       } else if (msg.action === "end") {
-        ctx.lineTo(msg.x * canvas.width, msg.y * canvas.height);
-        ctx.stroke();
         if (currentStrokeRef.current) {
           currentStrokeRef.current.points.push({ x: msg.x, y: msg.y });
           const finalized = currentStrokeRef.current as SerializedStroke;
           strokesRef.current.push(finalized);
           commitToOffscreen(finalized);
+          syncVisibleFromOffscreen();
           currentStrokeRef.current = null;
         }
       }
     },
-    [canvasRef, commitToOffscreen],
+    [canvasRef, commitToOffscreen, syncVisibleFromOffscreen],
   );
 
   const replayAll = useCallback(

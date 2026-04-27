@@ -159,6 +159,31 @@ function CustomColorPanel({
     onDraftChange(withAlpha ? normalized : stripAlpha(normalized));
   };
 
+  // 吸色：浏览器原生 EyeDropper API（Chrome 95+ / Edge 95+；Firefox / Safari 不支持）。
+  // 不支持的浏览器隐藏按钮。
+  const eyedropperSupported = typeof window !== "undefined" && "EyeDropper" in window;
+  const pickFromScreen = async () => {
+    type EyeDropperApi = { open: () => Promise<{ sRGBHex: string }> };
+    const w = window as Window & { EyeDropper?: new () => EyeDropperApi };
+    if (!w.EyeDropper) {
+      return;
+    }
+    try {
+      const ed = new w.EyeDropper();
+      const result = await ed.open();
+      const picked = result.sRGBHex; // "#rrggbb"，无 alpha
+      if (withAlpha) {
+        // 保留当前 draft 的 alpha
+        const aHex = draft.length === 9 ? draft.slice(7, 9) : "ff";
+        onDraftChange(picked + aHex);
+      } else {
+        onDraftChange(picked);
+      }
+    } catch {
+      // 用户按 Esc 取消 → ignore
+    }
+  };
+
   // hex → hsva for the @uiw/react-color components
   const hsva = hexToHsva(draft.length >= 7 ? draft.slice(0, 7) : "#000000");
   // 解析 alpha from hex string (#rrggbbaa 格式)
@@ -211,7 +236,7 @@ function CustomColorPanel({
         </div>
       )}
 
-      {/* 预览色块 + hex 输入框 */}
+      {/* 预览色块 + 吸色按钮 + hex 输入框 */}
       <div className={tx("flex items-center gap-2 mt-3")}>
         <div
           className={tx("w-8 h-6 rounded border border-gray-300 relative overflow-hidden")}
@@ -222,6 +247,20 @@ function CustomColorPanel({
         >
           <div className={tx("absolute inset-0")} style={{ background: draft }} />
         </div>
+        {eyedropperSupported && (
+          <button
+            type="button"
+            onClick={pickFromScreen}
+            title="吸取屏幕颜色"
+            className={tx(
+              "w-7 h-6 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-50 transition",
+            )}
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+              <path d="M19.07 4.93a3 3 0 0 0-4.24 0l-1.7 1.7-.71-.71a1 1 0 0 0-1.41 1.41l.7.71-7.42 7.42a2 2 0 0 0-.59 1.41V19a1 1 0 0 0 1 1h2.12a2 2 0 0 0 1.42-.59l7.42-7.42.7.7a1 1 0 0 0 1.41-1.41l-.7-.7 1.7-1.71a3 3 0 0 0 0-4.24zM7.83 17.59a.99.99 0 0 1-.71.29H6v-1.12a1 1 0 0 1 .29-.71l7.42-7.42 1.42 1.42-7.3 7.54z" />
+            </svg>
+          </button>
+        )}
         <input
           type="text"
           value={hexInput}
@@ -266,16 +305,19 @@ function ColorPalette({
   value,
   onChange,
   withAlpha,
+  customColor,
+  onCustomColorChange,
 }: {
   value: string;
   onChange: (c: string) => void;
   withAlpha: boolean;
+  // 自定义已确认色（提升到 Toolbar 层级）：仅当用户在自定义面板点「确定」时才更新；选预设不影响。
+  // null = 用户尚未确认过任何自定义色；色块用棋盘格白底显示。
+  customColor: string | null;
+  onCustomColorChange: (c: string | null) => void;
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [draft, setDraft] = useState<string>(value);
-  // 自定义已确认色：仅当用户在自定义面板点「确定」时才更新；选预设不影响。
-  // null = 用户尚未确认过任何自定义色；色块用棋盘格白底显示。
-  const [customColor, setCustomColor] = useState<string | null>(null);
 
   // 面板打开时种 draft：优先复用上次自定义色，否则用当前画布色
   useEffect(() => {
@@ -310,7 +352,7 @@ function ColorPalette({
 
   const handleConfirm = () => {
     const final = withAlpha ? draft : stripAlpha(draft);
-    setCustomColor(final);
+    onCustomColorChange(final);
     onChange(final);
     setPanelOpen(false);
   };
@@ -579,6 +621,9 @@ export default function Toolbar({
 }: Props) {
   // Which tool's popover is currently open. null = closed.
   const [openPopover, setOpenPopover] = useState<ToolMode | null>(null);
+  // 自定义色：在 Toolbar 层级保存，popover 关闭重开后仍记得。
+  // null = 用户尚未在自定义面板点过「确定」。
+  const [customColor, setCustomColor] = useState<string | null>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   // One ref per tool button — popover reads the active one to compute its anchor.
   const buttonRefs = useRef<Record<ToolMode, HTMLButtonElement | null>>({
@@ -672,7 +717,13 @@ export default function Toolbar({
               <div className={tx("w-px h-6 bg-gray-200")} />
             )}
             {meta.hasColor && (
-              <ColorPalette value={color} onChange={onColorChange} withAlpha={t !== "bucket"} />
+              <ColorPalette
+                value={color}
+                onChange={onColorChange}
+                withAlpha={t !== "bucket"}
+                customColor={customColor}
+                onCustomColorChange={setCustomColor}
+              />
             )}
           </ToolPopover>
         )}
