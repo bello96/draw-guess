@@ -318,10 +318,15 @@ function renderPenBrush(
 }
 
 /**
- * 喷枪：沿路径稀疏撒散点；散点尺寸按 lw 比例缩放（关键 —— 否则 visible 和
- * offscreen 的物理像素密度不同会让 mouseup 后的 commit 渲染看起来明显变浅）。
- * PRNG 输入用「分段 i / 步 s / 点 d」整数索引而非像素坐标，保证 visible 直接
- * 渲染和 offscreen→blit 渲染的散点位置完全一致，两端 peer 也像素级一致。
+ * 喷枪：仿 Windows 画图工具 —— 大量小点 + **均匀**面积分布（关键 bug 修复）。
+ *
+ * 之前误用 r = R · u² 让小 r 出现概率高 → 每个 stamp 中心比外围密 → 沿路径
+ * 所有 stamp 中心连成一条可见的实线。改成 r = R · √u（u² 的反函数）让点
+ * 在 disc 内**按面积均匀分布**：径向各处单位面积内点数相同，无中心偏置。
+ *
+ * 配合上层在 hold-still 时由 setInterval 持续把 lastPos 加进 stroke 的逻辑：
+ * 移动快 → stamp 间隔大 → 浓度低；移动慢/不动 → stamp 在同一处叠加 → 浓度
+ * 按时间累积，匹配 Win Paint 的「按住一直喷」体感。
  */
 function renderAirbrush(
   ctx: CanvasRenderingContext2D,
@@ -329,40 +334,55 @@ function renderAirbrush(
   color: string,
   lw: number,
 ): void {
-  if (pts.length < 2) {
+  if (pts.length < 1) {
     return;
   }
   ctx.fillStyle = color;
-  const radius = lw * 2.0; // 喷洒半径（比线宽宽很多，喷枪典型特征）
-  const stride = Math.max(1.2, lw * 0.38); // 沿路径每 stride px 一个采样位置（更密一点）
-  const dotsPerPos = 10; // 每个位置撒 10 颗
-  const dotSize = lw * 0.22; // 散点尺寸随 lw scale
+  const radius = lw * 1.8;
+  const stride = Math.max(1.0, lw * 0.5); // 加大步长，避免相邻 stamp 在路径上重叠形成中心线
+  const dotsPerPos = 14;
+  const dotSize = Math.max(0.5, lw * 0.18);
+
+  /** 在 (cx, cy) 撒一坨散点；segIdx 用作 PRNG 域，保证不同 stamp 散点不同。 */
+  const stampAt = (cx: number, cy: number, segIdx: number, stepIdx: number) => {
+    for (let d = 0; d < dotsPerPos; d++) {
+      const angle = pseudoRandom(segIdx, stepIdx, d) * Math.PI * 2;
+      const u = pseudoRandom(segIdx + 7919, stepIdx, d * 3 + 1);
+      // 均匀面积分布：r = R·√u（与之前的 u² 完全相反，去除中心线 bug）
+      const r = Math.sqrt(u) * radius;
+      const px = cx + Math.cos(angle) * r;
+      const py = cy + Math.sin(angle) * r;
+      const alpha = 0.55 + pseudoRandom(segIdx + 31337, stepIdx, d) * 0.3;
+      ctx.globalAlpha = alpha;
+      ctx.fillRect(px - dotSize / 2, py - dotSize / 2, dotSize, dotSize);
+    }
+  };
+
+  // 单点的 stroke（hold-still 第一帧 / 或所有点重合的 0 长度连续 stamp）
+  if (pts.length === 1) {
+    stampAt(pts[0].x, pts[0].y, 0, 0);
+    ctx.globalAlpha = 1;
+    return;
+  }
+
   for (let i = 0; i < pts.length - 1; i++) {
     const p0 = pts[i];
     const p1 = pts[i + 1];
     const dx = p1.x - p0.x;
     const dy = p1.y - p0.y;
     const dist = Math.hypot(dx, dy);
+    // 0 长度 segment（hold-still 时同一坐标重复入队）：按 1 步处理，
+    // 不同 i 的 PRNG 域保证每帧叠新点，浓度自然累积。
+    if (dist < 0.01) {
+      stampAt(p0.x, p0.y, i, 0);
+      continue;
+    }
     const steps = Math.max(1, Math.floor(dist / stride));
     for (let s = 0; s < steps; s++) {
       const t = s / steps;
       const cx = p0.x + dx * t;
       const cy = p0.y + dy * t;
-      for (let d = 0; d < dotsPerPos; d++) {
-        // 用「分段+步+点」索引做 PRNG 输入：跨设备/canvas 尺寸完全一致
-        const angle = pseudoRandom(i, s, d) * Math.PI * 2;
-        // sqrt 让点在 disc 内均匀分布而不是集中中心
-        const r = Math.sqrt(pseudoRandom(i + 7919, s, d * 3 + 1)) * radius;
-        const px = cx + Math.cos(angle) * r;
-        const py = cy + Math.sin(angle) * r;
-        // 半径方向 alpha 二次衰减；中间密度高，外围稀疏
-        const alpha = (1 - r / radius) ** 1.6 * 0.55;
-        if (alpha <= 0.02) {
-          continue;
-        }
-        ctx.globalAlpha = alpha;
-        ctx.fillRect(px - dotSize / 2, py - dotSize / 2, dotSize, dotSize);
-      }
+      stampAt(cx, cy, i, s);
     }
   }
   ctx.globalAlpha = 1;
@@ -425,9 +445,17 @@ function renderCrayon(
 }
 
 /**
- * 水彩笔：单层柔边 + 单层实色核心，2 次描边叠加形成「中间深、边缘软」的整
- * 体观感。旧版 3 层叠加在小线宽下三道宽度相近 → 视觉上看起来是空心双线，
- * 改 2 层让宽度差更明显。
+ * 水彩笔：仿 Windows 画图工具的「湿润」笔触感。
+ *
+ * 关键技术：用 ctx.filter = "blur(...)" 给外层柔边 stroke 加 Gaussian 模糊，
+ * 形成自然的边缘渐隐（替代旧版 2/3 层硬叠加 —— 那种讨巧叠加会在小 lw 下
+ * 出现可见的同心环 / 双线空心，而 blur 是连续 Gaussian 衰减，无阶梯感）。
+ *
+ * 之后再叠一层不模糊的稍窄核心，得到「软边 + 实心」的湿笔触观感。
+ *
+ * 跨端一致：blur(Npx) 是 W3C Filter Effects 规范定义的高斯模糊；现代
+ * Chromium / Firefox / Safari 实现一致，blit 后视觉相同。blur 半径按
+ * scaledLineWidth 比例 scale，offscreen→visible 缩放后视觉一致。
  */
 function renderWatercolor(
   ctx: CanvasRenderingContext2D,
@@ -441,13 +469,8 @@ function renderWatercolor(
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.strokeStyle = color;
-  const passes: { width: number; alpha: number }[] = [
-    { width: lw * 1.4, alpha: 0.4 }, // 外层柔边
-    { width: lw * 0.85, alpha: 0.7 }, // 核心实色
-  ];
-  for (const pass of passes) {
-    ctx.globalAlpha = pass.alpha;
-    ctx.lineWidth = pass.width;
+
+  const drawPath = () => {
     ctx.beginPath();
     for (let i = 0; i < pts.length; i++) {
       if (i === 0) {
@@ -457,7 +480,22 @@ function renderWatercolor(
       }
     }
     ctx.stroke();
-  }
+  };
+
+  // 外层柔边：模糊 stroke 形成 Gaussian 衰减边缘
+  const prevFilter = ctx.filter;
+  const blurRadius = Math.max(0.5, lw * 0.32);
+  ctx.filter = `blur(${blurRadius}px)`;
+  ctx.globalAlpha = 0.55;
+  ctx.lineWidth = lw * 1.1;
+  drawPath();
+  ctx.filter = prevFilter;
+
+  // 核心：不模糊、稍窄、深一些 —— 形成实心笔触感
+  ctx.globalAlpha = 0.7;
+  ctx.lineWidth = lw * 0.55;
+  drawPath();
+
   ctx.globalAlpha = 1;
 }
 
@@ -1254,9 +1292,38 @@ export function useCanvas({
         }
       };
 
+      // 喷枪「按住持续喷射」：mousedown 后启动定时器，每 SPRAY_INTERVAL_MS
+      // 把 lastPos 重新加进 stroke。鼠标静止时浓度按时间累积；移动时 stamp
+      // 间距大、密度低，匹配 Win Paint 的 hold-still 体感。
+      const SPRAY_INTERVAL_MS = 80;
+      let lastPos: Point | null = null;
+      let sprayInterval: number | null = null;
+      const startSpray = () => {
+        if (brushType !== "airbrush" || sprayInterval !== null) {
+          return;
+        }
+        sprayInterval = window.setInterval(() => {
+          if (!isDrawingRef.current || !lastPos || !currentStrokeRef.current) {
+            return;
+          }
+          // 关键：两个数组各自 push **独立的副本**而不是共享同一对象引用
+          // —— 与 onMouseMove 一致；避免未来谁误改其中一个连带影响另一个
+          currentStrokeRef.current.points.push({ x: lastPos.x, y: lastPos.y });
+          pendingPointsRef.current.push({ x: lastPos.x, y: lastPos.y });
+          scheduleFlush();
+        }, SPRAY_INTERVAL_MS);
+      };
+      const stopSpray = () => {
+        if (sprayInterval !== null) {
+          window.clearInterval(sprayInterval);
+          sprayInterval = null;
+        }
+      };
+
       const onMouseDown = (e: MouseEvent) => {
         isDrawingRef.current = true;
         const { x, y } = normalize(e);
+        lastPos = { x, y };
         currentStrokeRef.current = { points: [{ x, y }], color, lineWidth, brushType };
         // brushType 仅在 start 上发；服务端缓存后透传 move/end 给对端
         send({
@@ -1268,6 +1335,7 @@ export function useCanvas({
           lineWidth,
           ...(brushType !== "pen" ? { brushType } : {}),
         });
+        startSpray();
       };
 
       const onMouseMove = (e: MouseEvent) => {
@@ -1275,6 +1343,7 @@ export function useCanvas({
           return;
         }
         const { x, y } = normalize(e);
+        lastPos = { x, y };
         currentStrokeRef.current?.points.push({ x, y });
         pendingPointsRef.current.push({ x, y });
         scheduleFlush();
@@ -1285,6 +1354,7 @@ export function useCanvas({
           return;
         }
         isDrawingRef.current = false;
+        stopSpray();
         const { x, y } = normalize(e);
         if (currentStrokeRef.current) {
           currentStrokeRef.current.points.push({ x, y });
@@ -1324,6 +1394,7 @@ export function useCanvas({
           cancelAnimationFrame(rafIdRef.current);
           rafIdRef.current = null;
         }
+        stopSpray();
         pendingPointsRef.current = [];
       };
     }
