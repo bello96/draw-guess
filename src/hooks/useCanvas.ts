@@ -1240,8 +1240,13 @@ export function useCanvas({
       y: e.offsetY / canvas.height,
     });
 
-    // ========== Pen tool ==========
-    if (tool === "pen") {
+    // ========== Pen / Eraser tool ==========
+    // 橡皮擦 = 强制白色 + 强制 pen brush 的「特殊 pen」。所有协议、存储、
+    // undo 都走现有 pen 笔画路径，不需要特殊消息类型。
+    if (tool === "pen" || tool === "eraser") {
+      const isEraser = tool === "eraser";
+      const effColor = isEraser ? "#ffffff" : color;
+      const effBrush: BrushType = isEraser ? "pen" : brushType;
       // 关键：在 visible canvas 上重绘当前 in-progress stroke。
       // 配合 syncVisibleFromOffscreen 使用，每帧 visible = offscreen + 单次绘制的当前 stroke。
       // 旧实现是 ctx.beginPath() once + 每次 mousemove 调 ctx.lineTo + ctx.stroke()，
@@ -1277,7 +1282,7 @@ export function useCanvas({
           action: "move",
           x: last.x,
           y: last.y,
-          color,
+          color: effColor,
           lineWidth,
           points,
         });
@@ -1299,7 +1304,7 @@ export function useCanvas({
       let lastPos: Point | null = null;
       let sprayInterval: number | null = null;
       const startSpray = () => {
-        if (brushType !== "airbrush" || sprayInterval !== null) {
+        if (effBrush !== "airbrush" || sprayInterval !== null) {
           return;
         }
         sprayInterval = window.setInterval(() => {
@@ -1324,16 +1329,21 @@ export function useCanvas({
         isDrawingRef.current = true;
         const { x, y } = normalize(e);
         lastPos = { x, y };
-        currentStrokeRef.current = { points: [{ x, y }], color, lineWidth, brushType };
+        currentStrokeRef.current = {
+          points: [{ x, y }],
+          color: effColor,
+          lineWidth,
+          brushType: effBrush,
+        };
         // brushType 仅在 start 上发；服务端缓存后透传 move/end 给对端
         send({
           type: "draw",
           action: "start",
           x,
           y,
-          color,
+          color: effColor,
           lineWidth,
-          ...(brushType !== "pen" ? { brushType } : {}),
+          ...(effBrush !== "pen" ? { brushType: effBrush } : {}),
         });
         startSpray();
       };
@@ -1376,7 +1386,7 @@ export function useCanvas({
           rafIdRef.current = null;
         }
         flushPendingMove();
-        send({ type: "draw", action: "end", x, y, color, lineWidth });
+        send({ type: "draw", action: "end", x, y, color: effColor, lineWidth });
         onLocalPenEnd?.();
       };
 
