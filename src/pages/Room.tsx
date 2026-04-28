@@ -17,6 +17,7 @@ import type {
   ChatMessage,
   ChatHistoryEntry,
   ServerMessage,
+  BrushType,
 } from "../types/protocol";
 import { useEffect } from "react";
 
@@ -56,6 +57,8 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const [tool, setTool] = useState<ToolMode>("pen");
   const [fillMode, setFillMode] = useState<FillMode>("stroke");
   const [textSize, setTextSize] = useState<TextSize>("medium");
+  // Pen 笔型：默认普通画笔；切换后 useCanvas 会用对应渲染算法处理新 stroke
+  const [brushType, setBrushType] = useState<BrushType>("pen");
 
   // Unified text editing state
   const [editingText, setEditingText] = useState<EditingText | null>(null);
@@ -148,6 +151,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     lineWidth,
     tool,
     fillMode,
+    brushType,
     send,
     onShapeDrawn: handleShapeDrawn,
     onLocalPenEnd: handleLocalPenEnd,
@@ -752,11 +756,13 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             tool={tool}
             fillMode={fillMode}
             textSize={textSize}
+            brushType={brushType}
             onColorChange={setColor}
             onLineWidthChange={setLineWidth}
             onToolChange={handleToolChange}
             onFillModeChange={setFillMode}
             onTextSizeChange={setTextSize}
+            onBrushTypeChange={setBrushType}
             onClear={handleClear}
             onUndo={handleUndo}
             onRedo={handleRedo}

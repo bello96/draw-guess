@@ -1,12 +1,12 @@
 import { useRef, useCallback, useEffect } from "react";
-import type { ClientMessage, S_Draw, SerializedStroke } from "../types/protocol";
+import type { BrushType, ClientMessage, S_Draw, SerializedStroke } from "../types/protocol";
 import type { FillMode, ToolMode } from "../components/Toolbar";
 
 type Point = { x: number; y: number };
 
 /** Raw shape data emitted by the shape/arrow tool on mouseup (before commit). */
 export interface DrawnShape {
-  shape: "rect" | "ellipse" | "arrow" | "line";
+  shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
   filled: boolean;
   /**
    * Raw pixel points in canvas-element space. Semantics:
@@ -27,6 +27,8 @@ interface UseCanvasOptions {
   lineWidth: number;
   tool: ToolMode;
   fillMode: FillMode;
+  /** Pen 笔型（仅对 pen 工具生效；其他工具忽略）。默认 "pen"。 */
+  brushType: BrushType;
   send: (msg: ClientMessage) => void;
   /** Mouseup after dragging a shape/arrow — hook does NOT commit; upstream handles it. */
   onShapeDrawn?: (shape: DrawnShape) => void;
@@ -136,6 +138,127 @@ function drawArrow(
   ctx.fill();
 }
 
+/**
+ * Build the canvas path of an isoceles triangle (point-up) inscribed in
+ * (x, y, w, h). Caller chooses fill vs stroke. Closed path.
+ */
+function pathTriangle(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + w / 2, y);
+  ctx.lineTo(x, y + h);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+}
+
+/**
+ * Five-pointed star inscribed in (x, y, w, h). 五角星 5 个外角顶点的实际范围：
+ *   y: [-1, +0.809]  （最低两个外角的 sin(54°) ≈ 0.809，不是 1）
+ *   x: [-0.951, +0.951]（cos(18°) ≈ 0.951）
+ * 旧实现 rxO=w/2, ryO=h/2 让外圆覆盖 bbox，但 5 个顶点不一定碰到圆边 → bbox
+ * 底部和侧边出现可见留白。修正：把 rxO / ryO 缩到正好让顶点贴 bbox 边。
+ */
+const STAR_INNER_RATIO = 0.381966; // sin(18°)/sin(54°)
+const STAR_TOP_TO_BOTTOM = 1 + Math.sin((54 * Math.PI) / 180); // ≈ 1.809
+const STAR_LEFT_TO_RIGHT = 2 * Math.cos((18 * Math.PI) / 180); // ≈ 1.902
+function pathStar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  const cx = x + w / 2;
+  const ryO = h / STAR_TOP_TO_BOTTOM;
+  const cy = y + ryO; // 让顶角 (-90°) 落在 y=0
+  const rxO = w / STAR_LEFT_TO_RIGHT;
+  const rxI = rxO * STAR_INNER_RATIO;
+  const ryI = ryO * STAR_INNER_RATIO;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const isOuter = i % 2 === 0;
+    const rx = isOuter ? rxO : rxI;
+    const ry = isOuter ? ryO : ryI;
+    const px = cx + rx * Math.cos(a);
+    const py = cy + ry * Math.sin(a);
+    if (i === 0) {
+      ctx.moveTo(px, py);
+    } else {
+      ctx.lineTo(px, py);
+    }
+  }
+  ctx.closePath();
+}
+
+/**
+ * Heart inscribed in (x, y, w, h). 4 cubic beziers: top notch → left lobe →
+ * bottom point → right lobe → back to notch.
+ *
+ * 注意 top 控制点：要让左/右瓣的曲线峰真正贴到 bbox 顶边（y=0）。
+ * 对 P0=(cx, 0.3h), P3=(0, 0.3h) 的贝塞尔，t=0.5 处 y = 0.075h + 0.75 * P1y_avg。
+ * 所以要让峰值 y=0，需要 P1y = P2y = -0.1h（在 bbox 上方一点点；只是控制点
+ * 几何外溢，不影响曲线本身——曲线最高点恰好在 y=0）。
+ */
+function pathHeart(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  const cx = x + w / 2;
+  const topNotchY = y + h * 0.3;
+  const midY = y + (h + h * 0.3) / 2;
+  const topCtrl = y - h * 0.1; // 让顶部贝塞尔曲线峰值贴到 bbox 顶边
+  const bottom = y + h;
+  const left = x;
+  const right = x + w;
+  ctx.beginPath();
+  ctx.moveTo(cx, topNotchY);
+  // Top-left curve: notch → leftmost（峰值 y = bbox 顶部）
+  ctx.bezierCurveTo(cx, topCtrl, left, topCtrl, left, topNotchY);
+  // Bottom-left curve: leftmost → bottom point
+  ctx.bezierCurveTo(left, midY, cx, midY, cx, bottom);
+  // Bottom-right curve: bottom → rightmost
+  ctx.bezierCurveTo(cx, midY, right, midY, right, topNotchY);
+  // Top-right curve: rightmost → back to notch
+  ctx.bezierCurveTo(right, topCtrl, cx, topCtrl, cx, topNotchY);
+  ctx.closePath();
+}
+
+/**
+ * SVG `d=` strings for the same three shapes, normalized to (0, 0, w, h).
+ * Consumed by the editing-overlay SVG preview in Canvas.tsx so the on-canvas
+ * render and the overlay preview stay pixel-identical (modulo aliasing).
+ */
+export function svgPathTriangle(w: number, h: number): string {
+  return `M ${w / 2} 0 L 0 ${h} L ${w} ${h} Z`;
+}
+
+export function svgPathStar(w: number, h: number): string {
+  const cx = w / 2;
+  const ryO = h / STAR_TOP_TO_BOTTOM;
+  const cy = ryO;
+  const rxO = w / STAR_LEFT_TO_RIGHT;
+  const rxI = rxO * STAR_INNER_RATIO;
+  const ryI = ryO * STAR_INNER_RATIO;
+  const parts: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 5;
+    const isOuter = i % 2 === 0;
+    const rx = isOuter ? rxO : rxI;
+    const ry = isOuter ? ryO : ryI;
+    const px = (cx + rx * Math.cos(a)).toFixed(2);
+    const py = (cy + ry * Math.sin(a)).toFixed(2);
+    parts.push((i === 0 ? "M" : "L") + " " + px + " " + py);
+  }
+  parts.push("Z");
+  return parts.join(" ");
+}
+
+export function svgPathHeart(w: number, h: number): string {
+  const cx = w / 2;
+  const topNotchY = h * 0.3;
+  const midY = (h + h * 0.3) / 2;
+  const topCtrl = -h * 0.1; // 同 pathHeart 的注释：峰值贴 bbox 顶边
+  return [
+    `M ${cx} ${topNotchY}`,
+    `C ${cx} ${topCtrl}, 0 ${topCtrl}, 0 ${topNotchY}`,
+    `C 0 ${midY}, ${cx} ${midY}, ${cx} ${h}`,
+    `C ${cx} ${midY}, ${w} ${midY}, ${w} ${topNotchY}`,
+    `C ${w} ${topCtrl}, ${cx} ${topCtrl}, ${cx} ${topNotchY}`,
+    "Z",
+  ].join(" ");
+}
+
 /** Draw a straight stroke line (no arrow head) in pixel coords. */
 function drawLine(
   ctx: CanvasRenderingContext2D,
@@ -158,6 +281,209 @@ function drawLine(
   ctx.moveTo(x0, y0);
   ctx.lineTo(x1, y1);
   ctx.stroke();
+}
+
+/**
+ * 确定性伪随机：对相同 (x, y, n) 返回相同值。两端用同一公式渲染相同点序，
+ * 散点位置完全一致，无需通过协议传随机数据。返回 [0, 1)。
+ */
+function pseudoRandom(x: number, y: number, n: number): number {
+  const s = Math.sin(x * 12.9898 + y * 78.233 + n * 37.719) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+/** 普通画笔：实色 round-cap stroke，沿点序连线。 */
+function renderPenBrush(
+  ctx: CanvasRenderingContext2D,
+  pts: Point[],
+  color: string,
+  lw: number,
+): void {
+  if (pts.length === 0) {
+    return;
+  }
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lw;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (let i = 0; i < pts.length; i++) {
+    if (i === 0) {
+      ctx.moveTo(pts[i].x, pts[i].y);
+    } else {
+      ctx.lineTo(pts[i].x, pts[i].y);
+    }
+  }
+  ctx.stroke();
+}
+
+/**
+ * 喷枪：沿路径稀疏撒散点；散点尺寸按 lw 比例缩放（关键 —— 否则 visible 和
+ * offscreen 的物理像素密度不同会让 mouseup 后的 commit 渲染看起来明显变浅）。
+ * PRNG 输入用「分段 i / 步 s / 点 d」整数索引而非像素坐标，保证 visible 直接
+ * 渲染和 offscreen→blit 渲染的散点位置完全一致，两端 peer 也像素级一致。
+ */
+function renderAirbrush(
+  ctx: CanvasRenderingContext2D,
+  pts: Point[],
+  color: string,
+  lw: number,
+): void {
+  if (pts.length < 2) {
+    return;
+  }
+  ctx.fillStyle = color;
+  const radius = lw * 2.0; // 喷洒半径（比线宽宽很多，喷枪典型特征）
+  const stride = Math.max(1.2, lw * 0.38); // 沿路径每 stride px 一个采样位置（更密一点）
+  const dotsPerPos = 10; // 每个位置撒 10 颗
+  const dotSize = lw * 0.22; // 散点尺寸随 lw scale
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i];
+    const p1 = pts[i + 1];
+    const dx = p1.x - p0.x;
+    const dy = p1.y - p0.y;
+    const dist = Math.hypot(dx, dy);
+    const steps = Math.max(1, Math.floor(dist / stride));
+    for (let s = 0; s < steps; s++) {
+      const t = s / steps;
+      const cx = p0.x + dx * t;
+      const cy = p0.y + dy * t;
+      for (let d = 0; d < dotsPerPos; d++) {
+        // 用「分段+步+点」索引做 PRNG 输入：跨设备/canvas 尺寸完全一致
+        const angle = pseudoRandom(i, s, d) * Math.PI * 2;
+        // sqrt 让点在 disc 内均匀分布而不是集中中心
+        const r = Math.sqrt(pseudoRandom(i + 7919, s, d * 3 + 1)) * radius;
+        const px = cx + Math.cos(angle) * r;
+        const py = cy + Math.sin(angle) * r;
+        // 半径方向 alpha 二次衰减；中间密度高，外围稀疏
+        const alpha = (1 - r / radius) ** 1.6 * 0.55;
+        if (alpha <= 0.02) {
+          continue;
+        }
+        ctx.globalAlpha = alpha;
+        ctx.fillRect(px - dotSize / 2, py - dotSize / 2, dotSize, dotSize);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * 蜡笔：完全不画核心实线（旧版的细黑实线让蜡笔看起来更像「描边+稀疏喷枪」，
+ * 用户反馈太丑）。改成沿路径密集铺颗粒，跨垂直方向均匀分布；颗粒大小、alpha
+ * 都随 PRNG 抖动，靠堆叠和重叠形成中间近实色 + 边缘自然散开的鳞片感纹理。
+ */
+function renderCrayon(
+  ctx: CanvasRenderingContext2D,
+  pts: Point[],
+  color: string,
+  lw: number,
+): void {
+  if (pts.length < 2) {
+    return;
+  }
+  ctx.fillStyle = color;
+  const halfW = lw * 1.0; // 总宽 ~2 lw（粗壮）
+  const stride = Math.max(0.6, lw * 0.18); // 极密采样 = 颗粒重叠多，中间近实色
+  const grainsPerPos = 6;
+  const grainSize = lw * 0.4; // 颗粒尺寸随 lw scale
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i];
+    const p1 = pts[i + 1];
+    const dx = p1.x - p0.x;
+    const dy = p1.y - p0.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 0.2) {
+      continue;
+    }
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const perpX = -uy;
+    const perpY = ux;
+    const steps = Math.max(2, Math.floor(dist / stride));
+    for (let s = 0; s < steps; s++) {
+      const t = s / steps;
+      const cx = p0.x + dx * t;
+      const cy = p0.y + dy * t;
+      for (let g = 0; g < grainsPerPos; g++) {
+        const u = pseudoRandom(i, s, g) * 2 - 1; // [-1, 1) 均匀
+        const offset = u * halfW;
+        const along = (pseudoRandom(i + 12345, s, g) - 0.5) * stride * 1.6;
+        const gx = cx + perpX * offset + ux * along;
+        const gy = cy + perpY * offset + uy * along;
+        // 颗粒尺寸 + alpha 抖动 = 不规则鳞片纹理
+        const sz = grainSize * (0.6 + pseudoRandom(i + 9001, s, g + 11) * 0.7);
+        // 中心 alpha 高 / 边缘 alpha 低 + 颗粒间随机抖动
+        const dist01 = Math.abs(u);
+        const alpha = (1 - dist01 * 0.6) * (0.55 + pseudoRandom(i + 31337, s, g + 23) * 0.4);
+        ctx.globalAlpha = alpha;
+        ctx.fillRect(gx - sz / 2, gy - sz / 2, sz, sz);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * 水彩笔：单层柔边 + 单层实色核心，2 次描边叠加形成「中间深、边缘软」的整
+ * 体观感。旧版 3 层叠加在小线宽下三道宽度相近 → 视觉上看起来是空心双线，
+ * 改 2 层让宽度差更明显。
+ */
+function renderWatercolor(
+  ctx: CanvasRenderingContext2D,
+  pts: Point[],
+  color: string,
+  lw: number,
+): void {
+  if (pts.length === 0) {
+    return;
+  }
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = color;
+  const passes: { width: number; alpha: number }[] = [
+    { width: lw * 1.4, alpha: 0.4 }, // 外层柔边
+    { width: lw * 0.85, alpha: 0.7 }, // 核心实色
+  ];
+  for (const pass of passes) {
+    ctx.globalAlpha = pass.alpha;
+    ctx.lineWidth = pass.width;
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      if (i === 0) {
+        ctx.moveTo(pts[i].x, pts[i].y);
+      } else {
+        ctx.lineTo(pts[i].x, pts[i].y);
+      }
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** 根据 brushType 派发到具体笔型渲染器。导出供 Toolbar 画笔选择 popover 的 preview 复用。 */
+export function renderBrushStroke(
+  ctx: CanvasRenderingContext2D,
+  pts: Point[],
+  color: string,
+  scaledLineWidth: number,
+  brushType: BrushType | undefined,
+): void {
+  switch (brushType) {
+    case "airbrush":
+      renderAirbrush(ctx, pts, color, scaledLineWidth);
+      return;
+    case "crayon":
+      renderCrayon(ctx, pts, color, scaledLineWidth);
+      return;
+    case "watercolor":
+      renderWatercolor(ctx, pts, color, scaledLineWidth);
+      return;
+    case "pen":
+    case undefined:
+    default:
+      renderPenBrush(ctx, pts, color, scaledLineWidth);
+  }
 }
 
 /** Parse "#rrggbb" / "#rgb" / "#rrggbbaa" / "#rgba" to [r,g,b,a]. */
@@ -431,12 +757,15 @@ function renderStrokeToCtx(
     return;
   }
 
-  // Shape strokes: rect / ellipse / arrow / line
+  // Shape strokes: rect / ellipse / arrow / line / triangle / star / heart
   if (
     stroke.shape === "rect" ||
     stroke.shape === "ellipse" ||
     stroke.shape === "arrow" ||
-    stroke.shape === "line"
+    stroke.shape === "line" ||
+    stroke.shape === "triangle" ||
+    stroke.shape === "star" ||
+    stroke.shape === "heart"
   ) {
     if (stroke.points.length < 2) {
       return;
@@ -470,7 +799,7 @@ function renderStrokeToCtx(
       return;
     }
 
-    // rect/ellipse — bbox corners, order doesn't matter
+    // rect/ellipse/triangle/star/heart — bbox corners, order doesn't matter
     const x = Math.min(p0.x, p1.x) * canvas.width;
     const y = Math.min(p0.y, p1.y) * canvas.height;
     const w = Math.abs(p1.x - p0.x) * canvas.width;
@@ -484,19 +813,22 @@ function renderStrokeToCtx(
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     if (stroke.shape === "rect") {
-      if (stroke.filled) {
-        ctx.fillRect(x, y, w, h);
-      } else {
-        ctx.strokeRect(x, y, w, h);
-      }
-    } else {
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+    } else if (stroke.shape === "ellipse") {
       ctx.beginPath();
       ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
-      if (stroke.filled) {
-        ctx.fill();
-      } else {
-        ctx.stroke();
-      }
+    } else if (stroke.shape === "triangle") {
+      pathTriangle(ctx, x, y, w, h);
+    } else if (stroke.shape === "star") {
+      pathStar(ctx, x, y, w, h);
+    } else if (stroke.shape === "heart") {
+      pathHeart(ctx, x, y, w, h);
+    }
+    if (stroke.filled) {
+      ctx.fill();
+    } else {
+      ctx.stroke();
     }
     return;
   }
@@ -520,22 +852,18 @@ function renderStrokeToCtx(
     return;
   }
 
-  // Freehand pen stroke
-  ctx.beginPath();
-  ctx.strokeStyle = stroke.color;
-  ctx.lineWidth = scaleLineWidth(stroke.lineWidth, canvas.width);
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  for (let i = 0; i < stroke.points.length; i++) {
-    const px = stroke.points[i].x * canvas.width;
-    const py = stroke.points[i].y * canvas.height;
-    if (i === 0) {
-      ctx.moveTo(px, py);
-    } else {
-      ctx.lineTo(px, py);
-    }
-  }
-  ctx.stroke();
+  // Freehand pen stroke — 派发到具体笔型渲染器（缺 brushType 视作普通 pen）
+  const pxPoints: Point[] = stroke.points.map((p) => ({
+    x: p.x * canvas.width,
+    y: p.y * canvas.height,
+  }));
+  renderBrushStroke(
+    ctx,
+    pxPoints,
+    stroke.color,
+    scaleLineWidth(stroke.lineWidth, canvas.width),
+    stroke.brushType,
+  );
 }
 
 /** Draw a live preview of an in-progress shape/arrow/line onto the visible context. */
@@ -546,7 +874,7 @@ function drawShapePreview(
   end: Point,
   color: string,
   lineWidth: number,
-  shape: "rect" | "ellipse" | "arrow" | "line",
+  shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart",
   filled: boolean,
 ): void {
   const lw = scaleLineWidth(lineWidth, canvas.width);
@@ -590,19 +918,22 @@ function drawShapePreview(
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   if (shape === "rect") {
-    if (filled) {
-      ctx.fillRect(x, y, w, h);
-    } else {
-      ctx.strokeRect(x, y, w, h);
-    }
-  } else {
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+  } else if (shape === "ellipse") {
     ctx.beginPath();
     ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
-    if (filled) {
-      ctx.fill();
-    } else {
-      ctx.stroke();
-    }
+  } else if (shape === "triangle") {
+    pathTriangle(ctx, x, y, w, h);
+  } else if (shape === "star") {
+    pathStar(ctx, x, y, w, h);
+  } else if (shape === "heart") {
+    pathHeart(ctx, x, y, w, h);
+  }
+  if (filled) {
+    ctx.fill();
+  } else {
+    ctx.stroke();
   }
 }
 
@@ -613,6 +944,7 @@ export function useCanvas({
   lineWidth,
   tool,
   fillMode,
+  brushType,
   send,
   onShapeDrawn,
   onLocalPenEnd,
@@ -624,6 +956,7 @@ export function useCanvas({
     points: Point[];
     color: string;
     lineWidth: number;
+    brushType: BrushType;
   } | null>(null);
   const pendingPointsRef = useRef<Point[]>([]);
   const rafIdRef = useRef<number | null>(null);
@@ -880,21 +1213,17 @@ export function useCanvas({
         if (!stroke || stroke.points.length === 0) {
           return;
         }
-        ctx.beginPath();
-        ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = scaleLineWidth(stroke.lineWidth, canvas.width);
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        for (let i = 0; i < stroke.points.length; i++) {
-          const px = stroke.points[i].x * canvas.width;
-          const py = stroke.points[i].y * canvas.height;
-          if (i === 0) {
-            ctx.moveTo(px, py);
-          } else {
-            ctx.lineTo(px, py);
-          }
-        }
-        ctx.stroke();
+        const pxPoints: Point[] = stroke.points.map((p) => ({
+          x: p.x * canvas.width,
+          y: p.y * canvas.height,
+        }));
+        renderBrushStroke(
+          ctx,
+          pxPoints,
+          stroke.color,
+          scaleLineWidth(stroke.lineWidth, canvas.width),
+          stroke.brushType,
+        );
       };
 
       const flushPendingMove = () => {
@@ -928,8 +1257,17 @@ export function useCanvas({
       const onMouseDown = (e: MouseEvent) => {
         isDrawingRef.current = true;
         const { x, y } = normalize(e);
-        currentStrokeRef.current = { points: [{ x, y }], color, lineWidth };
-        send({ type: "draw", action: "start", x, y, color, lineWidth });
+        currentStrokeRef.current = { points: [{ x, y }], color, lineWidth, brushType };
+        // brushType 仅在 start 上发；服务端缓存后透传 move/end 给对端
+        send({
+          type: "draw",
+          action: "start",
+          x,
+          y,
+          color,
+          lineWidth,
+          ...(brushType !== "pen" ? { brushType } : {}),
+        });
       };
 
       const onMouseMove = (e: MouseEvent) => {
@@ -950,7 +1288,14 @@ export function useCanvas({
         const { x, y } = normalize(e);
         if (currentStrokeRef.current) {
           currentStrokeRef.current.points.push({ x, y });
-          const finalized = currentStrokeRef.current as SerializedStroke;
+          const stash = currentStrokeRef.current;
+          const finalized: SerializedStroke = {
+            points: stash.points,
+            color: stash.color,
+            lineWidth: stash.lineWidth,
+            // 默认 pen 不写字段（保持与历史 stroke 一致）
+            ...(stash.brushType !== "pen" ? { brushType: stash.brushType } : {}),
+          };
           strokesRef.current.push(finalized);
           commitToOffscreen(finalized);
           syncVisibleFromOffscreen();
@@ -1074,7 +1419,7 @@ export function useCanvas({
     // mousemove: repaint visible (clear + blit offscreen + preview), never writes to offscreen
     // mouseup: emit DrawnShape — upstream holds it in editingShape state
     const filled = fillMode === "fill";
-    const shapeKind: "rect" | "ellipse" | "arrow" | "line" = tool;
+    const shapeKind: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart" = tool;
     let shapeStart: Point | null = null;
 
     const onShapeDown = (e: MouseEvent) => {
@@ -1154,6 +1499,7 @@ export function useCanvas({
     lineWidth,
     tool,
     fillMode,
+    brushType,
     send,
     commitToOffscreen,
     syncVisibleFromOffscreen,
@@ -1182,28 +1528,29 @@ export function useCanvas({
         if (!stroke || stroke.points.length === 0) {
           return;
         }
-        ctx.beginPath();
-        ctx.strokeStyle = stroke.color;
-        ctx.lineWidth = scaleLineWidth(stroke.lineWidth, canvas.width);
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        for (let i = 0; i < stroke.points.length; i++) {
-          const px = stroke.points[i].x * canvas.width;
-          const py = stroke.points[i].y * canvas.height;
-          if (i === 0) {
-            ctx.moveTo(px, py);
-          } else {
-            ctx.lineTo(px, py);
-          }
-        }
-        ctx.stroke();
+        const pxPoints: Point[] = stroke.points.map((p) => ({
+          x: p.x * canvas.width,
+          y: p.y * canvas.height,
+        }));
+        renderBrushStroke(
+          ctx,
+          pxPoints,
+          stroke.color,
+          scaleLineWidth(stroke.lineWidth, canvas.width),
+          stroke.brushType,
+        );
       };
+
+      // brushType 由服务端透传到所有 action（worker 缓存了 start 时的笔型），
+      // 这里直接读 msg.brushType；缺值视作 "pen"。
+      const incomingBrush: BrushType = msg.brushType ?? "pen";
 
       if (msg.action === "start") {
         currentStrokeRef.current = {
           points: [{ x: msg.x, y: msg.y }],
           color: msg.color,
           lineWidth: msg.lineWidth,
+          brushType: incomingBrush,
         };
       } else if (msg.action === "move") {
         const points = msg.points ?? [{ x: msg.x, y: msg.y }];
@@ -1215,7 +1562,13 @@ export function useCanvas({
       } else if (msg.action === "end") {
         if (currentStrokeRef.current) {
           currentStrokeRef.current.points.push({ x: msg.x, y: msg.y });
-          const finalized = currentStrokeRef.current as SerializedStroke;
+          const stash = currentStrokeRef.current;
+          const finalized: SerializedStroke = {
+            points: stash.points,
+            color: stash.color,
+            lineWidth: stash.lineWidth,
+            ...(stash.brushType !== "pen" ? { brushType: stash.brushType } : {}),
+          };
           strokesRef.current.push(finalized);
           commitToOffscreen(finalized);
           syncVisibleFromOffscreen();
@@ -1284,7 +1637,7 @@ export function useCanvas({
       p1: Point,
       shapeColor: string,
       shapeLineWidth: number,
-      shape: "rect" | "ellipse" | "arrow" | "line",
+      shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart",
       filled: boolean,
     ) => {
       const stroke: SerializedStroke = {

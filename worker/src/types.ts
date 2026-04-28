@@ -11,18 +11,22 @@ export interface PlayerInfo {
   isOwner: boolean;
 }
 
+export type BrushType = "pen" | "airbrush" | "crayon" | "watercolor";
+
 export interface SerializedStroke {
   points: { x: number; y: number }[];
   color: string;
   lineWidth: number;
+  // Pen 笔型（pen 笔画专用；缺值视作 "pen"）
+  brushType?: BrushType;
   // Text stroke fields (optional)
   text?: string;
   fontSize?: number;
   // Shape stroke fields (optional).
-  // - rect/ellipse: points = [topLeft, bottomRight] (min→max)
-  // - arrow/line:   points = [start, end] (direction preserved for arrow; irrelevant for line)
-  shape?: "rect" | "ellipse" | "arrow" | "line";
-  filled?: boolean; // only meaningful for rect/ellipse
+  // - rect/ellipse/triangle/star/heart: points = [topLeft, bottomRight] (min→max)
+  // - arrow/line:                       points = [start, end] (direction preserved for arrow; irrelevant for line)
+  shape?: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
+  filled?: boolean; // meaningful for rect / ellipse / triangle / star / heart
   // Bucket-fill stroke: points = [{ x, y }] seed, color = fill color.
   fill?: { tolerance: number };
   // Selection-move stroke: copy src rect → whiten src → paste at dst (normalized).

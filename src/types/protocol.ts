@@ -18,6 +18,16 @@ export const PROTOCOL_VERSION = 1;
 
 export type GamePhase = "waiting" | "drawing" | "guessing" | "revealed";
 
+/**
+ * Pen 工具的笔型。null/undefined 等价 "pen"（默认普通画笔），让缺字段的旧客户端
+ * 自动落到 pen 渲染，所以加这个字段不算 breaking change。
+ *  - pen        : 实心实色单笔画（旧行为）
+ *  - airbrush   : 沿路径喷洒散点 + 半径方向密度衰减
+ *  - crayon     : 沿路径加颗粒纹理 + 不均匀填充
+ *  - watercolor : 多次半透明描边叠加，呈柔边水彩感
+ */
+export type BrushType = "pen" | "airbrush" | "crayon" | "watercolor";
+
 export interface PlayerInfo {
   id: string;
   name: string;
@@ -28,14 +38,16 @@ export interface SerializedStroke {
   points: { x: number; y: number }[];
   color: string;
   lineWidth: number;
+  // Pen 笔型（仅 pen 笔画有意义；空值视作 "pen"）
+  brushType?: BrushType;
   // Text stroke fields (optional)
   text?: string;
   fontSize?: number;
   // Shape stroke fields (optional).
-  // - rect/ellipse: points = [topLeft, bottomRight] (normalized, min→max)
-  // - arrow/line:   points = [start, end]           (normalized; arrow preserves direction)
-  shape?: "rect" | "ellipse" | "arrow" | "line";
-  filled?: boolean; // only meaningful for rect/ellipse
+  // - rect/ellipse/triangle/star/heart: points = [topLeft, bottomRight] (normalized, min→max)
+  // - arrow/line:                       points = [start, end]           (normalized; arrow preserves direction)
+  shape?: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
+  filled?: boolean; // meaningful for rect / ellipse / triangle / star / heart
   // Bucket-fill stroke (flood fill from a seed point).
   // When present: points = [{ x, y }] normalized seed, color = fill color.
   fill?: { tolerance: number };
@@ -67,6 +79,8 @@ export interface C_Draw {
   y: number;
   color: string;
   lineWidth: number;
+  // Pen 笔型（仅在 action="start" 时由发送方填一次；老客户端缺该字段时服务端按 "pen" 处理）。
+  brushType?: BrushType;
   // Optional batched points for 'move' action (RAF-throttled).
   // When present, server appends all points; x/y is redundantly the last one.
   points?: { x: number; y: number }[];
@@ -114,10 +128,10 @@ export interface C_TextStroke {
 
 export interface C_Shape {
   type: "shape";
-  shape: "rect" | "ellipse" | "arrow" | "line";
+  shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
   filled: boolean;
-  // For rect/ellipse: (x,y) is top-left, width/height ≥ 0
-  // For arrow/line:   (x,y) is start point; width/height may be negative (end - start)
+  // For rect/ellipse/triangle/star/heart: (x,y) is top-left, width/height ≥ 0
+  // For arrow/line:                       (x,y) is start point; width/height may be negative (end - start)
   x: number;
   y: number;
   width: number;
@@ -217,6 +231,8 @@ export interface S_Draw {
   y: number;
   color: string;
   lineWidth: number;
+  // Pen 笔型（服务端把 start 上的 brushType 透传到所有 action 让对端无须缓存）。
+  brushType?: BrushType;
   // Batched move points (same semantics as client side).
   points?: { x: number; y: number }[];
 }
@@ -268,7 +284,7 @@ export interface S_TextStroke {
 
 export interface S_Shape {
   type: "shape";
-  shape: "rect" | "ellipse" | "arrow" | "line";
+  shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
   filled: boolean;
   x: number;
   y: number;

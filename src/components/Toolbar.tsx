@@ -2,10 +2,15 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { tx } from "@twind/core";
 import { Saturation, Hue, hexToHsva, hsvaToHex } from "@uiw/react-color";
 import { normalizeColor } from "../utils/color";
+import { renderBrushStroke } from "../hooks/useCanvas";
+import type { BrushType } from "../types/protocol";
 
 export type ToolMode =
   | "rect"
   | "ellipse"
+  | "triangle"
+  | "star"
+  | "heart"
   | "line"
   | "arrow"
   | "pen"
@@ -25,10 +30,18 @@ const TEXT_SIZE_LABEL: Record<TextSize, string> = { small: "小", medium: "中",
 // Tools split into 4 visual groups separated by dividers (left → right):
 //   1. primary  : pen / text   (free-hand authoring)
 //   2. bucket   : 单独分一栏    (区域填充)
-//   3. shapes   : rect / ellipse / line / arrow (规则形状)
+//   3. shapes   : rect / ellipse / triangle / star / heart / line / arrow (规则形状)
 //   4. selection: 单独分一栏    (像素搬运)
 const PRIMARY_TOOLS: ToolMode[] = ["pen", "text"];
-const SHAPE_TOOLS: ToolMode[] = ["rect", "ellipse", "line", "arrow"];
+const SHAPE_TOOLS: ToolMode[] = [
+  "rect",
+  "ellipse",
+  "triangle",
+  "star",
+  "heart",
+  "line",
+  "arrow",
+];
 
 // ---------- Icons ----------
 // SVG path data mirrored from src/assets/*.svg. Inlining (instead of importing
@@ -76,6 +89,21 @@ const IconRedo = () => (
     <path d="M894.5664 502.8864l-267.776 289.9456v-146.3808l-26.8288-31.5904c-77.568-12.6976-158.72-9.8304-243.2 8.0896-69.3248 14.6944-142.1824 63.488-218.7264 141.1072a528.9984 528.9984 0 0 1 134.144-229.5808l-20.8384-20.5824 20.8384 20.5824c88.8832-90.0608 195.8912-135.2192 322.8672-136.2432l31.744-32v-138.24l267.776 274.8928z m67.0208-22.9376l-343.8592-352.9216-54.9376 22.3232v185.9584c-130.304 8.0896-242.8416 59.648-336.1792 154.2144-100.352 101.6832-157.9008 228.352-173.1072 378.4192l56.576 23.552c103.6288-126.5664 190.3616-191.1808 259.9936-205.9264 67.584-14.336 131.7888-17.9712 192.7168-11.2128v200.2944l55.552 21.7088 343.8592-372.3776-0.6144-44.032z" />
   </svg>
 );
+const IconTriangle = () => (
+  <svg viewBox="0 0 1024 1024" width="18" height="18" fill="currentColor">
+    <path d="M928.64 896a2.144 2.144 0 0 1-0.64 0H96a32.032 32.032 0 0 1-27.552-48.288l416-704c11.488-19.456 43.552-19.456 55.104 0l413.152 699.2A31.936 31.936 0 0 1 928.64 896z m-776.576-64h719.84L512 222.912 152.064 832z" />
+  </svg>
+);
+const IconStar = () => (
+  <svg viewBox="0 0 1024 1024" width="18" height="18" fill="currentColor">
+    <path d="M791.2 1018.4c-8.8 0-16.8-2.4-24.8-6.4l-224-123.2c-9.6-4.8-20-8-30.4-8-10.4 0-20.8 2.4-30.4 8l-224 123.2c-8 4-16 6.4-24.8 6.4-15.2 0-30.4-7.2-40.8-19.2-11.2-12.8-15.2-29.6-12.8-47.2l43.2-260.8c4-21.6-3.2-44-18.4-59.2L21.6 446.4A57.6 57.6 0 0 1 8 387.2c6.4-20 23.2-34.4 43.2-37.6l250.4-38.4c20.8-3.2 39.2-16.8 48.8-36.8l112-237.6C472 16.8 489.6 5.6 511.2 5.6c20.8 0 39.2 12 48 31.2l112 237.6c9.6 20 28 33.6 48.8 36.8l250.4 38.4c20 3.2 36.8 16.8 43.2 37.6 7.2 20.8 1.6 44-13.6 59.2l-181.6 184.8c-15.2 15.2-22.4 37.6-18.4 59.2l43.2 260.8c3.2 17.6-1.6 34.4-12.8 47.2-8.8 12.8-23.2 20-39.2 20zM512 831.2c19.2 0 37.6 4.8 54.4 13.6l236.8 130.4-6.4-14.4v-0.8l-42.4-260.8c-6.4-37.6 5.6-76 32-102.4L968 412c2.4-2.4 3.2-6.4 1.6-9.6v-3.2l-256-39.2c-37.6-5.6-69.6-29.6-86.4-64.8L512 50.4 396 295.2c-16.8 35.2-48.8 59.2-86.4 64.8L49.6 400l5.6 5.6c0 1.6 0.8 4 2.4 6.4l181.6 184.8c26.4 26.4 38.4 64.8 32 102.4L228 960v4l1.6 7.2 228.8-125.6c16-9.6 34.4-14.4 53.6-14.4z" />
+  </svg>
+);
+const IconHeart = () => (
+  <svg viewBox="0 0 1024 1024" width="18" height="18" fill="currentColor">
+    <path d="M512.156 925.701L151.679 566.376a41.408 41.408 0 0 1-2.258-1.927 40.688 40.688 0 0 1-5.021-5.446C39.497 449.064 38.469 271.23 142.834 166.87c100.575-100.594 260.613-107.706 369.115-20.8 108.551-86.135 268.011-79.019 367.81 20.8 106.554 106.549 107.587 280.964 2.308 388.798L512.156 925.701zM191.475 520.304l320.601 319.578L838.87 512.991c81.915-83.906 81.109-220.027-2.046-303.187-83.16-83.165-219.434-83.847-303.76-1.517l-21.309 20.805-21.215-20.904c-84.188-82.962-220.897-82.251-304.773 1.616-40.26 40.265-61.713 95.163-60.398 154.573 1.29 58.372 25.376 115.197 66.086 155.912 0.006 0.006 0.015 0.01 0.02 0.015z" />
+  </svg>
+);
 const IconBucket = () => (
   <svg viewBox="0 0 1024 1024" width="18" height="18" fill="currentColor">
     <path d="M662.94 130.133l-52.46-52.437c-46.229-46.72-129.493-46.72-175.7 0l-312.32 315.05c-36.118 36.48-45.953 89.323-28.971 133.334l-5.227 9.408c-2.859 5.184-7.68 14.293-13.803 26.56-10.112 20.31-20.224 42.24-29.674 65.067a738.112 738.112 0 0 0-30.635 87.85C-0.74 769.664-4.687 816.512 6.513 854.912c15.53 53.141 58.965 83.755 122.432 83.755 63.701 0 106.986-30.912 121.6-84.523 10.453-38.443 5.589-85.248-10.368-139.925-3.755-12.864-8.107-26.027-12.971-39.403l268.245 270.635c24.171 24.426 54.379 35.882 89.536 35.882 31.83 0 60.459-12.053 86.187-32.853l3.35-3.03 312.32-315.05c49.663-50.133 49.663-131.307-0.129-176.512L723.27 190.464l74.965-74.965a42.667 42.667 0 0 0-60.33-60.331l-74.966 74.965z m0.98 119.68l262.977 262.87c16.042 14.592 16.042 42.069-1.536 59.797L617.883 882.645C606.278 891.648 595.441 896 584.753 896c-14.166 0-23.36-3.477-31.446-11.648l-370.73-373.888c-16.043-14.592-16.043-42.07 1.536-59.819l309.184-311.85c14.272-14.422 45.269-14.422 59.69 0.149l50.56 50.56-121.664 121.664a42.667 42.667 0 0 0 60.331 60.33l121.685-121.685zM123.59 659.584a893.867 893.867 0 0 1 2.773-6.635 818.32 818.32 0 0 1 3.947 8.96 664.512 664.512 0 0 1 27.968 76.075c11.947 40.981 15.381 73.877 9.941 93.888-4.224 15.467-13.013 21.76-39.274 21.76-45.526 0-55.168-33.024-32.47-116.395 6.614-24.362 15.894-50.56 27.115-77.653z" />
@@ -109,6 +137,27 @@ const TOOL_META: Record<ToolMode, ToolMeta> = {
   ellipse: {
     icon: IconEllipse,
     label: "椭圆",
+    hasFill: true,
+    picker: "lineWidth",
+    hasColor: true,
+  },
+  triangle: {
+    icon: IconTriangle,
+    label: "三角形",
+    hasFill: true,
+    picker: "lineWidth",
+    hasColor: true,
+  },
+  star: {
+    icon: IconStar,
+    label: "五角星",
+    hasFill: true,
+    picker: "lineWidth",
+    hasColor: true,
+  },
+  heart: {
+    icon: IconHeart,
+    label: "爱心",
     hasFill: true,
     picker: "lineWidth",
     hasColor: true,
@@ -467,6 +516,144 @@ function TextSizePicker({ value, onChange }: { value: TextSize; onChange: (s: Te
   );
 }
 
+// ---------- Brush type picker ----------
+
+const BRUSH_LABELS: Record<BrushType, string> = {
+  pen: "画笔",
+  airbrush: "喷枪",
+  crayon: "蜡笔",
+  watercolor: "水彩笔",
+};
+
+const BRUSH_ORDER: BrushType[] = ["pen", "airbrush", "crayon", "watercolor"];
+
+/**
+ * 用 useCanvas 的同一份 renderBrushStroke 在小 canvas 上画一段示例曲线，
+ * 让 popover 里的预览和真实笔触视觉一致。
+ */
+function BrushPreview({
+  brush,
+  width = 56,
+  height = 18,
+  color = "#1f2937",
+  lineWidth = 4,
+}: {
+  brush: BrushType;
+  width?: number;
+  height?: number;
+  color?: string;
+  lineWidth?: number;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) {
+      return;
+    }
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+    ctx.clearRect(0, 0, width, height);
+    // 经典 sin 波样本点
+    const points: { x: number; y: number }[] = [];
+    const margin = 4;
+    const amp = (height - margin * 2) * 0.5;
+    const yMid = height / 2;
+    const N = 24;
+    for (let i = 0; i <= N; i++) {
+      const x = margin + ((width - margin * 2) * i) / N;
+      const y = yMid + Math.sin((i / N) * Math.PI * 2) * amp;
+      points.push({ x, y });
+    }
+    renderBrushStroke(ctx, points, color, lineWidth, brush);
+  }, [brush, width, height, color, lineWidth]);
+  return (
+    <canvas
+      ref={ref}
+      style={{ width, height, display: "block", pointerEvents: "none" }}
+    />
+  );
+}
+
+function BrushPicker({
+  value,
+  onChange,
+}: {
+  value: BrushType;
+  onChange: (b: BrushType) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  // 外点关闭：捕获阶段，避免被画布 mousedown 抢先
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest("[data-brush-panel]")) {
+        return;
+      }
+      if (t?.closest("[data-brush-trigger]")) {
+        return;
+      }
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
+  }, [open]);
+
+  return (
+    <div className={tx("relative")}>
+      <button
+        data-brush-trigger="true"
+        onClick={() => setOpen((v) => !v)}
+        title={`画笔类型：${BRUSH_LABELS[value]}`}
+        className={tx(
+          "h-7 px-2 rounded flex items-center gap-1.5 transition text-sm",
+          open ? "bg-indigo-100 text-indigo-700" : "hover:bg-gray-100 text-gray-700",
+        )}
+      >
+        <BrushPreview brush={value} width={42} height={16} lineWidth={3} />
+        <svg viewBox="0 0 12 12" width="10" height="10" fill="currentColor">
+          <path d="M6 8L2 4h8z" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          data-brush-panel="true"
+          className={tx(
+            "absolute bottom-full mb-2 left-0 bg-white rounded-lg shadow-lg border border-gray-200 z-50 py-1",
+          )}
+          style={{ minWidth: 140 }}
+        >
+          {BRUSH_ORDER.map((b) => (
+            <button
+              key={b}
+              onClick={() => {
+                onChange(b);
+                setOpen(false);
+              }}
+              className={tx(
+                "w-full px-3 py-1.5 flex items-center gap-3 transition text-sm",
+                b === value
+                  ? "bg-indigo-50 text-indigo-700"
+                  : "hover:bg-gray-50 text-gray-700",
+              )}
+            >
+              <span className={tx("min-w-[3.5em] text-left")}>{BRUSH_LABELS[b]}</span>
+              <BrushPreview brush={b} width={56} height={16} lineWidth={3} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- Popover (clamped to viewport) ----------
 
 /**
@@ -554,11 +741,13 @@ interface Props {
   tool: ToolMode;
   fillMode: FillMode;
   textSize: TextSize;
+  brushType: BrushType;
   onColorChange: (c: string) => void;
   onLineWidthChange: (w: number) => void;
   onToolChange: (t: ToolMode) => void;
   onFillModeChange: (m: FillMode) => void;
   onTextSizeChange: (s: TextSize) => void;
+  onBrushTypeChange: (b: BrushType) => void;
   onClear: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -573,11 +762,13 @@ export default function Toolbar({
   tool,
   fillMode,
   textSize,
+  brushType,
   onColorChange,
   onLineWidthChange,
   onToolChange,
   onFillModeChange,
   onTextSizeChange,
+  onBrushTypeChange,
   onClear,
   onUndo,
   onRedo,
@@ -595,6 +786,9 @@ export default function Toolbar({
   const buttonRefs = useRef<Record<ToolMode, HTMLButtonElement | null>>({
     rect: null,
     ellipse: null,
+    triangle: null,
+    star: null,
+    heart: null,
     line: null,
     arrow: null,
     pen: null,
@@ -669,6 +863,13 @@ export default function Toolbar({
             {meta.picker === "lineWidth" && (
               <LineWidthPicker value={lineWidth} onChange={onLineWidthChange} />
             )}
+            {/* 笔型选择：仅 pen 工具显示，位于线宽和颜色之间 */}
+            {t === "pen" && (
+              <>
+                <div className={tx("w-px h-6 bg-gray-200")} />
+                <BrushPicker value={brushType} onChange={onBrushTypeChange} />
+              </>
+            )}
             {meta.hasFill && (
               <>
                 <div className={tx("w-px h-6 bg-gray-200")} />
@@ -679,7 +880,7 @@ export default function Toolbar({
                 />
               </>
             )}
-            {meta.hasColor && (meta.picker !== "none" || meta.hasFill) && (
+            {meta.hasColor && (meta.picker !== "none" || meta.hasFill || t === "pen") && (
               <div className={tx("w-px h-6 bg-gray-200")} />
             )}
             {meta.hasColor && (

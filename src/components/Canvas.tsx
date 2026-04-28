@@ -1,7 +1,13 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { tx } from "@twind/core";
 import type { ToolMode } from "./Toolbar";
-import { scaleLineWidth, computeArrowGeometry } from "../hooks/useCanvas";
+import {
+  scaleLineWidth,
+  computeArrowGeometry,
+  svgPathTriangle,
+  svgPathStar,
+  svgPathHeart,
+} from "../hooks/useCanvas";
 
 type Point = { x: number; y: number };
 
@@ -15,7 +21,7 @@ export interface EditingText {
 }
 
 export interface EditingShape {
-  shape: "rect" | "ellipse" | "arrow" | "line";
+  shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
   filled: boolean;
   /** Raw pixel points (p0, p1). For arrow/line: p0 = start, p1 = end. */
   points: [Point, Point];
@@ -906,24 +912,57 @@ export default function Canvas({
                 }}
               />
 
-              {/* Shape preview */}
-              <div
-                style={{
-                  position: "absolute",
-                  left: SHAPE_OVERLAY_PADDING,
-                  top: SHAPE_OVERLAY_PADDING,
-                  width: shapeBox.bw,
-                  height: shapeBox.bh,
-                  boxSizing: "border-box",
-                  pointerEvents: "none",
-                  ...(editingShape.shape === "ellipse" ? { borderRadius: "50%" } : {}),
-                  ...(editingShape.filled
-                    ? { backgroundColor: editingShape.color }
-                    : {
-                        border: `${shapeBox.scaledLW}px solid ${editingShape.color}`,
-                      }),
-                }}
-              />
+              {/* Shape preview — rect/ellipse 用 CSS（border/background），三角形 / 五角星 / 爱心
+               *  路径形状用 SVG <path>，复用 useCanvas 里同一份 svgPath* 几何（保证 overlay
+               *  和最终 commit 到 canvas 上的形状像素级一致）。 */}
+              {editingShape.shape === "rect" || editingShape.shape === "ellipse" ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: SHAPE_OVERLAY_PADDING,
+                    top: SHAPE_OVERLAY_PADDING,
+                    width: shapeBox.bw,
+                    height: shapeBox.bh,
+                    boxSizing: "border-box",
+                    pointerEvents: "none",
+                    ...(editingShape.shape === "ellipse" ? { borderRadius: "50%" } : {}),
+                    ...(editingShape.filled
+                      ? { backgroundColor: editingShape.color }
+                      : {
+                          border: `${shapeBox.scaledLW}px solid ${editingShape.color}`,
+                        }),
+                  }}
+                />
+              ) : (
+                <svg
+                  style={{
+                    position: "absolute",
+                    left: SHAPE_OVERLAY_PADDING,
+                    top: SHAPE_OVERLAY_PADDING,
+                    width: shapeBox.bw,
+                    height: shapeBox.bh,
+                    overflow: "visible",
+                    pointerEvents: "none",
+                  }}
+                  viewBox={`0 0 ${Math.max(shapeBox.bw, 1)} ${Math.max(shapeBox.bh, 1)}`}
+                  preserveAspectRatio="none"
+                >
+                  <path
+                    d={
+                      editingShape.shape === "triangle"
+                        ? svgPathTriangle(shapeBox.bw, shapeBox.bh)
+                        : editingShape.shape === "star"
+                          ? svgPathStar(shapeBox.bw, shapeBox.bh)
+                          : svgPathHeart(shapeBox.bw, shapeBox.bh)
+                    }
+                    fill={editingShape.filled ? editingShape.color : "none"}
+                    stroke={editingShape.filled ? "none" : editingShape.color}
+                    strokeWidth={shapeBox.scaledLW}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              )}
 
               {/* 4 corner resize handles — centered exactly on the dashed border's
                *  outer corners. Container has no border so abs-positioning's

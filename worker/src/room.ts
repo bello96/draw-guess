@@ -46,6 +46,8 @@ export class GameRoom implements DurableObject {
   private currentStrokePoints: { x: number; y: number }[] = [];
   private currentStrokeColor = "#000000";
   private currentStrokeWidth = 3;
+  // Pen 笔型缓存：start 时存下，move/end 透传到广播；end 写入持久化 stroke。
+  private currentStrokeBrush: "pen" | "airbrush" | "crayon" | "watercolor" = "pen";
   // Per-ws rolling window counter for rate limiting. WeakMap ensures the
   // entry is GC'd when the ws is collected, and hibernation resets it naturally.
   private wsMessageCounts = new WeakMap<WebSocket, { windowStart: number; count: number }>();
@@ -323,6 +325,8 @@ export class GameRoom implements DurableObject {
             y: number;
             color: string;
             lineWidth: number;
+            brushType?: "pen" | "airbrush" | "crayon" | "watercolor";
+            points?: { x: number; y: number }[];
           },
         );
         break;
@@ -365,7 +369,7 @@ export class GameRoom implements DurableObject {
           ws,
           msg as {
             type: string;
-            shape: "rect" | "ellipse" | "arrow" | "line";
+            shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
             filled: boolean;
             x: number;
             y: number;
@@ -662,6 +666,7 @@ export class GameRoom implements DurableObject {
       y: number;
       color: string;
       lineWidth: number;
+      brushType?: "pen" | "airbrush" | "crayon" | "watercolor";
       points?: { x: number; y: number }[];
     },
   ) {
@@ -675,6 +680,14 @@ export class GameRoom implements DurableObject {
       this.currentStrokePoints = [{ x: msg.x, y: msg.y }];
       this.currentStrokeColor = msg.color;
       this.currentStrokeWidth = msg.lineWidth;
+      // brushType 只在 start 上发；缺值视作 "pen"（兼容旧客户端）
+      const incomingBrush = msg.brushType;
+      this.currentStrokeBrush =
+        incomingBrush === "airbrush" ||
+        incomingBrush === "crayon" ||
+        incomingBrush === "watercolor"
+          ? incomingBrush
+          : "pen";
     } else if (msg.action === "move") {
       // 'move' may carry a batch of points (RAF-throttled) or a single x/y.
       const movePoints = msg.points ?? [{ x: msg.x, y: msg.y }];
@@ -685,6 +698,8 @@ export class GameRoom implements DurableObject {
         points: [...this.currentStrokePoints],
         color: this.currentStrokeColor,
         lineWidth: this.currentStrokeWidth,
+        // 默认 pen 不写字段（保持 wire 紧凑、和老 stroke 一致）
+        ...(this.currentStrokeBrush !== "pen" ? { brushType: this.currentStrokeBrush } : {}),
       };
       this.strokes.push(stroke);
       this.redoStack = []; // new stroke invalidates redo history
@@ -693,7 +708,8 @@ export class GameRoom implements DurableObject {
       await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
     }
 
-    // Forward to the other player — preserve points batch when present
+    // Forward to the other player — preserve points batch + brushType when present.
+    // brushType 在每一帧都透传给对端，免得对端要缓存 start 时的笔型。
     this.broadcast(
       {
         type: "draw",
@@ -702,6 +718,7 @@ export class GameRoom implements DurableObject {
         y: msg.y,
         color: msg.color,
         lineWidth: msg.lineWidth,
+        ...(this.currentStrokeBrush !== "pen" ? { brushType: this.currentStrokeBrush } : {}),
         ...(msg.points ? { points: msg.points } : {}),
       },
       ws,
@@ -757,7 +774,7 @@ export class GameRoom implements DurableObject {
     ws: WebSocket,
     msg: {
       type: string;
-      shape: "rect" | "ellipse" | "arrow" | "line";
+      shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
       filled: boolean;
       x: number;
       y: number;
@@ -775,7 +792,10 @@ export class GameRoom implements DurableObject {
       msg.shape !== "rect" &&
       msg.shape !== "ellipse" &&
       msg.shape !== "arrow" &&
-      msg.shape !== "line"
+      msg.shape !== "line" &&
+      msg.shape !== "triangle" &&
+      msg.shape !== "star" &&
+      msg.shape !== "heart"
     ) {
       return;
     }
