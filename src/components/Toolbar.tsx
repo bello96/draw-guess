@@ -22,10 +22,13 @@ const LINE_WIDTHS = [2, 4, 8, 12];
 const TEXT_SIZE_TO_PX: Record<TextSize, number> = { small: 16, medium: 24, large: 36 };
 const TEXT_SIZE_LABEL: Record<TextSize, string> = { small: "小", medium: "中", large: "大" };
 
-// Tools are split into two visual groups separated by a divider.
-// Primary (pen / text) sits first; shapes group (bucket / rect / ellipse / line / arrow / selection) second.
+// Tools split into 4 visual groups separated by dividers (left → right):
+//   1. primary  : pen / text   (free-hand authoring)
+//   2. bucket   : 单独分一栏    (区域填充)
+//   3. shapes   : rect / ellipse / line / arrow (规则形状)
+//   4. selection: 单独分一栏    (像素搬运)
 const PRIMARY_TOOLS: ToolMode[] = ["pen", "text"];
-const SHAPE_TOOLS: ToolMode[] = ["bucket", "rect", "ellipse", "line", "arrow", "selection"];
+const SHAPE_TOOLS: ToolMode[] = ["rect", "ellipse", "line", "arrow"];
 
 // ---------- Icons ----------
 // SVG path data mirrored from src/assets/*.svg. Inlining (instead of importing
@@ -708,10 +711,20 @@ export default function Toolbar({
 
       <div className={tx("w-px h-7 bg-gray-200")} />
 
-      {/* Shape tools: rect, ellipse, arrow */}
+      {/* Bucket — standalone group */}
+      <div className={tx("flex items-center")}>{renderToolButton("bucket")}</div>
+
+      <div className={tx("w-px h-7 bg-gray-200")} />
+
+      {/* Shape tools: rect, ellipse, line, arrow */}
       <div className={tx("flex gap-1 items-center")}>
         {SHAPE_TOOLS.map((t) => renderToolButton(t))}
       </div>
+
+      <div className={tx("w-px h-7 bg-gray-200")} />
+
+      {/* Selection — standalone group */}
+      <div className={tx("flex items-center")}>{renderToolButton("selection")}</div>
 
       <div className={tx("w-px h-7 bg-gray-200")} />
 
