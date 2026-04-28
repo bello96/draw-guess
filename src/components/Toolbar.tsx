@@ -214,7 +214,7 @@ function CustomColorPanel({
             onClick={pickFromScreen}
             title="吸取屏幕颜色"
             className={tx(
-              "w-7 h-7 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-50 transition flex-shrink-0",
+              "w-7 h-7 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-100 transition flex-shrink-0",
             )}
           >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
@@ -240,10 +240,10 @@ function CustomColorPanel({
         <button
           onClick={onCancel}
           className={tx(
-            "px-3 py-1 text-sm rounded border border-gray-300 hover:bg-gray-50 transition flex-shrink-0",
+            "px-3 ml-5 py-1 text-sm rounded border border-gray-300 hover:bg-gray-100 transition flex-shrink-0",
           )}
         >
-          清空
+          关闭
         </button>
         <button
           onClick={onConfirm}
