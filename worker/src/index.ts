@@ -1,4 +1,5 @@
 export { GameRoom } from "./room";
+import { MAX_MAX_PLAYERS, MIN_MAX_PLAYERS } from "./constants";
 
 interface Env {
   GAME_ROOM: DurableObjectNamespace;
@@ -70,7 +71,9 @@ export default {
       const MAX_RETRIES = 5;
       const maxRaw = parseInt(url.searchParams.get("max") || "2", 10);
       const maxPlayers =
-        Number.isFinite(maxRaw) && maxRaw >= 2 && maxRaw <= 6 ? maxRaw : 2;
+        Number.isFinite(maxRaw) && maxRaw >= MIN_MAX_PLAYERS && maxRaw <= MAX_MAX_PLAYERS
+          ? maxRaw
+          : MIN_MAX_PLAYERS;
       for (let i = 0; i < MAX_RETRIES; i++) {
         const roomCode = generateRoomCode();
         const doId = env.GAME_ROOM.idFromName(roomCode);

@@ -39,7 +39,6 @@ export class GameRoom implements DurableObject {
   // redo only survives within one active DO session; hibernation resets it.
   private redoStack: SerializedStroke[] = [];
   private chatHistory: ChatHistoryEntry[] = [];
-  private closed = false;
   private roomCode = "";
   private disconnectedPlayers: Map<string, DisconnectedPlayer> = new Map();
   private lastActivityAt = 0;
@@ -76,7 +75,6 @@ export class GameRoom implements DurableObject {
       "drawerId",
       "phase",
       "answer",
-      "closed",
       "roomCode",
       "chatHistory",
       "disconnectedPlayers",
@@ -89,7 +87,6 @@ export class GameRoom implements DurableObject {
     this.drawerId = (data.get("drawerId") as string | null) ?? null;
     this.phase = (data.get("phase") as GamePhase) ?? "waiting";
     this.answer = (data.get("answer") as string | null) ?? null;
-    this.closed = (data.get("closed") as boolean) ?? false;
     this.roomCode = (data.get("roomCode") as string) ?? "";
     this.chatHistory = (data.get("chatHistory") as ChatHistoryEntry[]) ?? [];
 
@@ -110,6 +107,10 @@ export class GameRoom implements DurableObject {
     this.lastActivityAt = (data.get("lastActivityAt") as number) ?? 0;
     this.maxPlayers = (data.get("maxPlayers") as number) ?? MIN_MAX_PLAYERS;
     this.joinOrder = (data.get("joinOrder") as string[]) ?? [];
+    // Backfill: 旧房间无 joinOrder 字段时，至少把当前 drawer 放进去，避免下一位被误判为 isFirst
+    if (this.joinOrder.length === 0 && this.drawerId) {
+      this.joinOrder = [this.drawerId];
+    }
   }
 
   /** Rolling-window rate check. Returns false when over limit. */
@@ -141,7 +142,6 @@ export class GameRoom implements DurableObject {
       drawerId: this.drawerId,
       phase: this.phase,
       answer: this.answer,
-      closed: this.closed,
       roomCode: this.roomCode,
       chatHistory: this.chatHistory,
       disconnectedPlayers: Array.from(this.disconnectedPlayers.entries()),
@@ -282,7 +282,7 @@ export class GameRoom implements DurableObject {
       return new Response(
         JSON.stringify({
           playerCount: this.getEffectivePlayerCount(),
-          closed: this.closed,
+          closed: this.phase !== "waiting", // 派生：非 waiting 阶段即视为已关闭
           phase: this.phase,
           created: this.created,
         }),
@@ -495,7 +495,6 @@ export class GameRoom implements DurableObject {
 
       // Reset room
       this.created = false;
-      this.closed = false;
       this.phase = "waiting";
       this.drawerId = null;
       this.answer = null;
@@ -1261,11 +1260,14 @@ export class GameRoom implements DurableObject {
             break;
           }
         }
+        // Fallback: joinOrder 与 allRemaining 不一致时仍能选出 drawer
+        if (!newDrawer && allRemaining.length > 0) {
+          newDrawer = allRemaining[0].id;
+        }
         this.drawerId = newDrawer;
       }
 
       // Re-open the room so a new player can join
-      this.closed = false;
       this.phase = "waiting";
       this.answer = null;
 
@@ -1279,7 +1281,6 @@ export class GameRoom implements DurableObject {
     } else {
       // Room is truly empty, reset everything
       this.created = false;
-      this.closed = false;
       this.phase = "waiting";
       this.drawerId = null;
       this.answer = null;
