@@ -54,7 +54,6 @@ export interface ChatHistoryEntry {
 export interface PlayerAttachment {
   id: string;
   name: string;
-  isOwner: boolean;
   quickLeave?: boolean; // Set by quickleave beacon — use short grace on disconnect
 }
 
@@ -62,7 +61,6 @@ export interface PlayerAttachment {
 export interface DisconnectedPlayer {
   id: string;
   name: string;
-  isOwner: boolean;
   disconnectedAt: number;
   graceMs: number; // Grace period duration (short for quickleave, long for normal)
 }

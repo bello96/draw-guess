@@ -4,8 +4,10 @@ import {
   MAX_ANSWER_LENGTH,
   MAX_CHAT_HISTORY,
   MAX_CHAT_LENGTH,
+  MAX_MAX_PLAYERS,
   MAX_NAME_LENGTH,
   MAX_TEXT_STROKE_LENGTH,
+  MIN_MAX_PLAYERS,
   PROTOCOL_VERSION,
   QUICK_LEAVE_GRACE_MS,
   RATE_LIMIT_MAX_MSGS,
@@ -41,6 +43,10 @@ export class GameRoom implements DurableObject {
   private roomCode = "";
   private disconnectedPlayers: Map<string, DisconnectedPlayer> = new Map();
   private lastActivityAt = 0;
+  private maxPlayers = MIN_MAX_PLAYERS;
+  private joinOrder: string[] = [];
+  // pendingPromotionId 不持久化；用于 3+ 人房 revealed 阶段的猜对者
+  private pendingPromotionId: string | null = null;
 
   // Transient state (not persisted, OK to lose on hibernation)
   private currentStrokePoints: { x: number; y: number }[] = [];
@@ -75,6 +81,8 @@ export class GameRoom implements DurableObject {
       "chatHistory",
       "disconnectedPlayers",
       "lastActivityAt",
+      "maxPlayers",
+      "joinOrder",
     ]);
 
     this.created = (data.get("created") as boolean) ?? false;
@@ -100,6 +108,8 @@ export class GameRoom implements DurableObject {
       ? new Map(dcRaw.map(([id, dp]) => [id, { ...dp, graceMs: dp.graceMs ?? RECONNECT_GRACE_MS }]))
       : new Map();
     this.lastActivityAt = (data.get("lastActivityAt") as number) ?? 0;
+    this.maxPlayers = (data.get("maxPlayers") as number) ?? MIN_MAX_PLAYERS;
+    this.joinOrder = (data.get("joinOrder") as string[]) ?? [];
   }
 
   /** Rolling-window rate check. Returns false when over limit. */
@@ -136,6 +146,8 @@ export class GameRoom implements DurableObject {
       chatHistory: this.chatHistory,
       disconnectedPlayers: Array.from(this.disconnectedPlayers.entries()),
       lastActivityAt: this.lastActivityAt,
+      maxPlayers: this.maxPlayers,
+      joinOrder: this.joinOrder,
     });
   }
 
@@ -191,11 +203,18 @@ export class GameRoom implements DurableObject {
     return this.getJoinedWebSockets().length;
   }
 
+  private isPlayerActive(id: string): boolean {
+    if (this.disconnectedPlayers.has(id)) {
+      return true;
+    }
+    return this.getJoinedWebSockets().some(({ player }) => player.id === id);
+  }
+
   private getPlayerInfoList(): PlayerInfo[] {
     return this.getJoinedWebSockets().map(({ player }) => ({
       id: player.id,
       name: player.name,
-      isOwner: player.isOwner,
+      isOwner: player.id === this.drawerId,
     }));
   }
 
@@ -215,9 +234,19 @@ export class GameRoom implements DurableObject {
         });
       }
       const code = url.searchParams.get("code") || "";
+      const maxRaw = parseInt(url.searchParams.get("max") || "2", 10);
+      const maxPlayers =
+        Number.isFinite(maxRaw) && maxRaw >= MIN_MAX_PLAYERS && maxRaw <= MAX_MAX_PLAYERS
+          ? maxRaw
+          : MIN_MAX_PLAYERS;
       this.created = true;
       this.roomCode = code;
-      await this.state.storage.put({ created: true, roomCode: code });
+      this.maxPlayers = maxPlayers;
+      await this.state.storage.put({
+        created: true,
+        roomCode: code,
+        maxPlayers,
+      });
       return new Response("OK");
     }
 
@@ -475,6 +504,9 @@ export class GameRoom implements DurableObject {
       this.chatHistory = [];
       this.disconnectedPlayers.clear();
       this.lastActivityAt = 0;
+      this.joinOrder = [];
+      this.maxPlayers = MIN_MAX_PLAYERS;
+      this.pendingPromotionId = null;
       await this.saveState();
       await this.clearStrokeStorage();
       return;
@@ -532,7 +564,6 @@ export class GameRoom implements DurableObject {
         const player: PlayerAttachment = {
           id: disconnected.id,
           name: disconnected.name,
-          isOwner: disconnected.isOwner,
         };
 
         ws.serializeAttachment(player);
@@ -547,8 +578,13 @@ export class GameRoom implements DurableObject {
           strokes: this.strokes,
           chatHistory: this.chatHistory,
           yourId: player.id,
-          answerLength: this.answer ? this.answer.length : undefined,
-          answer: player.id === this.drawerId && this.answer ? this.answer : undefined,
+          maxPlayers: this.maxPlayers,
+          ...(this.pendingPromotionId ? { pendingPromotionId: this.pendingPromotionId } : {}),
+          ...(player.id === this.drawerId && this.answer
+            ? { answer: this.answer, answerLength: this.answer.length }
+            : this.answer
+              ? { answerLength: this.answer.length }
+              : {}),
         });
 
         return;
@@ -568,7 +604,6 @@ export class GameRoom implements DurableObject {
           const player: PlayerAttachment = {
             id: existing.id,
             name: existing.name,
-            isOwner: existing.isOwner,
           };
 
           ws.serializeAttachment(player);
@@ -583,8 +618,13 @@ export class GameRoom implements DurableObject {
             strokes: this.strokes,
             chatHistory: this.chatHistory,
             yourId: player.id,
-            answerLength: this.answer ? this.answer.length : undefined,
-            answer: player.id === this.drawerId && this.answer ? this.answer : undefined,
+            maxPlayers: this.maxPlayers,
+            ...(this.pendingPromotionId ? { pendingPromotionId: this.pendingPromotionId } : {}),
+            ...(player.id === this.drawerId && this.answer
+              ? { answer: this.answer, answerLength: this.answer.length }
+              : this.answer
+                ? { answerLength: this.answer.length }
+                : {}),
           });
 
           return;
@@ -593,7 +633,7 @@ export class GameRoom implements DurableObject {
     }
 
     // ---- New player join ----
-    if (this.getEffectivePlayerCount() >= 2) {
+    if (this.getEffectivePlayerCount() >= this.maxPlayers) {
       this.send(ws, { type: "error", message: "房间已满" });
       try {
         ws.close(1000, "room full");
@@ -603,23 +643,26 @@ export class GameRoom implements DurableObject {
       return;
     }
 
-    const isOwner = this.getEffectivePlayerCount() === 0;
+    const isFirst = this.joinOrder.length === 0;
     const player: PlayerAttachment = {
       id: crypto.randomUUID(),
-      name: (playerName || (isOwner ? "玩家1" : "玩家2")).slice(0, MAX_NAME_LENGTH),
-      isOwner,
+      name: (
+        playerName || `玩家${this.joinOrder.length + 1}`
+      ).slice(0, MAX_NAME_LENGTH),
     };
 
     // Store player info as WebSocket attachment (survives hibernation)
     ws.serializeAttachment(player);
+    this.joinOrder.push(player.id);
 
-    if (isOwner) {
+    if (isFirst) {
       this.drawerId = player.id;
       this.phase = "waiting";
-    } else {
-      this.closed = true;
+    } else if (this.joinOrder.length === 2) {
+      // 第 2 人加入：进入 drawing 阶段
       this.phase = "drawing";
     }
+    // 第 3 人及之后：phase 不变（已是 drawing/guessing/revealed 之一）
 
     await this.saveState();
 
@@ -633,13 +676,20 @@ export class GameRoom implements DurableObject {
       strokes: this.strokes,
       chatHistory: this.chatHistory,
       yourId: player.id,
+      maxPlayers: this.maxPlayers,
+      ...(this.pendingPromotionId ? { pendingPromotionId: this.pendingPromotionId } : {}),
+      ...(player.id === this.drawerId && this.answer
+        ? { answer: this.answer, answerLength: this.answer.length }
+        : this.answer
+          ? { answerLength: this.answer.length }
+          : {}),
     });
 
-    // Notify other player about the new join
+    // Notify other players about the new join
     this.broadcast(
       {
         type: "playerJoined",
-        player: { id: player.id, name: player.name, isOwner: player.isOwner },
+        player: { id: player.id, name: player.name, isOwner: player.id === this.drawerId },
       },
       ws,
     );
@@ -1147,7 +1197,6 @@ export class GameRoom implements DurableObject {
     await this.processActualLeave({
       id: player.id,
       name: player.name,
-      isOwner: player.isOwner,
       disconnectedAt: 0,
       graceMs: 0,
     });
@@ -1176,7 +1225,6 @@ export class GameRoom implements DurableObject {
     this.disconnectedPlayers.set(player.id, {
       id: player.id,
       name: player.name,
-      isOwner: player.isOwner,
       disconnectedAt: Date.now(),
       graceMs,
     });
@@ -1189,6 +1237,8 @@ export class GameRoom implements DurableObject {
 
   /** Called when a disconnected player's grace period expires without reconnecting */
   private async processActualLeave(dp: DisconnectedPlayer) {
+    this.joinOrder = this.joinOrder.filter((id) => id !== dp.id);
+
     const remaining = this.getJoinedWebSockets();
     // Also consider other disconnected players still in grace period
     const otherDisconnected = Array.from(this.disconnectedPlayers.values());
@@ -1202,11 +1252,16 @@ export class GameRoom implements DurableObject {
         playerId: dp.id,
       });
 
-      // If the drawer left, give draw permission to remaining
-      if (dp.id === this.drawerId && remaining.length > 0) {
-        this.drawerId = remaining[0].player.id;
-      } else if (dp.id === this.drawerId && otherDisconnected.length > 0) {
-        this.drawerId = otherDisconnected[0].id;
+      // If the drawer left, select next drawer by joinOrder
+      if (dp.id === this.drawerId) {
+        let newDrawer: string | null = null;
+        for (const id of this.joinOrder) {
+          if (this.isPlayerActive(id)) {
+            newDrawer = id;
+            break;
+          }
+        }
+        this.drawerId = newDrawer;
       }
 
       // Re-open the room so a new player can join
@@ -1231,6 +1286,9 @@ export class GameRoom implements DurableObject {
       this.strokes = [];
       this.redoStack = [];
       this.chatHistory = [];
+      this.maxPlayers = MIN_MAX_PLAYERS;
+      this.joinOrder = [];
+      this.pendingPromotionId = null;
       await this.saveState();
       await this.clearStrokeStorage();
     }

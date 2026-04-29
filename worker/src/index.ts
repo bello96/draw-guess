@@ -68,12 +68,18 @@ export default {
     // POST /api/rooms - Create a new room with collision retry
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       const MAX_RETRIES = 5;
+      const maxRaw = parseInt(url.searchParams.get("max") || "2", 10);
+      const maxPlayers =
+        Number.isFinite(maxRaw) && maxRaw >= 2 && maxRaw <= 6 ? maxRaw : 2;
       for (let i = 0; i < MAX_RETRIES; i++) {
         const roomCode = generateRoomCode();
         const doId = env.GAME_ROOM.idFromName(roomCode);
         const stub = env.GAME_ROOM.get(doId);
         const initResp = await stub.fetch(
-          new Request("http://internal/init?code=" + roomCode, { method: "POST" }),
+          new Request(
+            "http://internal/init?code=" + roomCode + "&max=" + maxPlayers,
+            { method: "POST" },
+          ),
         );
         if (initResp.ok) {
           return new Response(JSON.stringify({ roomCode }), {
