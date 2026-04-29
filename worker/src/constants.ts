@@ -44,3 +44,8 @@ export const RATE_LIMIT_MAX_MSGS = 150;
 // as a legacy grace. Once all clients are v1+, tighten to strict equality.
 
 export const PROTOCOL_VERSION = 1;
+
+// ---------- Multiplayer room capacity ----------
+// Range for `?max=N` query on POST /api/rooms. Values outside this range fall back to MIN_MAX_PLAYERS.
+export const MIN_MAX_PLAYERS = 2;
+export const MAX_MAX_PLAYERS = 6;

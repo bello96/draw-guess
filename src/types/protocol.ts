@@ -115,6 +115,7 @@ export interface C_Chat {
 
 export interface C_Transfer {
   type: "transfer";
+  targetId?: string; // 3+ 人模式必须；缺省时服务端按"非自己第一个"处理
 }
 
 export interface C_TextStroke {
@@ -162,6 +163,10 @@ export interface C_ContinueDrawing {
   type: "continueDrawing";
 }
 
+export interface C_ClaimDrawer {
+  type: "claimDrawer";
+}
+
 export interface C_Leave {
   type: "leave";
 }
@@ -185,6 +190,7 @@ export type ClientMessage =
   | C_Selection
   | C_Transfer
   | C_ContinueDrawing
+  | C_ClaimDrawer
   | C_Leave
   | C_Ping;
 
@@ -212,6 +218,8 @@ export interface S_RoomState {
   strokes: SerializedStroke[];
   chatHistory?: ChatHistoryEntry[];
   yourId: string;
+  maxPlayers?: number;
+  pendingPromotionId?: string;
 }
 
 export interface S_PlayerJoined {
@@ -255,6 +263,7 @@ export interface S_PhaseChange {
   drawerId: string;
   answerLength?: number;
   answer?: string;
+  pendingPromotionId?: string;
 }
 
 export interface S_GuessResult {
