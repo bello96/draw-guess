@@ -207,7 +207,7 @@ export default function PlayerBar({
               return null;
             }
             return (
-              <div className={tx("text-xs text-purple-700 ml-2")}>
+              <div className={tx("text-xs text-purple-700 ml-2 truncate max-w-[180px]")}>
                 🏆 {winner.name} 即将获得画笔...
               </div>
             );
@@ -257,17 +257,19 @@ export default function PlayerBar({
 
       {/* Actions */}
       <div className={tx("flex items-center justify-end gap-2 w-[300px]")}>
-        {isDrawer && players.length === 2 && phase === "revealed" && (
-          <button
-            onClick={onContinueDrawing}
-            className={tx(
-              "px-3 py-1.5 text-sm bg-indigo-50 text-indigo-700",
-              "hover:bg-indigo-100 rounded-lg transition",
-            )}
-          >
-            继续出题
-          </button>
-        )}
+        {isDrawer &&
+          phase === "revealed" &&
+          (players.length === 2 || (players.length >= 3 && !pendingPromotionId)) && (
+            <button
+              onClick={onContinueDrawing}
+              className={tx(
+                "px-3 py-1.5 text-sm bg-indigo-50 text-indigo-700",
+                "hover:bg-indigo-100 rounded-lg transition",
+              )}
+            >
+              继续出题
+            </button>
+          )}
         {isDrawer && players.length === 2 && (
           <button
             onClick={() => onTransfer()}
@@ -279,7 +281,7 @@ export default function PlayerBar({
             转让画笔
           </button>
         )}
-        {isDrawer && players.length >= 3 && phase !== "revealed" && (
+        {isDrawer && players.length >= 3 && (phase !== "revealed" || !pendingPromotionId) && (
           <TransferDropdown
             candidates={players.filter((p) => p.id !== myId)}
             onPick={(id) => onTransfer(id)}
