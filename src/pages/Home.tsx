@@ -59,22 +59,24 @@ export default function Home({ onEnterRoom }: Props) {
         <h1 className={tx("text-4xl font-bold text-center mb-2 text-indigo-600")}>🎨 我画你猜</h1>
         <p className={tx("text-gray-500 text-center mb-8")}>和朋友一起画画猜词吧！</p>
 
-        {/* Name input */}
-        <div className={tx("mb-6")}>
-          <label className={tx("block text-sm font-medium text-gray-700 mb-1")}>你的昵称</label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="输入昵称..."
-            maxLength={10}
-            className={tx(
-              "w-full px-4 py-3 border border-gray-300 rounded-lg",
-              "focus:ring-2 focus:ring-indigo-500 focus:border-transparent",
-              "outline-none transition",
-            )}
-          />
-        </div>
+        {/* Name input — 只在二级页显示 */}
+        {mode !== "menu" && (
+          <div className={tx("mb-6")}>
+            <label className={tx("block text-sm font-medium text-gray-700 mb-1")}>你的昵称</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="输入昵称..."
+              maxLength={10}
+              className={tx(
+                "w-full px-4 py-3 border border-gray-300 rounded-lg",
+                "focus:ring-2 focus:ring-indigo-500 focus:border-transparent",
+                "outline-none transition",
+              )}
+            />
+          </div>
+        )}
 
         {/* Max players (only shown in create mode) */}
         {mode === "create" && (
@@ -106,26 +108,32 @@ export default function Home({ onEnterRoom }: Props) {
         )}
 
         {mode === "menu" && (
-          <div className={tx("space-y-3")}>
-            <button
-              onClick={() => setMode("create")}
-              className={tx(
-                "w-full py-3 px-4 bg-white text-indigo-600 font-semibold rounded-lg",
-                "border-2 border-indigo-600 hover:bg-indigo-50 transition",
-              )}
-            >
-              创建房间
-            </button>
-            <button
-              onClick={() => setMode("join")}
-              className={tx(
-                "w-full py-3 px-4 bg-white text-indigo-600 font-semibold rounded-lg",
-                "border-2 border-indigo-600 hover:bg-indigo-50 transition",
-              )}
-            >
-              加入房间
-            </button>
-          </div>
+          <>
+            <div className={tx("space-y-3")}>
+              <button
+                onClick={() => setMode("create")}
+                className={tx(
+                  "w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-lg",
+                  "hover:bg-indigo-700 transition flex items-center justify-center gap-2",
+                )}
+              >
+                <span>🏠</span>
+                <span>创建房间</span>
+              </button>
+              <button
+                onClick={() => setMode("join")}
+                className={tx(
+                  "w-full py-3 px-4 bg-white text-indigo-600 font-semibold rounded-lg",
+                  "border-2 border-indigo-600 hover:bg-indigo-50 transition",
+                  "flex items-center justify-center gap-2",
+                )}
+              >
+                <span>🔗</span>
+                <span>加入房间</span>
+              </button>
+            </div>
+            <p className={tx("text-xs text-gray-400 text-center mt-6")}>支持 2-6 人一起玩</p>
+          </>
         )}
 
         {mode === "create" && (
