@@ -305,6 +305,16 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           if (msg.answerLength) {
             setAnswerLength(msg.answerLength);
           }
+          // 切到非 drawing 阶段时，清理所有 in-progress editing overlay，
+          // 避免本地继续操作未 commit 的 overlay 后两端画面 diverge
+          if (msg.phase !== "drawing") {
+            setEditingShape(null);
+            setEditingText(null);
+            if (editingSelection) {
+              cancelLocalSelection();
+              setEditingSelection(null);
+            }
+          }
           if (msg.phase === "guessing") {
             addSystemMessage("答案已设定，开始猜词！");
           } else if (msg.phase === "revealed") {
@@ -389,6 +399,8 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     strokesRef,
     syncHistoryFlags,
     onLeave,
+    editingSelection,
+    cancelLocalSelection,
   ]);
 
   const handleClear = () => {
@@ -450,6 +462,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit editing text to canvas and sync to server
   const commitEditingText = useCallback(() => {
+    if (phase !== "drawing") {
+      setEditingText(null);
+      return;
+    }
     if (!editingText || !editingText.text.trim()) {
       setEditingText(null);
       return;
@@ -472,11 +488,14 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     redoStackRef.current = []; // new stroke invalidates redo history
     syncHistoryFlags();
     setEditingText(null);
-  }, [editingText, color, addTextStroke, send, syncHistoryFlags]);
+  }, [phase, editingText, color, addTextStroke, send, syncHistoryFlags]);
 
   // Text tool: click on canvas to create editing text
   const handleCanvasClickForText = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (phase !== "drawing") {
+        return;
+      }
       if (!isDrawer || tool !== "text") {
         return;
       }
@@ -500,7 +519,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         fontSize: TEXT_SIZE_TO_PX[textSize],
       });
     },
-    [isDrawer, tool, canvasRef, editingText, commitEditingText, textSize],
+    [phase, isDrawer, tool, canvasRef, editingText, commitEditingText, textSize],
   );
 
   // Update editing text fields
@@ -512,6 +531,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit the current editing shape: draw onto canvas + sync to the other player.
   const commitEditingShape = useCallback(() => {
+    if (phase !== "drawing") {
+      setEditingShape(null);
+      return;
+    }
     if (!editingShape) {
       return;
     }
@@ -540,7 +563,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     redoStackRef.current = []; // new stroke invalidates redo history
     syncHistoryFlags();
     setEditingShape(null);
-  }, [editingShape, addShape, send, syncHistoryFlags]);
+  }, [phase, editingShape, addShape, send, syncHistoryFlags]);
 
   // Drag the overlay around (pixel + normalized both get updated)
   const handleEditingShapeUpdate = useCallback((updates: Partial<EditingShape>) => {
@@ -551,6 +574,11 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit the current editing selection: paste patch at final dst + sync peer.
   const commitEditingSelection = useCallback(() => {
+    if (phase !== "drawing") {
+      cancelLocalSelection();
+      setEditingSelection(null);
+      return;
+    }
     if (!editingSelection) {
       return;
     }
@@ -576,7 +604,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     redoStackRef.current = [];
     syncHistoryFlags();
     setEditingSelection(null);
-  }, [editingSelection, commitLocalSelection, send, syncHistoryFlags]);
+  }, [phase, editingSelection, cancelLocalSelection, commitLocalSelection, send, syncHistoryFlags]);
 
   // Drag the selection overlay (pixel offset only — no resize).
   const handleEditingSelectionUpdate = useCallback((updates: Partial<EditingSelection>) => {
