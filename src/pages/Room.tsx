@@ -51,6 +51,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const [joinError, setJoinError] = useState("");
   const [toast, setToast] = useState<{ message: string; type: ToastType; id: number } | null>(null);
   const [maxPlayers, setMaxPlayers] = useState<number>(2);
+  const [pendingPromotionId, setPendingPromotionId] = useState<string | null>(null);
 
   // Drawing state
   const [color, setColor] = useState("#000000");
@@ -192,6 +193,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           setPlayers(msg.players);
           setDrawerId(msg.drawerId);
           setPhase(msg.phase);
+          setPendingPromotionId(msg.pendingPromotionId ?? null);
           if (typeof msg.maxPlayers === "number") {
             setMaxPlayers(msg.maxPlayers);
           }
@@ -306,6 +308,11 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         case "phaseChange":
           setPhase(msg.phase);
           setDrawerId(msg.drawerId);
+          if (msg.phase === "revealed") {
+            setPendingPromotionId(msg.pendingPromotionId ?? null);
+          } else {
+            setPendingPromotionId(null);
+          }
           if (msg.answerLength) {
             setAnswerLength(msg.answerLength);
           }
@@ -712,6 +719,28 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     return () => window.removeEventListener("mousedown", handleGlobalMouseDown, true);
   }, [editingSelection, commitEditingSelection]);
 
+  // 自动升级：猜对者本机 6.5s 后自动 claim drawer
+  useEffect(() => {
+    if (phase !== "revealed") {
+      return;
+    }
+    if (pendingPromotionId === null) {
+      return;
+    }
+    if (pendingPromotionId !== myId) {
+      return;
+    }
+
+    const AUTO_PROMOTE_DELAY_MS = 6500;
+    const timer = window.setTimeout(() => {
+      send({ type: "claimDrawer" });
+    }, AUTO_PROMOTE_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [phase, pendingPromotionId, myId, send]);
+
   const handleSendChat = (text: string) => {
     send({ type: "chat", text });
   };
@@ -765,6 +794,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         myId={myId}
         phase={phase}
         maxPlayers={maxPlayers}
+        pendingPromotionId={pendingPromotionId}
         onTransfer={handleTransfer}
         onContinueDrawing={handleContinueDrawing}
         onLeave={handleLeave}

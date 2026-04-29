@@ -449,6 +449,9 @@ export class GameRoom implements DurableObject {
           },
         );
         break;
+      case "claimDrawer":
+        await this.onClaimDrawer(ws);
+        break;
       case "continueDrawing":
         await this.onContinueDrawing(ws);
         break;
@@ -1002,6 +1005,7 @@ export class GameRoom implements DurableObject {
       return;
     }
 
+    this.pendingPromotionId = null; // 防御：清空画布时顺带清除挂起的晋升
     this.strokes = [];
     this.redoStack = [];
     this.currentStrokePoints = [];
@@ -1117,12 +1121,21 @@ export class GameRoom implements DurableObject {
     if (correct) {
       this.phase = "revealed";
 
+      if (this.getJoinedCount() >= 3) {
+        this.pendingPromotionId = player.id;
+      } else {
+        this.pendingPromotionId = null;
+      }
+
       await this.saveState();
 
       this.broadcast({
         type: "phaseChange",
         phase: "revealed",
         drawerId: this.drawerId!,
+        ...(this.pendingPromotionId
+          ? { pendingPromotionId: this.pendingPromotionId }
+          : {}),
       });
     }
   }
@@ -1169,6 +1182,7 @@ export class GameRoom implements DurableObject {
       return;
     }
 
+    this.pendingPromotionId = null;
     this.phase = "drawing";
     this.answer = null;
     this.strokes = [];
@@ -1221,7 +1235,22 @@ export class GameRoom implements DurableObject {
     await this.executeTransfer(targetId);
   }
 
+  private async onClaimDrawer(ws: WebSocket) {
+    const player = this.getPlayer(ws);
+    if (!player) {
+      return;
+    }
+    if (this.phase !== "revealed") {
+      return;
+    }
+    if (!this.pendingPromotionId || this.pendingPromotionId !== player.id) {
+      return;
+    }
+    await this.executeTransfer(player.id);
+  }
+
   private async executeTransfer(newDrawerId: string) {
+    this.pendingPromotionId = null;
     this.drawerId = newDrawerId;
     this.phase = "drawing";
     this.answer = null;
@@ -1297,6 +1326,13 @@ export class GameRoom implements DurableObject {
 
   /** Called when a disconnected player's grace period expires without reconnecting */
   private async processActualLeave(dp: DisconnectedPlayer) {
+    // 记录该玩家是否是待晋升的猜对者
+    const wasPendingPromotion =
+      this.pendingPromotionId !== null && dp.id === this.pendingPromotionId;
+    if (wasPendingPromotion) {
+      this.pendingPromotionId = null;
+    }
+
     this.joinOrder = this.joinOrder.filter((id) => id !== dp.id);
 
     const remaining = this.getJoinedWebSockets();
@@ -1326,6 +1362,18 @@ export class GameRoom implements DurableObject {
           newDrawer = allRemaining[0].id;
         }
         this.drawerId = newDrawer;
+      }
+
+      // 猜对者离线：保持 revealed 阶段，重发 phaseChange 但不含 pendingPromotionId，
+      // 让前端回到"继续出题/转让画笔"按钮
+      if (wasPendingPromotion && this.phase === "revealed") {
+        await this.saveState(); // 持久化 joinOrder 的变动
+        this.broadcast({
+          type: "phaseChange",
+          phase: "revealed",
+          drawerId: this.drawerId!,
+        });
+        return;
       }
 
       // Re-open the room so a new player can join

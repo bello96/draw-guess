@@ -9,6 +9,7 @@ interface Props {
   myId: string | null;
   phase: GamePhase;
   maxPlayers: number;
+  pendingPromotionId?: string | null;
   onTransfer: (targetId?: string) => void;
   onContinueDrawing: () => void;
   onLeave: () => void;
@@ -142,6 +143,7 @@ export default function PlayerBar({
   myId,
   phase,
   maxPlayers,
+  pendingPromotionId,
   onTransfer,
   onContinueDrawing,
   onLeave,
@@ -197,6 +199,19 @@ export default function PlayerBar({
           {phase === "guessing" && "猜词中"}
           {phase === "revealed" && "已揭晓"}
         </div>
+        {phase === "revealed" &&
+          pendingPromotionId &&
+          (() => {
+            const winner = players.find((p) => p.id === pendingPromotionId);
+            if (!winner) {
+              return null;
+            }
+            return (
+              <div className={tx("text-xs text-purple-700 ml-2")}>
+                🏆 {winner.name} 即将获得画笔...
+              </div>
+            );
+          })()}
       </div>
 
       {/* Players */}
@@ -264,7 +279,7 @@ export default function PlayerBar({
             转让画笔
           </button>
         )}
-        {isDrawer && players.length >= 3 && (
+        {isDrawer && players.length >= 3 && phase !== "revealed" && (
           <TransferDropdown
             candidates={players.filter((p) => p.id !== myId)}
             onPick={(id) => onTransfer(id)}
