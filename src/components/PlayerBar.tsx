@@ -9,7 +9,7 @@ interface Props {
   myId: string | null;
   phase: GamePhase;
   maxPlayers: number;
-  onTransfer: () => void;
+  onTransfer: (targetId?: string) => void;
   onContinueDrawing: () => void;
   onLeave: () => void;
 }
@@ -61,6 +61,73 @@ function PlayerOverflow({ players, myId }: { players: PlayerInfo[]; myId: string
               <span>{p.name}</span>
               {p.id === myId && <span className={tx("text-xs text-gray-400")}>(你)</span>}
             </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TransferDropdown({
+  candidates,
+  onPick,
+}: {
+  candidates: PlayerInfo[];
+  onPick: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  return (
+    <div ref={ref} className={tx("relative")} data-transfer-popover>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={tx(
+          "px-3 py-1.5 text-sm bg-amber-50 text-amber-700 hover:bg-amber-100 rounded-lg transition flex items-center gap-1",
+        )}
+      >
+        <span>转让画笔</span>
+        <span className={tx("text-xs")}>▼</span>
+      </button>
+      {open && (
+        <div
+          className={tx(
+            "absolute right-0 top-full mt-1 z-30",
+            "bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px]",
+          )}
+        >
+          {candidates.length === 0 && (
+            <div className={tx("px-3 py-1.5 text-sm text-gray-400")}>无可转让玩家</div>
+          )}
+          {candidates.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onPick(p.id);
+              }}
+              className={tx(
+                "w-full px-3 py-1.5 text-sm text-left text-gray-700 hover:bg-amber-50 flex items-center gap-1.5",
+              )}
+            >
+              <span>🤔</span>
+              <span>{p.name}</span>
+            </button>
           ))}
         </div>
       )}
@@ -188,7 +255,7 @@ export default function PlayerBar({
         )}
         {isDrawer && players.length === 2 && (
           <button
-            onClick={onTransfer}
+            onClick={() => onTransfer()}
             className={tx(
               "px-3 py-1.5 text-sm bg-amber-50 text-amber-700",
               "hover:bg-amber-100 rounded-lg transition",
@@ -196,6 +263,12 @@ export default function PlayerBar({
           >
             转让画笔
           </button>
+        )}
+        {isDrawer && players.length >= 3 && (
+          <TransferDropdown
+            candidates={players.filter((p) => p.id !== myId)}
+            onPick={(id) => onTransfer(id)}
+          />
         )}
         <button
           onClick={onLeave}

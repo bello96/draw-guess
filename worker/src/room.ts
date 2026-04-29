@@ -392,7 +392,7 @@ export class GameRoom implements DurableObject {
         await this.onChat(ws, msg.text as string);
         break;
       case "transfer":
-        await this.onTransfer(ws);
+        await this.onTransfer(ws, msg as { type: string; targetId?: string });
         break;
       case "textStroke":
         await this.onTextStroke(
@@ -1186,19 +1186,36 @@ export class GameRoom implements DurableObject {
     });
   }
 
-  private async onTransfer(ws: WebSocket) {
+  private async onTransfer(ws: WebSocket, msg: { type: string; targetId?: string }) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
     }
 
-    // Find the other player
-    for (const { player: other } of this.getJoinedWebSockets()) {
-      if (other.id !== player.id) {
-        await this.executeTransfer(other.id);
-        break;
+    let targetId = msg.targetId;
+    if (!targetId) {
+      // 兼容 2 人 / 旧客户端：转给非自己的第一个
+      for (const { player: other } of this.getJoinedWebSockets()) {
+        if (other.id !== player.id) {
+          targetId = other.id;
+          break;
+        }
       }
     }
+    if (!targetId) {
+      return;
+    }
+
+    // 验证 targetId 是当前在线玩家且不是自己
+    const targetOnline = this.getJoinedWebSockets().some(({ player: p }) => p.id === targetId);
+    if (!targetOnline) {
+      return;
+    }
+    if (targetId === player.id) {
+      return;
+    }
+
+    await this.executeTransfer(targetId);
   }
 
   private async executeTransfer(newDrawerId: string) {

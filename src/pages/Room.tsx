@@ -442,14 +442,18 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     syncHistoryFlags();
   };
 
-  const handleTransfer = () => {
+  const handleTransfer = (targetId?: string) => {
     setEditingShape(null);
     if (editingSelection) {
       cancelLocalSelection();
       setEditingSelection(null);
     }
     redoStackRef.current = [];
-    send({ type: "transfer" });
+    if (targetId) {
+      send({ type: "transfer", targetId });
+    } else {
+      send({ type: "transfer" });
+    }
     syncHistoryFlags();
   };
 
