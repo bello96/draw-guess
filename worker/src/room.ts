@@ -211,11 +211,21 @@ export class GameRoom implements DurableObject {
   }
 
   private getPlayerInfoList(): PlayerInfo[] {
-    return this.getJoinedWebSockets().map(({ player }) => ({
-      id: player.id,
-      name: player.name,
-      isOwner: player.id === this.drawerId,
-    }));
+    const joined = new Map(
+      this.getJoinedWebSockets().map(({ player }) => [player.id, player]),
+    );
+    const result: PlayerInfo[] = [];
+    for (const id of this.joinOrder) {
+      const player = joined.get(id);
+      if (player) {
+        result.push({
+          id: player.id,
+          name: player.name,
+          isOwner: player.id === this.drawerId,
+        });
+      }
+    }
+    return result;
   }
 
   private canMutateCanvas(): boolean {

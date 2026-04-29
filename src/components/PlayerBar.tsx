@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { tx } from "@twind/core";
 import type { PlayerInfo, GamePhase } from "../types/protocol";
 
@@ -8,9 +8,64 @@ interface Props {
   drawerId: string | null;
   myId: string | null;
   phase: GamePhase;
+  maxPlayers: number;
   onTransfer: () => void;
   onContinueDrawing: () => void;
   onLeave: () => void;
+}
+
+function PlayerOverflow({ players, myId }: { players: PlayerInfo[]; myId: string | null }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  return (
+    <div ref={ref} className={tx("relative")}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={tx(
+          "flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-100 text-gray-600 hover:bg-gray-200 transition",
+        )}
+      >
+        <span>+{players.length}</span>
+        <span className={tx("text-xs")}>▼</span>
+      </button>
+      {open && (
+        <div
+          className={tx(
+            "absolute left-1/2 -translate-x-1/2 top-full mt-1 z-30",
+            "bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[140px]",
+          )}
+        >
+          {players.map((p) => (
+            <div
+              key={p.id}
+              className={tx(
+                "px-3 py-1.5 text-sm text-gray-700 flex items-center gap-1.5",
+              )}
+            >
+              <span>🤔</span>
+              <span>{p.name}</span>
+              {p.id === myId && <span className={tx("text-xs text-gray-400")}>(你)</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function PlayerBar({
@@ -19,6 +74,7 @@ export default function PlayerBar({
   drawerId,
   myId,
   phase,
+  maxPlayers,
   onTransfer,
   onContinueDrawing,
   onLeave,
@@ -43,7 +99,7 @@ export default function PlayerBar({
           <span className={tx("font-mono text-lg font-bold text-indigo-600 tracking-wider")}>
             {roomCode}
           </span>
-          {players.length === 1 && (
+          {players.length < maxPlayers && (
             <button
               onClick={handleCopyLink}
               className={tx(
@@ -78,23 +134,42 @@ export default function PlayerBar({
 
       {/* Players */}
       <div className={tx("flex items-center gap-3")}>
-        {players.map((p) => (
-          <div
-            key={p.id}
-            className={tx(
-              "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm",
-              p.id === drawerId ? "bg-indigo-50 text-indigo-700" : "bg-gray-50 text-gray-700",
-              p.id === myId && "font-semibold",
-            )}
-          >
-            <span>{p.id === drawerId ? "🎨" : "🤔"}</span>
-            <span>{p.name}</span>
-            {p.id === myId && <span className={tx("text-xs text-gray-400")}>(你)</span>}
-          </div>
-        ))}
-        {players.length < 2 && (
-          <div className={tx("text-sm text-gray-400 animate-pulse")}>等待对方加入...</div>
-        )}
+        {(() => {
+          const drawerPlayer = players.find((p) => p.id === drawerId);
+          const others = players.filter((p) => p.id !== drawerId);
+          const visible: PlayerInfo[] = [];
+          if (drawerPlayer) {
+            visible.push(drawerPlayer);
+          }
+          if (others.length > 0) {
+            visible.push(others[0]);
+          }
+          const overflow = others.slice(1);
+          return (
+            <>
+              {visible.map((p) => (
+                <div
+                  key={p.id}
+                  className={tx(
+                    "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm",
+                    p.id === drawerId
+                      ? "bg-indigo-50 text-indigo-700"
+                      : "bg-gray-50 text-gray-700",
+                    p.id === myId && "font-semibold",
+                  )}
+                >
+                  <span>{p.id === drawerId ? "🎨" : "🤔"}</span>
+                  <span>{p.name}</span>
+                  {p.id === myId && <span className={tx("text-xs text-gray-400")}>(你)</span>}
+                </div>
+              ))}
+              {overflow.length > 0 && <PlayerOverflow players={overflow} myId={myId} />}
+              {players.length < 2 && (
+                <div className={tx("text-sm text-gray-400 animate-pulse")}>等待玩家加入...</div>
+              )}
+            </>
+          );
+        })()}
       </div>
 
       {/* Actions */}

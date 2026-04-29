@@ -50,6 +50,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const [confettiKey, setConfettiKey] = useState(0);
   const [joinError, setJoinError] = useState("");
   const [toast, setToast] = useState<{ message: string; type: ToastType; id: number } | null>(null);
+  const [maxPlayers, setMaxPlayers] = useState<number>(2);
 
   // Drawing state
   const [color, setColor] = useState("#000000");
@@ -191,6 +192,9 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           setPlayers(msg.players);
           setDrawerId(msg.drawerId);
           setPhase(msg.phase);
+          if (typeof msg.maxPlayers === "number") {
+            setMaxPlayers(msg.maxPlayers);
+          }
           if (msg.answerLength) {
             setAnswerLength(msg.answerLength);
           }
@@ -756,6 +760,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         drawerId={drawerId}
         myId={myId}
         phase={phase}
+        maxPlayers={maxPlayers}
         onTransfer={handleTransfer}
         onContinueDrawing={handleContinueDrawing}
         onLeave={handleLeave}
