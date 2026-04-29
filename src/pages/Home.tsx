@@ -8,7 +8,7 @@ interface Props {
 }
 
 export default function Home({ onEnterRoom }: Props) {
-  const [mode, setMode] = useState<"menu" | "join">("menu");
+  const [mode, setMode] = useState<"menu" | "create" | "join">("menu");
   const [joinCode, setJoinCode] = useState("");
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -69,10 +69,9 @@ export default function Home({ onEnterRoom }: Props) {
           />
         </div>
 
-        {/* Max players (only shown in menu mode) */}
-        {mode === "menu" && (
+        {/* Max players (only shown in create mode) */}
+        {mode === "create" && (
           <div className={tx("mb-6")}>
-            <label className={tx("block text-sm font-medium text-gray-700 mb-1")}>房间人数</label>
             <div className={tx("flex gap-2")}>
               {[2, 3, 4, 5, 6].map((n) => (
                 <button
@@ -99,7 +98,30 @@ export default function Home({ onEnterRoom }: Props) {
           </div>
         )}
 
-        {mode === "menu" ? (
+        {mode === "menu" && (
+          <div className={tx("space-y-3")}>
+            <button
+              onClick={() => setMode("create")}
+              className={tx(
+                "w-full py-3 px-4 bg-white text-indigo-600 font-semibold rounded-lg",
+                "border-2 border-indigo-600 hover:bg-indigo-50 transition",
+              )}
+            >
+              创建房间
+            </button>
+            <button
+              onClick={() => setMode("join")}
+              className={tx(
+                "w-full py-3 px-4 bg-white text-indigo-600 font-semibold rounded-lg",
+                "border-2 border-indigo-600 hover:bg-indigo-50 transition",
+              )}
+            >
+              加入房间
+            </button>
+          </div>
+        )}
+
+        {mode === "create" && (
           <div className={tx("space-y-3")}>
             <button
               onClick={handleCreate}
@@ -112,16 +134,18 @@ export default function Home({ onEnterRoom }: Props) {
               {loading ? "创建中..." : "创建房间"}
             </button>
             <button
-              onClick={() => setMode("join")}
-              className={tx(
-                "w-full py-3 px-4 bg-white text-indigo-600 font-semibold rounded-lg",
-                "border-2 border-indigo-600 hover:bg-indigo-50 transition",
-              )}
+              onClick={() => {
+                setMode("menu");
+                setError("");
+              }}
+              className={tx("w-full py-2 text-gray-500 hover:text-gray-700 transition text-sm")}
             >
-              加入房间
+              返回
             </button>
           </div>
-        ) : (
+        )}
+
+        {mode === "join" && (
           <div className={tx("space-y-3")}>
             <input
               type="text"

@@ -2,6 +2,20 @@ import { useState, useRef, useEffect } from "react";
 import { tx } from "@twind/core";
 import type { PlayerInfo, GamePhase } from "../types/protocol";
 
+function IconDropdown() {
+  return (
+    <svg
+      viewBox="0 0 1024 1024"
+      width="12"
+      height="12"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M512 652.8c-9.728 0-19.456-3.584-27.136-11.264l-204.8-204.8c-14.848-14.848-14.848-39.424 0-54.272s39.424-14.848 54.272 0l177.664 177.664 177.664-177.664c14.848-14.848 39.424-14.848 54.272 0s14.848 39.424 0 54.272l-204.8 204.8c-7.68 7.68-17.408 11.264-27.136 11.264z" />
+    </svg>
+  );
+}
+
 interface Props {
   roomCode: string;
   players: PlayerInfo[];
@@ -42,7 +56,7 @@ function PlayerOverflow({ players, myId }: { players: PlayerInfo[]; myId: string
         )}
       >
         <span>+{players.length}</span>
-        <span className={tx("text-xs")}>▼</span>
+        <IconDropdown />
       </button>
       {open && (
         <div
@@ -102,7 +116,7 @@ function TransferDropdown({
         )}
       >
         <span>转让画笔</span>
-        <span className={tx("text-xs")}>▼</span>
+        <IconDropdown />
       </button>
       {open && (
         <div
@@ -162,8 +176,8 @@ export default function PlayerBar({
   return (
     <div className={tx("flex items-center justify-between p-3 bg-white rounded-xl shadow-sm")}>
       {/* Room info */}
-      <div className={tx("flex items-center gap-4 w-[300px]")}>
-        <div className={tx("flex items-center gap-2")}>
+      <div className={tx("flex items-center gap-4 flex-shrink-0")}>
+        <div className={tx("flex items-center gap-2 whitespace-nowrap")}>
           <span className={tx("text-sm text-gray-500")}>房间号</span>
           <span className={tx("font-mono text-lg font-bold text-indigo-600 tracking-wider")}>
             {roomCode}
@@ -172,7 +186,7 @@ export default function PlayerBar({
             <button
               onClick={handleCopyLink}
               className={tx(
-                "px-2 py-0.5 text-xs rounded-md transition",
+                "px-2 py-0.5 text-xs rounded-md transition whitespace-nowrap",
                 copied
                   ? "bg-green-100 text-green-700"
                   : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100",
@@ -187,7 +201,7 @@ export default function PlayerBar({
         {/* Phase indicator */}
         <div
           className={tx(
-            "px-2.5 py-1 rounded-full text-xs font-medium",
+            "px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap",
             phase === "waiting" && "bg-yellow-100 text-yellow-700",
             phase === "drawing" && "bg-blue-100 text-blue-700",
             phase === "guessing" && "bg-green-100 text-green-700",
@@ -207,7 +221,7 @@ export default function PlayerBar({
               return null;
             }
             return (
-              <div className={tx("text-xs text-purple-700 ml-2 truncate max-w-[180px]")}>
+              <div className={tx("text-xs text-purple-700 whitespace-nowrap")}>
                 🏆 {winner.name} 即将获得画笔...
               </div>
             );
@@ -256,7 +270,7 @@ export default function PlayerBar({
       </div>
 
       {/* Actions */}
-      <div className={tx("flex items-center justify-end gap-2 w-[300px]")}>
+      <div className={tx("flex items-center justify-end gap-2 flex-shrink-0")}>
         {isDrawer &&
           phase === "revealed" &&
           (players.length === 2 || (players.length >= 3 && !pendingPromotionId)) && (
