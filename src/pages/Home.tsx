@@ -13,6 +13,7 @@ export default function Home({ onEnterRoom }: Props) {
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [maxPlayers, setMaxPlayers] = useState<number>(2);
 
   const handleCreate = async () => {
     if (!name.trim()) {
@@ -22,7 +23,7 @@ export default function Home({ onEnterRoom }: Props) {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(apiUrl("/api/rooms"), { method: "POST" });
+      const res = await fetch(apiUrl(`/api/rooms?max=${maxPlayers}`), { method: "POST" });
       const data = await res.json();
       onEnterRoom(data.roomCode, name.trim());
     } catch {
@@ -67,6 +68,30 @@ export default function Home({ onEnterRoom }: Props) {
             )}
           />
         </div>
+
+        {/* Max players (only shown in menu mode) */}
+        {mode === "menu" && (
+          <div className={tx("mb-6")}>
+            <label className={tx("block text-sm font-medium text-gray-700 mb-1")}>房间人数</label>
+            <div className={tx("flex gap-2")}>
+              {[2, 3, 4, 5, 6].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setMaxPlayers(n)}
+                  className={tx(
+                    "flex-1 py-2 text-sm rounded-lg transition border-2",
+                    maxPlayers === n
+                      ? "bg-indigo-600 text-white border-indigo-600"
+                      : "bg-white text-gray-600 border-gray-200 hover:border-indigo-300",
+                  )}
+                >
+                  {n}人
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className={tx("bg-red-50 text-red-600 px-4 py-2 rounded-lg mb-4 text-sm")}>
