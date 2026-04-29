@@ -135,16 +135,17 @@ export default function PlayerBar({
       {/* Players */}
       <div className={tx("flex items-center gap-3")}>
         {(() => {
-          const drawerPlayer = players.find((p) => p.id === drawerId);
-          const others = players.filter((p) => p.id !== drawerId);
-          const visible: PlayerInfo[] = [];
+          const drawerPlayer = drawerId ? players.find((p) => p.id === drawerId) : undefined;
+          let visible: PlayerInfo[];
+          let overflow: PlayerInfo[];
           if (drawerPlayer) {
-            visible.push(drawerPlayer);
+            const others = players.filter((p) => p.id !== drawerId);
+            visible = others.length > 0 ? [drawerPlayer, others[0]] : [drawerPlayer];
+            overflow = others.slice(1);
+          } else {
+            visible = players.slice(0, 2);
+            overflow = players.slice(2);
           }
-          if (others.length > 0) {
-            visible.push(others[0]);
-          }
-          const overflow = others.slice(1);
           return (
             <>
               {visible.map((p) => (
