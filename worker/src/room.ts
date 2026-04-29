@@ -218,6 +218,10 @@ export class GameRoom implements DurableObject {
     }));
   }
 
+  private canMutateCanvas(): boolean {
+    return this.phase === "drawing" || this.phase === "waiting";
+  }
+
   // ============ HTTP fetch handler ============
 
   async fetch(request: Request): Promise<Response> {
@@ -723,6 +727,9 @@ export class GameRoom implements DurableObject {
     if (!player || player.id !== this.drawerId) {
       return;
     }
+    if (!this.canMutateCanvas()) {
+      return;
+    }
 
     // Track stroke for replay
     if (msg.action === "start") {
@@ -789,6 +796,9 @@ export class GameRoom implements DurableObject {
     if (!player || player.id !== this.drawerId) {
       return;
     }
+    if (!this.canMutateCanvas()) {
+      return;
+    }
 
     const text = (msg.text || "").slice(0, MAX_TEXT_STROKE_LENGTH);
     if (!text) {
@@ -835,6 +845,9 @@ export class GameRoom implements DurableObject {
   ) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (!this.canMutateCanvas()) {
       return;
     }
     if (
@@ -893,6 +906,9 @@ export class GameRoom implements DurableObject {
     if (!player || player.id !== this.drawerId) {
       return;
     }
+    if (!this.canMutateCanvas()) {
+      return;
+    }
 
     const stroke: SerializedStroke = {
       points: [{ x: msg.x, y: msg.y }],
@@ -932,6 +948,9 @@ export class GameRoom implements DurableObject {
     if (!player || player.id !== this.drawerId) {
       return;
     }
+    if (!this.canMutateCanvas()) {
+      return;
+    }
 
     const stroke: SerializedStroke = {
       points: [],
@@ -969,6 +988,9 @@ export class GameRoom implements DurableObject {
     if (!player || player.id !== this.drawerId) {
       return;
     }
+    if (!this.canMutateCanvas()) {
+      return;
+    }
 
     this.strokes = [];
     this.redoStack = [];
@@ -980,6 +1002,9 @@ export class GameRoom implements DurableObject {
   private async onUndo(ws: WebSocket) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (!this.canMutateCanvas()) {
       return;
     }
 
@@ -999,6 +1024,9 @@ export class GameRoom implements DurableObject {
     if (!player || player.id !== this.drawerId) {
       return;
     }
+    if (!this.canMutateCanvas()) {
+      return;
+    }
     if (this.redoStack.length === 0) {
       return;
     }
@@ -1015,6 +1043,9 @@ export class GameRoom implements DurableObject {
   private async onSetAnswer(ws: WebSocket, answer: string) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (this.phase !== "drawing") {
       return;
     }
     if (!answer || answer.trim().length === 0) {

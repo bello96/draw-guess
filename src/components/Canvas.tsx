@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { tx } from "@twind/core";
 import type { ToolMode } from "./Toolbar";
+import type { GamePhase } from "../types/protocol";
 import {
   scaleLineWidth,
   computeArrowGeometry,
@@ -43,6 +44,7 @@ export interface EditingSelection {
 interface Props {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   isDrawer: boolean;
+  phase: GamePhase;
   tool?: ToolMode;
   onResize?: () => void;
   onCanvasClick?: (e: React.MouseEvent<HTMLCanvasElement>) => void;
@@ -230,6 +232,7 @@ function LinePreviewSvg({
 export default function Canvas({
   canvasRef,
   isDrawer,
+  phase,
   tool = "pen",
   onResize,
   onCanvasClick,
@@ -700,8 +703,9 @@ export default function Canvas({
     return { bx, by, bw, bh, scaledLW, p0, p1 };
   }, [editingShape, canvasRef]);
 
+  const canDraw = isDrawer && phase === "drawing";
   const cursorClass =
-    isDrawer && tool === "text" ? "cursor-text" : isDrawer ? "cursor-crosshair" : "cursor-default";
+    canDraw && tool === "text" ? "cursor-text" : canDraw ? "cursor-crosshair" : "cursor-default";
 
   const renderHandle = (
     left: number,

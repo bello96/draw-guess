@@ -156,6 +156,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     onShapeDrawn: handleShapeDrawn,
     onLocalPenEnd: handleLocalPenEnd,
     onSelectionDrawn: handleSelectionDrawn,
+    phase,
   });
 
   // Canvas resize handler — blit the cached offscreen onto the (now resized)
@@ -739,6 +740,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           <Canvas
             canvasRef={canvasRef}
             isDrawer={isDrawer}
+            phase={phase}
             tool={tool}
             onResize={handleCanvasResize}
             onCanvasClick={handleCanvasClickForText}
@@ -768,7 +770,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             onRedo={handleRedo}
             canUndo={canUndo}
             canRedo={canRedo}
-            disabled={!isDrawer}
+            disabled={!isDrawer || phase !== "drawing"}
           />
         </div>
 

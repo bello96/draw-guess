@@ -1,5 +1,5 @@
 import { useRef, useCallback, useEffect } from "react";
-import type { BrushType, ClientMessage, S_Draw, SerializedStroke } from "../types/protocol";
+import type { BrushType, ClientMessage, GamePhase, S_Draw, SerializedStroke } from "../types/protocol";
 import type { FillMode, ToolMode } from "../components/Toolbar";
 
 type Point = { x: number; y: number };
@@ -34,6 +34,8 @@ interface UseCanvasOptions {
   onShapeDrawn?: (shape: DrawnShape) => void;
   /** Fired when a local pen stroke finishes (commit path without editing-overlay). */
   onLocalPenEnd?: () => void;
+  /** Current game phase — used to lock canvas input when not in drawing phase. */
+  phase: GamePhase;
   /**
    * Mouseup after drawing a selection rectangle. The hook has already extracted
    * the patch from the offscreen and whitened the src region; the callback
@@ -987,6 +989,7 @@ export function useCanvas({
   onShapeDrawn,
   onLocalPenEnd,
   onSelectionDrawn,
+  phase,
 }: UseCanvasOptions) {
   const isDrawingRef = useRef(false);
   const strokesRef = useRef<SerializedStroke[]>([]);
@@ -1326,6 +1329,9 @@ export function useCanvas({
       };
 
       const onMouseDown = (e: MouseEvent) => {
+        if (phase !== "drawing") {
+          return;
+        }
         isDrawingRef.current = true;
         const { x, y } = normalize(e);
         lastPos = { x, y };
@@ -1349,6 +1355,9 @@ export function useCanvas({
       };
 
       const onMouseMove = (e: MouseEvent) => {
+        if (phase !== "drawing") {
+          return;
+        }
         if (!isDrawingRef.current) {
           return;
         }
@@ -1360,6 +1369,9 @@ export function useCanvas({
       };
 
       const onMouseUp = (e: MouseEvent) => {
+        if (phase !== "drawing") {
+          return;
+        }
         if (!isDrawingRef.current) {
           return;
         }
@@ -1414,6 +1426,9 @@ export function useCanvas({
     if (tool === "bucket") {
       const FILL_TOLERANCE = 32;
       const onClick = (e: MouseEvent) => {
+        if (phase !== "drawing") {
+          return;
+        }
         const normX = e.offsetX / canvas.width;
         const normY = e.offsetY / canvas.height;
         addFill(normX, normY, color, FILL_TOLERANCE);
@@ -1431,9 +1446,15 @@ export function useCanvas({
       const MIN_SIZE_PX = 20;
       let startPx: Point | null = null;
       const onDown = (e: MouseEvent) => {
+        if (phase !== "drawing") {
+          return;
+        }
         startPx = { x: e.offsetX, y: e.offsetY };
       };
       const onMove = (e: MouseEvent) => {
+        if (phase !== "drawing") {
+          return;
+        }
         if (!startPx) {
           return;
         }
@@ -1449,6 +1470,9 @@ export function useCanvas({
         ctx.setLineDash([]);
       };
       const onUp = (e: MouseEvent) => {
+        if (phase !== "drawing") {
+          return;
+        }
         if (!startPx) {
           return;
         }
@@ -1477,6 +1501,9 @@ export function useCanvas({
         }
       };
       const onLeave = () => {
+        if (phase !== "drawing") {
+          return;
+        }
         if (!startPx) {
           return;
         }
@@ -1504,6 +1531,9 @@ export function useCanvas({
     let shapeStart: Point | null = null;
 
     const onShapeDown = (e: MouseEvent) => {
+      if (phase !== "drawing") {
+        return;
+      }
       shapeStart = normalize(e);
     };
 
@@ -1515,6 +1545,9 @@ export function useCanvas({
     });
 
     const onShapeMove = (e: MouseEvent) => {
+      if (phase !== "drawing") {
+        return;
+      }
       if (!shapeStart) {
         return;
       }
@@ -1530,6 +1563,9 @@ export function useCanvas({
     // mouseup 与 mouseleave 都走这里——参考 pen 的做法：鼠标离开边界 =
     // 在边界处提交形状（坐标已被 clampToCanvas 钳到画布内），而不是清空预览。
     const onShapeUp = (e: MouseEvent) => {
+      if (phase !== "drawing") {
+        return;
+      }
       if (!shapeStart) {
         return;
       }
@@ -1589,6 +1625,7 @@ export function useCanvas({
     onSelectionDrawn,
     addFill,
     beginSelection,
+    phase,
   ]);
 
   // Replay a remote draw event (pen). 与本地 pen 同样的 alpha 修复：
