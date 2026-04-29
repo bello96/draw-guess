@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { tx } from "@twind/core";
 import { apiUrl } from "../api";
+import bgUrl from "../assets/bg.png";
 // apiUrl used only for room creation
 
 interface Props {
@@ -47,7 +48,13 @@ export default function Home({ onEnterRoom }: Props) {
   };
 
   return (
-    <div className={tx("flex flex-col items-center justify-center min-h-screen p-4")}>
+    <div
+      className={tx(
+        "flex flex-col items-center justify-center min-h-screen p-4",
+        "bg-cover bg-center bg-no-repeat",
+      )}
+      style={{ backgroundImage: `url(${bgUrl})` }}
+    >
       <div className={tx("bg-white rounded-2xl shadow-xl p-8 w-full max-w-md")}>
         <h1 className={tx("text-4xl font-bold text-center mb-2 text-indigo-600")}>🎨 我画你猜</h1>
         <p className={tx("text-gray-500 text-center mb-8")}>和朋友一起画画猜词吧！</p>
