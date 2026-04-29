@@ -1329,7 +1329,7 @@ export function useCanvas({
       };
 
       const onMouseDown = (e: MouseEvent) => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         isDrawingRef.current = true;
@@ -1355,7 +1355,7 @@ export function useCanvas({
       };
 
       const onMouseMove = (e: MouseEvent) => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         if (!isDrawingRef.current) {
@@ -1369,7 +1369,7 @@ export function useCanvas({
       };
 
       const onMouseUp = (e: MouseEvent) => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         if (!isDrawingRef.current) {
@@ -1426,7 +1426,7 @@ export function useCanvas({
     if (tool === "bucket") {
       const FILL_TOLERANCE = 32;
       const onClick = (e: MouseEvent) => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         const normX = e.offsetX / canvas.width;
@@ -1446,13 +1446,13 @@ export function useCanvas({
       const MIN_SIZE_PX = 20;
       let startPx: Point | null = null;
       const onDown = (e: MouseEvent) => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         startPx = { x: e.offsetX, y: e.offsetY };
       };
       const onMove = (e: MouseEvent) => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         if (!startPx) {
@@ -1470,7 +1470,7 @@ export function useCanvas({
         ctx.setLineDash([]);
       };
       const onUp = (e: MouseEvent) => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         if (!startPx) {
@@ -1501,7 +1501,7 @@ export function useCanvas({
         }
       };
       const onLeave = () => {
-        if (phase !== "drawing") {
+        if (phase === "guessing" || phase === "revealed") {
           return;
         }
         if (!startPx) {
@@ -1531,7 +1531,7 @@ export function useCanvas({
     let shapeStart: Point | null = null;
 
     const onShapeDown = (e: MouseEvent) => {
-      if (phase !== "drawing") {
+      if (phase === "guessing" || phase === "revealed") {
         return;
       }
       shapeStart = normalize(e);
@@ -1545,7 +1545,7 @@ export function useCanvas({
     });
 
     const onShapeMove = (e: MouseEvent) => {
-      if (phase !== "drawing") {
+      if (phase === "guessing" || phase === "revealed") {
         return;
       }
       if (!shapeStart) {
@@ -1563,7 +1563,7 @@ export function useCanvas({
     // mouseup 与 mouseleave 都走这里——参考 pen 的做法：鼠标离开边界 =
     // 在边界处提交形状（坐标已被 clampToCanvas 钳到画布内），而不是清空预览。
     const onShapeUp = (e: MouseEvent) => {
-      if (phase !== "drawing") {
+      if (phase === "guessing" || phase === "revealed") {
         return;
       }
       if (!shapeStart) {

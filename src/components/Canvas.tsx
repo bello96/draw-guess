@@ -703,7 +703,7 @@ export default function Canvas({
     return { bx, by, bw, bh, scaledLW, p0, p1 };
   }, [editingShape, canvasRef]);
 
-  const canDraw = isDrawer && phase === "drawing";
+  const canDraw = isDrawer && (phase === "drawing" || phase === "waiting");
   const cursorClass =
     canDraw && tool === "text" ? "cursor-text" : canDraw ? "cursor-crosshair" : "cursor-default";
 

@@ -316,9 +316,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           if (msg.answerLength) {
             setAnswerLength(msg.answerLength);
           }
-          // 切到非 drawing 阶段时，清理所有 in-progress editing overlay，
-          // 避免本地继续操作未 commit 的 overlay 后两端画面 diverge
-          if (msg.phase !== "drawing") {
+          // 切到 guessing/revealed 阶段时清理所有 in-progress editing overlay，
+          // 避免本地继续操作未 commit 的 overlay 后两端画面 diverge。waiting 阶段
+          // 仍允许 drawer 涂鸦，overlay 不清。
+          if (msg.phase === "guessing" || msg.phase === "revealed") {
             setEditingShape(null);
             setEditingText(null);
             if (editingSelection) {
@@ -477,7 +478,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit editing text to canvas and sync to server
   const commitEditingText = useCallback(() => {
-    if (phase !== "drawing") {
+    if (phase === "guessing" || phase === "revealed") {
       setEditingText(null);
       return;
     }
@@ -508,7 +509,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   // Text tool: click on canvas to create editing text
   const handleCanvasClickForText = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (phase !== "drawing") {
+      if (phase === "guessing" || phase === "revealed") {
         return;
       }
       if (!isDrawer || tool !== "text") {
@@ -546,7 +547,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit the current editing shape: draw onto canvas + sync to the other player.
   const commitEditingShape = useCallback(() => {
-    if (phase !== "drawing") {
+    if (phase === "guessing" || phase === "revealed") {
       setEditingShape(null);
       return;
     }
@@ -589,7 +590,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit the current editing selection: paste patch at final dst + sync peer.
   const commitEditingSelection = useCallback(() => {
-    if (phase !== "drawing") {
+    if (phase === "guessing" || phase === "revealed") {
       cancelLocalSelection();
       setEditingSelection(null);
       return;
@@ -837,7 +838,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             onRedo={handleRedo}
             canUndo={canUndo}
             canRedo={canRedo}
-            disabled={!isDrawer || phase !== "drawing"}
+            disabled={!isDrawer || phase === "guessing" || phase === "revealed"}
           />
         </div>
 

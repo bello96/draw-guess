@@ -1348,22 +1348,6 @@ export class GameRoom implements DurableObject {
         playerId: dp.id,
       });
 
-      // If the drawer left, select next drawer by joinOrder
-      if (dp.id === this.drawerId) {
-        let newDrawer: string | null = null;
-        for (const id of this.joinOrder) {
-          if (this.isPlayerActive(id)) {
-            newDrawer = id;
-            break;
-          }
-        }
-        // Fallback: joinOrder 与 allRemaining 不一致时仍能选出 drawer
-        if (!newDrawer && allRemaining.length > 0) {
-          newDrawer = allRemaining[0].id;
-        }
-        this.drawerId = newDrawer;
-      }
-
       // 猜对者离线：保持 revealed 阶段，重发 phaseChange 但不含 pendingPromotionId，
       // 让前端回到"继续出题/转让画笔"按钮
       if (wasPendingPromotion && this.phase === "revealed") {
@@ -1376,18 +1360,59 @@ export class GameRoom implements DurableObject {
         return;
       }
 
-      // Re-open the room so a new player can join
-      this.pendingPromotionId = null;
-      this.phase = "waiting";
-      this.answer = null;
+      const wasDrawer = dp.id === this.drawerId;
 
-      await this.saveState();
+      if (wasDrawer) {
+        // drawer 离开：切下家 + 清画板 + 重置 phase（旧画作对应已清的旧 answer，无意义）
+        let newDrawer: string | null = null;
+        for (const id of this.joinOrder) {
+          if (this.isPlayerActive(id)) {
+            newDrawer = id;
+            break;
+          }
+        }
+        if (!newDrawer) {
+          newDrawer = allRemaining[0].id;
+        }
+        this.drawerId = newDrawer;
 
-      this.broadcast({
-        type: "phaseChange",
-        phase: "waiting",
-        drawerId: this.drawerId!,
-      });
+        this.strokes = [];
+        this.redoStack = [];
+        this.currentStrokePoints = [];
+        await this.clearStrokeStorage();
+        this.answer = null;
+        this.pendingPromotionId = null;
+
+        // phase 看当前连接数（不含 grace）：≥2 立即 drawing，否则等人 waiting
+        const connectedCount = this.getJoinedWebSockets().length;
+        this.phase = connectedCount >= 2 ? "drawing" : "waiting";
+
+        await this.saveState();
+
+        this.broadcast({ type: "clear" });
+        this.broadcast({
+          type: "phaseChange",
+          phase: this.phase,
+          drawerId: this.drawerId!,
+        });
+      } else {
+        // 非 drawer 离开：phase / drawer / 画板尽量保持；仅当剩 drawer 自己时降级 waiting
+        const connectedCount = this.getJoinedWebSockets().length;
+        if (connectedCount < 2) {
+          this.phase = "waiting";
+          this.answer = null;
+          this.pendingPromotionId = null;
+          await this.saveState();
+          this.broadcast({
+            type: "phaseChange",
+            phase: "waiting",
+            drawerId: this.drawerId!,
+          });
+        } else {
+          // ≥2 人在线：游戏继续，phase / drawer / answer / 画板都不变
+          await this.saveState();
+        }
+      }
     } else {
       // Room is truly empty, reset everything
       this.created = false;
