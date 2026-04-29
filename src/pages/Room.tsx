@@ -850,6 +850,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             myId={myId}
             answerLength={answerLength}
             answerText={answerText}
+            playerCount={players.length}
             onSendChat={handleSendChat}
             onGuess={handleGuess}
             onSetAnswer={handleSetAnswer}

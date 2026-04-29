@@ -11,6 +11,7 @@ interface Props {
   myId: string | null;
   answerLength: number | null;
   answerText: string | null;
+  playerCount: number;
   onSendChat: (text: string) => void;
   onGuess: (text: string) => void;
   onSetAnswer: (answer: string) => void;
@@ -64,6 +65,7 @@ export default function ChatPanel({
   myId,
   answerLength,
   answerText,
+  playerCount,
   onSendChat,
   onGuess,
   onSetAnswer,
@@ -185,7 +187,9 @@ export default function ChatPanel({
       {/* Unified input */}
       <div className={tx("px-3 py-2 border-t border-gray-100")}>
         {mode === "setAnswer" && (
-          <div className={tx("text-xs text-indigo-600 mb-1.5")}>设置答案后对方才能开始猜</div>
+          <div className={tx("text-xs text-indigo-600 mb-1.5")}>
+            {playerCount > 2 ? "设置答案后其他玩家才能开始猜" : "设置答案后对方才能开始猜"}
+          </div>
         )}
         <div className={tx("flex gap-2 items-center")}>
           <input
