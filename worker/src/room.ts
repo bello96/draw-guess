@@ -296,7 +296,7 @@ export class GameRoom implements DurableObject {
       return new Response(
         JSON.stringify({
           playerCount: this.getEffectivePlayerCount(),
-          closed: this.phase !== "waiting", // 派生：非 waiting 阶段即视为已关闭
+          closed: this.getEffectivePlayerCount() >= this.maxPlayers, // 满员才视为已关闭
           phase: this.phase,
           created: this.created,
         }),
@@ -1377,6 +1377,7 @@ export class GameRoom implements DurableObject {
       }
 
       // Re-open the room so a new player can join
+      this.pendingPromotionId = null;
       this.phase = "waiting";
       this.answer = null;
 
