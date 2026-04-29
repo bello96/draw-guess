@@ -1192,7 +1192,10 @@ export class GameRoom implements DurableObject {
       return;
     }
 
-    let targetId = msg.targetId;
+    let targetId: string | undefined =
+      typeof msg.targetId === "string" && msg.targetId.length > 0
+        ? msg.targetId
+        : undefined;
     if (!targetId) {
       // 兼容 2 人 / 旧客户端：转给非自己的第一个
       for (const { player: other } of this.getJoinedWebSockets()) {
