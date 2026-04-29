@@ -88,10 +88,10 @@ export default function Home({ onEnterRoom }: Props) {
                   type="button"
                   onClick={() => setMaxPlayers(n)}
                   className={tx(
-                    "flex-1 py-2 text-sm rounded-lg transition border-2",
+                    "flex-1 py-2 text-sm rounded-lg transition border-2 bg-white",
                     maxPlayers === n
-                      ? "bg-indigo-600 text-white border-indigo-600"
-                      : "bg-white text-gray-600 border-gray-200 hover:border-indigo-300",
+                      ? "text-indigo-600 border-indigo-600"
+                      : "text-gray-600 border-gray-200 hover:border-indigo-300",
                   )}
                 >
                   {n}人
@@ -146,7 +146,7 @@ export default function Home({ onEnterRoom }: Props) {
                 "hover:bg-indigo-700 transition disabled:opacity-50",
               )}
             >
-              {loading ? "创建中..." : "创建房间"}
+              {loading ? "创建中..." : "确认创建"}
             </button>
             <button
               onClick={() => {
