@@ -390,6 +390,10 @@ cd worker && npx wrangler dev
 
 **桶不带 alpha**：fill 只用 `(fr, fg, fb)`，paint 时 `data[idx+3] = 255`。透明度反直觉（多次填充会叠加），永远不应用。
 
+**⚠️ visited 位图（关键修复，不可回退）**：scanlineFill 内部用 `Uint8Array(w * h)` 记录已 paint 的像素，`matches()` 优先检查 visited 返回 false。**这是必要的**：fill 色与 target 色在容差内但不**完全相等**时（吸管吸到画布反走样像素的经典场景），painted 像素的 RGB 仍落在 matches 容差里，**没有 visited 会反复 push 进 stack 导致死循环 (Array.push 抛 `RangeError: Invalid array length`) + 浏览器卡死崩溃**。matches/paint 的入参是像素索引 `px`（不是字节偏移 `idx`），内部 `idx = px * 4`。
+
+**offscreen `willReadFrequently: true`**：offscreen canvas 创建时一定要用 `getContext("2d", { willReadFrequently: true })` —— bucket 每次 fill 都要 `getImageData` 整张 readback，不设此 flag 浏览器走 GPU readback 慢路径并发 console warning（`Multiple readback operations using getImageData are faster with willReadFrequently...`）。flag 一旦 context 创建就固定，所有后续 `offs.getContext("2d")` 返回同一个 context 忽略 flag，所以仅需在初始化处设置一次。
+
 ---
 
 ## 十二、画笔逐帧重绘（pen overdraw 修复）
@@ -437,3 +441,59 @@ cd worker && npx wrangler dev
 - **历史新增过又移除**：`react-colorful` —— 一开始用，后来因不支持竖向 hue 换成 @uiw（commit `2da549e`）
 - **历史新增过又移除**：`useRecentColors` hook + `stripAlpha` 工具 —— 最近色和透明度功能都被用户砍掉
 - 装包统一加 `--legacy-peer-deps`（`@twind/core` peer 范围旧）
+
+---
+
+## 十六、心形几何（pathHeart / svgPathHeart）
+
+6 段贝塞尔，几何参考 Material Icons ❤️ 的圆润心形：
+- 起点 `(cx, h)` 底部尖端，顺时针绕一圈
+- 凹槽 notch 在 `(cx, 0.114h)` —— 故意做得很浅，让顶部凹槽视觉柔和（旧版 0.30h 太深，凹槽刺眼）
+- 左/右瓣顶尖在 `(0.275w, 0)` / `(0.725w, 0)` —— 收拢到中心一些，避免顶部展成水平长条（旧版在 0.30w 处水平切线 + 相邻控制点贴 y=0，曲线在两瓣顶部"贴着 y=0 水平爬"）
+- 段 2/3/4/5 通过相邻控制点保持 C1 平滑（控制点共线），瓣顶是圆弧顶点而非平台
+- 底部尖端两侧控制点 `(0.17w/0.83w, 0.673h)`，斜向 ~45° 收敛 —— 不针状
+
+`pathHeart` (canvas) 与 `svgPathHeart` (编辑态 SVG 预览) **必须几何完全一致**——overlay 预览要与 canvas 渲染像素对齐。改一边必须同步另一边。
+
+---
+
+## 十七、Room.tsx 连接管理（关键，不要回退）
+
+### listener 必须用 ref 模式
+`Room.tsx` 的消息 listener 用 `messageHandlerRef` 持有最新闭包，effect 依赖只留 `[addListener]`，**注册一次永不卸载**。
+
+为什么不能用普通 useEffect + 依赖列表：曾经依赖里有 `editingSelection / onLeave / addSystemMessage` 等多达 14 项变化值，每次变化都触发 add/remove listener。`ws.onmessage` 是浏览器原生事件，理论上可能撞上 listener 卸载窗口导致 `roomState` 等关键消息丢失 → 客户端永远卡在「连接中…」。
+
+ref 模式：每次 render 重新赋值 `messageHandlerRef.current = (msg) => { ... }`（render body 里直接赋值），闭包通过 React 闭包语义自动看到最新 state；listener 从 ref 调用 → 永远命中最新 handler。**不要改回 `addListener((msg) => switch...)` 直接传匿名函数 + 依赖数组的写法**。
+
+### join 超时（首次加入兜底）
+`hasJoinedOnceRef` 标记是否曾经收到过 roomState：
+- 首次加入：10s 内仍 `myId == null` → 设 joinError → 1.5s 后退出
+- 重连场景（`hasJoinedOnceRef.current === true`）：跳过此超时，给慢网络足够时间
+
+### joinError 统一退出 effect
+任何路径 setJoinError 后，统一由一个 effect 在 1.5s 后调用 `onLeave`，cleanup 时取消 timer。`case "error"` / `case "roomClosed"` / join 超时三处都走这条路径。**不要在 case 内部各自 setTimeout**——会导致 timer 散落难追踪、且 onLeave 可能被多次调用。
+
+### 重连不阻断 UI
+渲染条件 `if (!myId || joinError)` 切错误屏（首次未加入 / 加入失败 / 房间被关）。已加入后 ws 断开（`!connected`）保留主 UI，顶部加黄色 banner「网络异常，正在重连…」。画板和聊天上下文不消失。
+
+### case "roomClosed" 走 joinError 路径
+设置 `setJoinError("房间已关闭：" + reason)` 立即切错误屏。**不要回退到 `addSystemMessage + setTimeout(onLeave)`**——那条路径会让服务端紧接着的 ws.close 触发 setConnected(false)，主 UI 上闪一下重连 banner，体验上像 bug。
+
+---
+
+## 十八、服务端 storage 写入节流
+
+### touchActivity 节流（关键性能优化）
+`touchActivity` 在每条非 `join`/`ping` 消息上调用，原本每次都 `storage.put("lastActivityAt")` + `setAlarm`。画手 60Hz 画画时**每秒 60 次 storage 写**，1000 房间满载 = 6 万次/秒 = Cloudflare DO 计费黑洞。
+
+现在改成节流：内存值 `this.lastActivityAt` 每次都更新（保证 inactivity 检查准确），但 `storage.put` + `scheduleNextAlarm` **仅当距离上次持久化超过 `ACTIVITY_PERSIST_MIN_INTERVAL_MS` (30s) 才执行**。新字段 `lastActivityPersistedAt` 仅内存维护，**不持久化**——DO 重启后回到 0，第一次 touchActivity 立即触发持久化（`now - 0 >> 30000`），状态自动同步回一致。
+
+收益：storage 写入量降 ~1800 倍。代价：inactivity 触发精度从「立即」降到 ±30s，10 分钟阈值下完全可忽略。
+
+关键约束：
+- **`onDisconnect` / `/quickleave` 路径直接调 `scheduleNextAlarm`，不走节流** —— grace 期（30s 或 5s）的 alarm 时间需要精准。
+- 节流跳过 alarm 重设可能让 alarm 比真实理想触发时间略早 30s，但 alarm 末尾的 `scheduleNextAlarm` 会重新基于内存里最新 `lastActivityAt` 推到下一次合适时间，最终销毁时刻仍准确。
+
+### 房间销毁时重置 lastActivityAt
+`processActualLeave` 末尾「空房间」分支显式 `this.lastActivityAt = 0`（与 inactivity 路径对齐）。否则下次 `/init` 复用此 DO 时，scheduleNextAlarm 可能基于旧值算出已过期的 inactivity 时间点。`saveState` 已覆盖此字段，单加一行赋值即可。

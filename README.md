@@ -28,7 +28,7 @@
 - 画手设定答案后，猜词方可输入猜测；答对自动揭晓并撒彩带
 - 画笔权限可在两人之间转移，一键转让进入下一轮
 - 右侧实时聊天面板
-- 断线自动重连（指数退避 1s→30s）+ 心跳保活 + 页面刷新 5s 内可恢复身份
+- 断线自动重连（指数退避 1s→30s）+ 心跳保活；重连期间画板和聊天保留，仅顶部 banner 提示，不阻断 UI；页面刷新 5s 内可恢复身份；首次加入 10s 仍未收到房间状态会自动报错回首页
 
 ## 技术栈
 
@@ -199,9 +199,11 @@ npx wrangler pages deploy dist --project-name=draw-guess
 - **Hibernatable WebSocket**：DO 闲置时可被回收，玩家身份存在 WebSocket attachment 里，醒来自动恢复
 - **两级断线 grace**：正常断线 30s，页面刷新 5s（靠 `pagehide` beacon 识别）
 - **离屏 canvas 缓存**：已完成笔画全部画到固定 1600×1200 的 offscreen canvas，resize 只需 `drawImage` blit 一次（O(1)）；2× 线性分辨率显著减少曲线锯齿
-- **油漆桶边缘抗锯齿**：scanline flood fill 后做一遍 1px 边界 alpha 混合，消除填充与抗锯齿描边之间的白晕
+- **油漆桶 flood fill**：scanline + visited 位图（避免 fill 色与目标色在容差内但不相等时已染色像素被反复入栈死循环）+ 边缘 1px alpha 混合消除白晕；offscreen 用 `willReadFrequently:true` 走 CPU readback 快路径
 - **画笔逐帧重绘**：mousemove 不在累积路径上反复 stroke（避免 alpha overdraw），改为每 RAF 帧 sync offscreen + 单次重绘当前 in-progress stroke
 - **strokes 分片存储**：每条 stroke 独立 storage key（`stroke:0000000001`），避开 DO 单值 128KB 上限
+- **服务端 storage 写入节流**：`touchActivity` 高频路径（每条 draw）下 `lastActivityAt` 持久化 + `setAlarm` 节流到 30s 一次，写入量降 ~1800 倍；`onDisconnect` / `/quickleave` 路径不节流以保证 grace 准时
+- **客户端连接管理**：消息 listener 用 ref 模式注册一次永不卸载（避免 ws.onmessage 撞上 listener 卸载窗口丢消息）；首次加入 10s 兜底超时；重连期间主 UI 保留 + 顶部 banner
 - **协议版本号**：`join` 消息带 `v`，服务端拒绝不匹配并提示刷新
 - **Origin 白名单 + rate limit**：所有 API 和 WS upgrade 都校验 Origin；每 WS 1s/150 条消息上限
 - **中文答案归一化**：NFKC + lowercase + 去空格 + 去 Unicode 标点，全角半角 / "你好！" vs "你好" 都能对上
