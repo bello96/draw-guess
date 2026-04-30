@@ -4,13 +4,7 @@ import type { PlayerInfo, GamePhase } from "../types/protocol";
 
 function IconDropdown() {
   return (
-    <svg
-      viewBox="0 0 1024 1024"
-      width="12"
-      height="12"
-      fill="currentColor"
-      aria-hidden="true"
-    >
+    <svg viewBox="0 0 1024 1024" width="12" height="12" fill="currentColor" aria-hidden="true">
       <path d="M512 652.8c-9.728 0-19.456-3.584-27.136-11.264l-204.8-204.8c-14.848-14.848-14.848-39.424 0-54.272s39.424-14.848 54.272 0l177.664 177.664 177.664-177.664c14.848-14.848 39.424-14.848 54.272 0s14.848 39.424 0 54.272l-204.8 204.8c-7.68 7.68-17.408 11.264-27.136 11.264z" />
     </svg>
   );
@@ -68,9 +62,7 @@ function PlayerOverflow({ players, myId }: { players: PlayerInfo[]; myId: string
           {players.map((p) => (
             <div
               key={p.id}
-              className={tx(
-                "px-3 py-1.5 text-sm text-gray-700 flex items-center gap-1.5",
-              )}
+              className={tx("px-3 py-1.5 text-sm text-gray-700 flex items-center gap-1.5")}
             >
               <span>🤔</span>
               <span>{p.name}</span>
@@ -165,6 +157,17 @@ export default function PlayerBar({
   const isDrawer = myId === drawerId;
   const [copied, setCopied] = useState(false);
 
+  // Actions 区是否有按钮（继续出题 / 2 人转让 / 3+ 转让下拉）。
+  // 仅在有按钮时才在按钮和「离开」之间显示分割线，避免出现裸 divider。
+  const hasContinueButton =
+    isDrawer &&
+    phase === "revealed" &&
+    (players.length === 2 || (players.length >= 3 && !pendingPromotionId));
+  const has2pTransferButton = isDrawer && players.length === 2;
+  const has3pTransferDropdown =
+    isDrawer && players.length >= 3 && (phase !== "revealed" || !pendingPromotionId);
+  const hasAnyActionButton = hasContinueButton || has2pTransferButton || has3pTransferDropdown;
+
   const handleCopyLink = () => {
     const url = `${window.location.origin}/${roomCode}`;
     navigator.clipboard.writeText(url).then(() => {
@@ -197,6 +200,9 @@ export default function PlayerBar({
             </button>
           )}
         </div>
+
+        {/* Divider: 房间 | 状态 */}
+        <div className={tx("w-px h-5 bg-gray-200")} />
 
         {/* Phase indicator */}
         <div
@@ -249,9 +255,7 @@ export default function PlayerBar({
                   key={p.id}
                   className={tx(
                     "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm",
-                    p.id === drawerId
-                      ? "bg-indigo-50 text-indigo-700"
-                      : "bg-gray-50 text-gray-700",
+                    p.id === drawerId ? "bg-indigo-50 text-indigo-700" : "bg-gray-50 text-gray-700",
                     p.id === myId && "font-semibold",
                   )}
                 >
@@ -301,6 +305,10 @@ export default function PlayerBar({
             onPick={(id) => onTransfer(id)}
           />
         )}
+
+        {/* Divider: 转让 | 离开（仅在有动作按钮时显示） */}
+        {hasAnyActionButton && <div className={tx("w-px h-5 bg-gray-200")} />}
+
         <button
           onClick={onLeave}
           className={tx(

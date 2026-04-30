@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { tx } from "@twind/core";
 import Home from "./pages/Home";
 import Room from "./pages/Room";
+import bgUrl from "./assets/bg.png";
 
 /** Extract a 6-digit room code from the URL path, e.g. /438907 */
 function getRoomCodeFromUrl(): string {
@@ -87,8 +88,10 @@ export default function App() {
     return (
       <div
         className={tx(
-          "flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50",
+          "flex items-center justify-center min-h-screen p-4",
+          "bg-cover bg-center bg-no-repeat",
         )}
+        style={{ backgroundImage: `url(${bgUrl})` }}
       >
         <div className={tx("bg-white rounded-2xl shadow-xl p-8 w-full max-w-sm")}>
           <h2 className={tx("text-xl font-bold text-center mb-2 text-indigo-600")}>
@@ -112,8 +115,8 @@ export default function App() {
           <button
             onClick={handleNicknameConfirm}
             className={tx(
-              "w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-lg",
-              "hover:bg-indigo-700 transition",
+              "w-full py-3 px-4 bg-indigo-500 text-white font-semibold rounded-lg",
+              "hover:bg-indigo-600 transition",
             )}
           >
             进入房间

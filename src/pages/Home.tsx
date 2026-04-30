@@ -132,7 +132,9 @@ export default function Home({ onEnterRoom }: Props) {
                 <span>加入房间</span>
               </button>
             </div>
-            <p className={tx("text-xs text-gray-400 text-center mt-6")}>支持 2-6 人一起玩</p>
+            <p className={tx("text-xs text-gray-400 text-center mt-8")}>
+              无需登录，支持 2-6 人在线一起玩
+            </p>
           </>
         )}
 
