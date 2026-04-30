@@ -1,4 +1,5 @@
 import {
+  ACTIVITY_PERSIST_MIN_INTERVAL_MS,
   DELETE_BATCH_SIZE,
   INACTIVITY_TIMEOUT_MS,
   MAX_ANSWER_LENGTH,
@@ -42,6 +43,10 @@ export class GameRoom implements DurableObject {
   private roomCode = "";
   private disconnectedPlayers: Map<string, DisconnectedPlayer> = new Map();
   private lastActivityAt = 0;
+  // touchActivity 节流：高频 draw 消息下避免每条都 storage.put + setAlarm。
+  // 仅当距离上次持久化超过 ACTIVITY_PERSIST_MIN_INTERVAL_MS 时才同步到 storage。
+  // 不需要持久化此字段——DO 重启后从 0 开始，下次 touchActivity 会立即同步。
+  private lastActivityPersistedAt = 0;
   private maxPlayers = MIN_MAX_PLAYERS;
   private joinOrder: string[] = [];
   // pendingPromotionId 不持久化；用于 3+ 人房 revealed 阶段的猜对者
@@ -153,7 +158,16 @@ export class GameRoom implements DurableObject {
 
   /** Update last activity timestamp and schedule inactivity alarm */
   private async touchActivity() {
-    this.lastActivityAt = Date.now();
+    const now = Date.now();
+    this.lastActivityAt = now;
+
+    // 节流：内存值每次都更新，但 storage.put + setAlarm 是高代价操作，限频。
+    // 高频 draw 60Hz 下，原本每秒 60 次 storage 写 → 改为每 30s 一次。
+    // inactivity 阈值是 10 分钟，±30s 误差完全可忽略。
+    if (now - this.lastActivityPersistedAt < ACTIVITY_PERSIST_MIN_INTERVAL_MS) {
+      return;
+    }
+    this.lastActivityPersistedAt = now;
     await this.state.storage.put("lastActivityAt", this.lastActivityAt);
     this.scheduleNextAlarm();
   }
@@ -1425,6 +1439,9 @@ export class GameRoom implements DurableObject {
       this.maxPlayers = MIN_MAX_PLAYERS;
       this.joinOrder = [];
       this.pendingPromotionId = null;
+      // 与 inactivity 路径对齐：清空 idle 计时基准。否则下次 /init 复用此 DO
+      // 时，scheduleNextAlarm 可能基于旧值算出已过期的 inactivity 时间点。
+      this.lastActivityAt = 0;
       await this.saveState();
       await this.clearStrokeStorage();
     }

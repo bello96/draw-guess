@@ -181,239 +181,265 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     ]);
   }, []);
 
-  // Handle incoming messages
+  // 是否曾经成功加入过房间。区分「首次加入」和「断线重连」两种状态：
+  // 首次加入失败要报错，重连可以无限期等待（网络可能慢）。
+  const hasJoinedOnceRef = useRef(false);
+
+  // 首次加入超时兜底：10s 还没收到 roomState（myId 仍为 null）→ 报错，
+  // 由下面的 joinError effect 调度退出。重连场景下 hasJoinedOnceRef 已 true，
+  // 不应用此超时（避免短暂网络抖动误报）。
   useEffect(() => {
-    const unsubscribe = addListener((msg: ServerMessage) => {
-      switch (msg.type) {
-        case "roomState":
-          setMyId(msg.yourId);
-          myIdRef.current = msg.yourId;
-          // Persist playerId for reconnection on page refresh
-          sessionStorage.setItem(PLAYER_ID_KEY, msg.yourId);
-          setPlayers(msg.players);
-          setDrawerId(msg.drawerId);
-          setPhase(msg.phase);
-          setPendingPromotionId(msg.pendingPromotionId ?? null);
-          if (typeof msg.maxPlayers === "number") {
-            setMaxPlayers(msg.maxPlayers);
-          }
-          if (msg.answerLength) {
-            setAnswerLength(msg.answerLength);
-          }
-          if (msg.answer) {
-            setAnswerText(msg.answer);
-          }
-          // Replay strokes (strokesRef is saved even if canvas isn't mounted yet)
-          replayAll(msg.strokes);
-          syncHistoryFlags();
-          // Restore chat history
-          if (msg.chatHistory && msg.chatHistory.length > 0) {
-            setMessages(
-              msg.chatHistory.map((entry: ChatHistoryEntry) => ({
-                id: nextMsgId(),
-                playerId: entry.playerId,
-                playerName: entry.playerName,
-                text: entry.text,
-                timestamp: entry.timestamp,
-                kind: entry.kind,
-                correct: entry.correct,
-              })),
-            );
-          }
-          break;
+    if (myId !== null) {
+      hasJoinedOnceRef.current = true;
+      return;
+    }
+    if (hasJoinedOnceRef.current) {
+      return;
+    }
+    if (joinError) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setJoinError("加入房间超时，请检查网络或刷新页面");
+    }, 10_000);
+    return () => window.clearTimeout(timer);
+  }, [myId, joinError]);
 
-        case "playerJoined":
-          setPlayers((prev) => [...prev, msg.player]);
-          addSystemMessage(`${msg.player.name} 加入了房间`);
-          break;
+  // joinError 统一退出 timer：1.5s 后回到首页。case "error" 和 join 超时
+  // 都走这条路径，避免多处独立 setTimeout 难以追踪。
+  useEffect(() => {
+    if (!joinError) {
+      return;
+    }
+    const timer = window.setTimeout(() => onLeave(), 1500);
+    return () => window.clearTimeout(timer);
+  }, [joinError, onLeave]);
 
-        case "playerLeft":
-          setPlayers((prev) => {
-            const leaving = prev.find((p) => p.id === msg.playerId);
-            if (leaving) {
-              addSystemMessage(`${leaving.name} 离开了房间`);
-            }
-            return prev.filter((p) => p.id !== msg.playerId);
-          });
-          break;
-
-        case "draw":
-          replayDraw(msg);
-          if (msg.action === "end") {
-            redoStackRef.current = []; // new stroke invalidates redo history
-            syncHistoryFlags();
-          }
-          break;
-
-        case "clear":
-          clearCanvas();
-          redoStackRef.current = [];
-          syncHistoryFlags();
-          break;
-
-        case "textStroke":
-          addTextStroke(msg.text, msg.x, msg.y, msg.color, msg.fontSize);
-          redoStackRef.current = [];
-          syncHistoryFlags();
-          break;
-
-        case "shape":
-          addShape(
-            { x: msg.x, y: msg.y },
-            { x: msg.x + msg.width, y: msg.y + msg.height },
-            msg.color,
-            msg.lineWidth,
-            msg.shape,
-            msg.filled,
-          );
-          redoStackRef.current = [];
-          syncHistoryFlags();
-          break;
-
-        case "fill":
-          addFill(msg.x, msg.y, msg.color, msg.tolerance);
-          redoStackRef.current = [];
-          syncHistoryFlags();
-          break;
-
-        case "selection":
-          addSelection(
-            { x: msg.srcX, y: msg.srcY, w: msg.w, h: msg.h },
-            { x: msg.dstX, y: msg.dstY },
-          );
-          redoStackRef.current = [];
-          syncHistoryFlags();
-          break;
-
-        case "undo": {
-          const popped = strokesRef.current.pop();
-          if (popped) {
-            redoStackRef.current.push(popped);
-          }
-          replayAll([...strokesRef.current]);
-          syncHistoryFlags();
-          break;
+  // Handle incoming messages
+  // 关键：用 ref 持有最新 handler，effect 依赖只留 addListener。
+  // 之前 effect 依赖里有 editingSelection 等会变化的 state，每次变化都触发
+  // add/remove listener；ws.onmessage 是浏览器原生事件，理论上可能撞上 listener
+  // 卸载窗口导致 roomState 等关键消息丢失 → 客户端永远卡在「连接中…」。
+  // ref 模式下 listener 注册一次，handler 闭包通过 ref 读到最新 state。
+  const messageHandlerRef = useRef<(msg: ServerMessage) => void>(() => {});
+  messageHandlerRef.current = (msg: ServerMessage) => {
+    switch (msg.type) {
+      case "roomState":
+        setMyId(msg.yourId);
+        myIdRef.current = msg.yourId;
+        // Persist playerId for reconnection on page refresh
+        sessionStorage.setItem(PLAYER_ID_KEY, msg.yourId);
+        setPlayers(msg.players);
+        setDrawerId(msg.drawerId);
+        setPhase(msg.phase);
+        setPendingPromotionId(msg.pendingPromotionId ?? null);
+        if (typeof msg.maxPlayers === "number") {
+          setMaxPlayers(msg.maxPlayers);
         }
-
-        case "redo": {
-          const redone = redoStackRef.current.pop();
-          if (redone) {
-            strokesRef.current.push(redone);
-            replayAll([...strokesRef.current]);
-          }
-          syncHistoryFlags();
-          break;
+        if (msg.answerLength) {
+          setAnswerLength(msg.answerLength);
         }
-
-        case "phaseChange":
-          setPhase(msg.phase);
-          setDrawerId(msg.drawerId);
-          if (msg.phase === "revealed") {
-            setPendingPromotionId(msg.pendingPromotionId ?? null);
-          } else {
-            setPendingPromotionId(null);
-          }
-          if (msg.answerLength) {
-            setAnswerLength(msg.answerLength);
-          }
-          // 切到 guessing/revealed 阶段时清理所有 in-progress editing overlay，
-          // 避免本地继续操作未 commit 的 overlay 后两端画面 diverge。waiting 阶段
-          // 仍允许 drawer 涂鸦，overlay 不清。
-          if (msg.phase === "guessing" || msg.phase === "revealed") {
-            setEditingShape(null);
-            setEditingText(null);
-            if (editingSelection) {
-              cancelLocalSelection();
-              setEditingSelection(null);
-            }
-          }
-          if (msg.phase === "guessing") {
-            addSystemMessage("答案已设定，开始猜词！");
-          } else if (msg.phase === "revealed") {
-            addSystemMessage("🎉 猜对了！可以继续出题或转让画笔");
-          } else if (msg.phase === "drawing") {
-            addSystemMessage("新一轮开始，画手开始画画吧！");
-            setAnswerLength(null);
-            setAnswerText(null);
-            setConfettiKey(0);
-          } else if (msg.phase === "waiting") {
-            addSystemMessage("等待其他玩家加入...");
-          }
-          break;
-
-        case "guessResult":
-          setMessages((prev) => [
-            ...prev,
-            {
+        if (msg.answer) {
+          setAnswerText(msg.answer);
+        }
+        // Replay strokes (strokesRef is saved even if canvas isn't mounted yet)
+        replayAll(msg.strokes);
+        syncHistoryFlags();
+        // Restore chat history
+        if (msg.chatHistory && msg.chatHistory.length > 0) {
+          setMessages(
+            msg.chatHistory.map((entry: ChatHistoryEntry) => ({
               id: nextMsgId(),
-              playerId: msg.playerId,
-              playerName: msg.playerName,
-              text: msg.text,
-              timestamp: Date.now(),
-              kind: "guess",
-              correct: msg.correct,
-            },
-          ]);
-          if (msg.correct) {
-            setConfettiKey((k) => k + 1);
+              playerId: entry.playerId,
+              playerName: entry.playerName,
+              text: entry.text,
+              timestamp: entry.timestamp,
+              kind: entry.kind,
+              correct: entry.correct,
+            })),
+          );
+        }
+        break;
+
+      case "playerJoined":
+        setPlayers((prev) => [...prev, msg.player]);
+        addSystemMessage(`${msg.player.name} 加入了房间`);
+        break;
+
+      case "playerLeft":
+        setPlayers((prev) => {
+          const leaving = prev.find((p) => p.id === msg.playerId);
+          if (leaving) {
+            addSystemMessage(`${leaving.name} 离开了房间`);
           }
-          break;
+          return prev.filter((p) => p.id !== msg.playerId);
+        });
+        break;
 
-        case "chat":
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextMsgId(),
-              playerId: msg.playerId,
-              playerName: msg.playerName,
-              text: msg.text,
-              timestamp: msg.timestamp,
-              kind: "chat",
-            },
-          ]);
-          break;
+      case "draw":
+        replayDraw(msg);
+        if (msg.action === "end") {
+          redoStackRef.current = []; // new stroke invalidates redo history
+          syncHistoryFlags();
+        }
+        break;
 
-        case "transferDone":
-          setDrawerId(msg.newDrawerId);
-          addSystemMessage("画笔权限已转移！");
-          break;
+      case "clear":
+        clearCanvas();
+        redoStackRef.current = [];
+        syncHistoryFlags();
+        break;
 
-        case "error":
-          // If we haven't joined yet (no myId), this is a join error — show and redirect
-          if (!myIdRef.current) {
-            setJoinError(msg.message);
-            setTimeout(() => onLeave(), 1500);
-          } else {
-            // Runtime error (rate limit, invalid action, etc.) — toast instead of
-            // noisy system message in the chat log.
-            setToast({ message: msg.message, type: "error", id: Date.now() });
-          }
-          break;
+      case "textStroke":
+        addTextStroke(msg.text, msg.x, msg.y, msg.color, msg.fontSize);
+        redoStackRef.current = [];
+        syncHistoryFlags();
+        break;
 
-        case "roomClosed":
-          addSystemMessage(`房间已关闭: ${msg.reason}`);
-          setTimeout(() => onLeave(), 1500);
-          break;
+      case "shape":
+        addShape(
+          { x: msg.x, y: msg.y },
+          { x: msg.x + msg.width, y: msg.y + msg.height },
+          msg.color,
+          msg.lineWidth,
+          msg.shape,
+          msg.filled,
+        );
+        redoStackRef.current = [];
+        syncHistoryFlags();
+        break;
+
+      case "fill":
+        addFill(msg.x, msg.y, msg.color, msg.tolerance);
+        redoStackRef.current = [];
+        syncHistoryFlags();
+        break;
+
+      case "selection":
+        addSelection(
+          { x: msg.srcX, y: msg.srcY, w: msg.w, h: msg.h },
+          { x: msg.dstX, y: msg.dstY },
+        );
+        redoStackRef.current = [];
+        syncHistoryFlags();
+        break;
+
+      case "undo": {
+        const popped = strokesRef.current.pop();
+        if (popped) {
+          redoStackRef.current.push(popped);
+        }
+        replayAll([...strokesRef.current]);
+        syncHistoryFlags();
+        break;
       }
-    });
 
-    return unsubscribe;
-  }, [
-    addListener,
-    replayDraw,
-    replayAll,
-    clearCanvas,
-    addTextStroke,
-    addShape,
-    addFill,
-    addSelection,
-    addSystemMessage,
-    strokesRef,
-    syncHistoryFlags,
-    onLeave,
-    editingSelection,
-    cancelLocalSelection,
-  ]);
+      case "redo": {
+        const redone = redoStackRef.current.pop();
+        if (redone) {
+          strokesRef.current.push(redone);
+          replayAll([...strokesRef.current]);
+        }
+        syncHistoryFlags();
+        break;
+      }
+
+      case "phaseChange":
+        setPhase(msg.phase);
+        setDrawerId(msg.drawerId);
+        if (msg.phase === "revealed") {
+          setPendingPromotionId(msg.pendingPromotionId ?? null);
+        } else {
+          setPendingPromotionId(null);
+        }
+        if (msg.answerLength) {
+          setAnswerLength(msg.answerLength);
+        }
+        // 切到 guessing/revealed 阶段时清理所有 in-progress editing overlay，
+        // 避免本地继续操作未 commit 的 overlay 后两端画面 diverge。waiting 阶段
+        // 仍允许 drawer 涂鸦，overlay 不清。
+        if (msg.phase === "guessing" || msg.phase === "revealed") {
+          setEditingShape(null);
+          setEditingText(null);
+          if (editingSelection) {
+            cancelLocalSelection();
+            setEditingSelection(null);
+          }
+        }
+        if (msg.phase === "guessing") {
+          addSystemMessage("答案已设定，开始猜词！");
+        } else if (msg.phase === "revealed") {
+          addSystemMessage("🎉 猜对了！可以继续出题或转让画笔");
+        } else if (msg.phase === "drawing") {
+          addSystemMessage("新一轮开始，画手开始画画吧！");
+          setAnswerLength(null);
+          setAnswerText(null);
+          setConfettiKey(0);
+        } else if (msg.phase === "waiting") {
+          addSystemMessage("等待其他玩家加入...");
+        }
+        break;
+
+      case "guessResult":
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId(),
+            playerId: msg.playerId,
+            playerName: msg.playerName,
+            text: msg.text,
+            timestamp: Date.now(),
+            kind: "guess",
+            correct: msg.correct,
+          },
+        ]);
+        if (msg.correct) {
+          setConfettiKey((k) => k + 1);
+        }
+        break;
+
+      case "chat":
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId(),
+            playerId: msg.playerId,
+            playerName: msg.playerName,
+            text: msg.text,
+            timestamp: msg.timestamp,
+            kind: "chat",
+          },
+        ]);
+        break;
+
+      case "transferDone":
+        setDrawerId(msg.newDrawerId);
+        addSystemMessage("画笔权限已转移！");
+        break;
+
+      case "error":
+        // 未 join 完成时收到 error → 写入 joinError，由统一的 joinError effect
+        // 调度 onLeave；运行时错误（已 join）走 toast。
+        if (!myIdRef.current) {
+          setJoinError(msg.message);
+        } else {
+          setToast({ message: msg.message, type: "error", id: Date.now() });
+        }
+        break;
+
+      case "roomClosed":
+        // 走 joinError 路径切到全屏错误屏，由统一 joinError effect 调度 1.5s
+        // 后退出。否则服务端紧接着 close ws → setConnected(false) → 主 UI 上
+        // 闪一下「网络异常，正在重连…」banner，体验上像 bug。
+        setJoinError(`房间已关闭：${msg.reason}`);
+        break;
+    }
+  };
+
+  // 注册一次永远不变 —— ws.onmessage 永远命中最新的 ref handler。
+  useEffect(() => {
+    return addListener((msg) => messageHandlerRef.current(msg));
+  }, [addListener]);
 
   const handleClear = () => {
     setEditingShape(null);
@@ -755,7 +781,11 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     setAnswerText(answer);
   };
 
-  if (!connected || !myId) {
+  // 全屏 loading / 错误屏的两种触发：
+  //   1. 尚未首次加入完成（myId == null）—— 显示「连接中…」或加入超时报错
+  //   2. joinError 已被设置（包括服务端 error / 加入超时 / roomClosed）
+  // 已加入会话且无 joinError 时，断线只在主 UI 顶部显示 banner，画板和聊天保留。
+  if (!myId || joinError) {
     return (
       <div className={tx("flex items-center justify-center min-h-screen bg-gray-50")}>
         <div className={tx("text-center")}>
@@ -786,6 +816,17 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           type={toast.type}
           onClose={() => setToast(null)}
         />
+      )}
+      {!connected && (
+        <div
+          className={tx(
+            "bg-yellow-100 text-yellow-800 text-center text-sm py-1.5 rounded-lg",
+            "border border-yellow-300 flex items-center justify-center gap-2",
+          )}
+        >
+          <span className={tx("animate-spin")}>✕</span>
+          <span>网络异常，正在重连...</span>
+        </div>
       )}
       {/* Top bar */}
       <PlayerBar

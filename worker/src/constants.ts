@@ -6,6 +6,9 @@
 export const RECONNECT_GRACE_MS = 30_000; // 30 seconds
 export const QUICK_LEAVE_GRACE_MS = 5_000; // 5 seconds (page refresh fast path)
 export const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+// touchActivity 持久化节流间隔。高频 draw 下（60Hz）避免每条都写 storage + 重设 alarm。
+// 取 30s 是相对 INACTIVITY_TIMEOUT_MS (10min) 而言的可忽略误差，换 ~1800x 写入降幅。
+export const ACTIVITY_PERSIST_MIN_INTERVAL_MS = 30_000;
 export const MAX_CHAT_HISTORY = 200;
 
 // ---------- Input length caps ----------
