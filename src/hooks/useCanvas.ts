@@ -187,32 +187,32 @@ function pathStar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number
 }
 
 /**
- * Heart inscribed in (x, y, w, h). 4 cubic beziers: top notch → left lobe →
- * bottom point → right lobe → back to notch.
+ * Heart inscribed in (x, y, w, h). 6 cubic beziers, 起点 = 底部尖端，顺时针绕。
+ * 几何参数参考 Material Icons / Twemoji ❤️ 经典圆润心形。
  *
- * 注意 top 控制点：要让左/右瓣的曲线峰真正贴到 bbox 顶边（y=0）。
- * 对 P0=(cx, 0.3h), P3=(0, 0.3h) 的贝塞尔，t=0.5 处 y = 0.075h + 0.75 * P1y_avg。
- * 所以要让峰值 y=0，需要 P1y = P2y = -0.1h（在 bbox 上方一点点；只是控制点
- * 几何外溢，不影响曲线本身——曲线最高点恰好在 y=0）。
+ * 关键关键点：
+ * - 凹槽 notch 在 (cx, 0.114h) —— 故意做得很浅，让顶部凹槽视觉柔和
+ * - 左/右瓣顶尖在 (0.275w, 0) / (0.725w, 0) —— 收拢到中心一些，
+ *   两瓣不会在顶部展成水平长条
+ * - 段 2/3/4/5 的相邻切线都通过控制点保持 C1 平滑，瓣顶是圆弧顶点而非平台
+ * - 底部 (cx, h) 两侧控制点 (0.17w/0.83w, 0.673h)，斜向 45°，尖端不针状
  */
 function pathHeart(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
   const cx = x + w / 2;
-  const topNotchY = y + h * 0.3;
-  const midY = y + (h + h * 0.3) / 2;
-  const topCtrl = y - h * 0.1; // 让顶部贝塞尔曲线峰值贴到 bbox 顶边
-  const bottom = y + h;
-  const left = x;
-  const right = x + w;
   ctx.beginPath();
-  ctx.moveTo(cx, topNotchY);
-  // Top-left curve: notch → leftmost（峰值 y = bbox 顶部）
-  ctx.bezierCurveTo(cx, topCtrl, left, topCtrl, left, topNotchY);
-  // Bottom-left curve: leftmost → bottom point
-  ctx.bezierCurveTo(left, midY, cx, midY, cx, bottom);
-  // Bottom-right curve: bottom → rightmost
-  ctx.bezierCurveTo(cx, midY, right, midY, right, topNotchY);
-  // Top-right curve: rightmost → back to notch
-  ctx.bezierCurveTo(right, topCtrl, cx, topCtrl, cx, topNotchY);
+  ctx.moveTo(cx, y + h);
+  // 1. bottom → leftWidest (0, 0.30h)
+  ctx.bezierCurveTo(x + w * 0.17, y + h * 0.673, x, y + h * 0.506, x, y + h * 0.3);
+  // 2. leftWidest → leftPeak (0.275w, 0)
+  ctx.bezierCurveTo(x, y + h * 0.132, x + w * 0.121, y, x + w * 0.275, y);
+  // 3. leftPeak → notch (cx, 0.114h)
+  ctx.bezierCurveTo(x + w * 0.362, y, x + w * 0.446, y + h * 0.044, cx, y + h * 0.114);
+  // 4. notch → rightPeak (0.725w, 0)
+  ctx.bezierCurveTo(x + w * 0.554, y + h * 0.044, x + w * 0.638, y, x + w * 0.725, y);
+  // 5. rightPeak → rightWidest (w, 0.30h)
+  ctx.bezierCurveTo(x + w * 0.879, y, x + w, y + h * 0.132, x + w, y + h * 0.3);
+  // 6. rightWidest → bottom
+  ctx.bezierCurveTo(x + w, y + h * 0.506, x + w * 0.83, y + h * 0.673, cx, y + h);
   ctx.closePath();
 }
 
@@ -248,15 +248,14 @@ export function svgPathStar(w: number, h: number): string {
 
 export function svgPathHeart(w: number, h: number): string {
   const cx = w / 2;
-  const topNotchY = h * 0.3;
-  const midY = (h + h * 0.3) / 2;
-  const topCtrl = -h * 0.1; // 同 pathHeart 的注释：峰值贴 bbox 顶边
   return [
-    `M ${cx} ${topNotchY}`,
-    `C ${cx} ${topCtrl}, 0 ${topCtrl}, 0 ${topNotchY}`,
-    `C 0 ${midY}, ${cx} ${midY}, ${cx} ${h}`,
-    `C ${cx} ${midY}, ${w} ${midY}, ${w} ${topNotchY}`,
-    `C ${w} ${topCtrl}, ${cx} ${topCtrl}, ${cx} ${topNotchY}`,
+    `M ${cx} ${h}`,
+    `C ${w * 0.17} ${h * 0.673}, 0 ${h * 0.506}, 0 ${h * 0.3}`,
+    `C 0 ${h * 0.132}, ${w * 0.121} 0, ${w * 0.275} 0`,
+    `C ${w * 0.362} 0, ${w * 0.446} ${h * 0.044}, ${cx} ${h * 0.114}`,
+    `C ${w * 0.554} ${h * 0.044}, ${w * 0.638} 0, ${w * 0.725} 0`,
+    `C ${w * 0.879} 0, ${w} ${h * 0.132}, ${w} ${h * 0.3}`,
+    `C ${w} ${h * 0.506}, ${w * 0.83} ${h * 0.673}, ${cx} ${h}`,
     "Z",
   ].join(" ");
 }
@@ -566,18 +565,31 @@ function scanlineFill(
   const tr = data[idx0];
   const tg = data[idx0 + 1];
   const tb = data[idx0 + 2];
-  // Seed already matches fill → nothing to do (also prevents infinite loop).
+  // Seed 已经是 fill 色 → 无事可做。
   if (tr === fr && tg === fg && tb === fb) {
     return;
   }
   const tol = tolerance;
-  const matches = (idx: number): boolean => {
+  // visited 位图：每像素一字节。paint 时 mark，matches 优先检查。
+  // 关键：fill 色可能与 target 色在容差内但不相等（吸管吸到画布反走样像素的
+  // 经典场景），此时 paint 后的像素 RGB 仍落在容差里。如果没有 visited，
+  // 已染色像素会被反复 push 进 stack → 死循环 → Array.push 抛
+  // "Invalid array length" → 浏览器卡死。visited 让每个像素最多处理一次，
+  // 既根除死循环，又不影响相近颜色的正常填充。
+  const visited = new Uint8Array(w * h);
+  const matches = (px: number): boolean => {
+    if (visited[px]) {
+      return false;
+    }
+    const idx = px * 4;
     const dr = data[idx] - tr;
     const dg = data[idx + 1] - tg;
     const db = data[idx + 2] - tb;
     return dr >= -tol && dr <= tol && dg >= -tol && dg <= tol && db >= -tol && db <= tol;
   };
-  const paint = (idx: number): void => {
+  const paint = (px: number): void => {
+    visited[px] = 1;
+    const idx = px * 4;
     data[idx] = fr;
     data[idx + 1] = fg;
     data[idx + 2] = fb;
@@ -588,21 +600,21 @@ function scanlineFill(
     const y = stack.pop()!;
     const x = stack.pop()!;
     let lx = x;
-    while (lx >= 0 && matches((y * w + lx) * 4)) {
+    while (lx >= 0 && matches(y * w + lx)) {
       lx--;
     }
     lx++;
     let rx = x;
-    while (rx < w && matches((y * w + rx) * 4)) {
+    while (rx < w && matches(y * w + rx)) {
       rx++;
     }
     rx--;
     let aboveMatch = false;
     let belowMatch = false;
     for (let i = lx; i <= rx; i++) {
-      paint((y * w + i) * 4);
+      paint(y * w + i);
       if (y > 0) {
-        const up = ((y - 1) * w + i) * 4;
+        const up = (y - 1) * w + i;
         const m = matches(up);
         if (m && !aboveMatch) {
           stack.push(i, y - 1);
@@ -612,7 +624,7 @@ function scanlineFill(
         }
       }
       if (y < h - 1) {
-        const down = ((y + 1) * w + i) * 4;
+        const down = (y + 1) * w + i;
         const m = matches(down);
         if (m && !belowMatch) {
           stack.push(i, y + 1);
@@ -1010,7 +1022,10 @@ export function useCanvas({
     const off = document.createElement("canvas");
     off.width = OFFSCREEN_WIDTH;
     off.height = OFFSCREEN_HEIGHT;
-    const offCtx = off.getContext("2d");
+    // willReadFrequently: true → 关闭 GPU 加速，让 getImageData 走 CPU 直读。
+    // 油漆桶 / 反走样每次填充都要 readback 整张离屏，标记后浏览器不再重复
+    // 警告，且 readback 性能更稳定。
+    const offCtx = off.getContext("2d", { willReadFrequently: true });
     if (offCtx) {
       offCtx.fillStyle = "#ffffff";
       offCtx.fillRect(0, 0, OFFSCREEN_WIDTH, OFFSCREEN_HEIGHT);
