@@ -56,7 +56,7 @@ export default function Home({ onEnterRoom }: Props) {
       style={{ backgroundImage: `url(${bgUrl})` }}
     >
       <div className={tx("bg-white rounded-2xl shadow-xl p-8 w-full max-w-md")}>
-        <h1 className={tx("text-4xl font-bold text-center mb-2 text-indigo-600")}>🎨 我画你猜</h1>
+        <h1 className={tx("text-4xl font-bold text-center mb-2 text-indigo-600")}>🎨 你画我猜</h1>
         <p className={tx("text-gray-500 text-center mb-8")}>和朋友一起画画猜词吧！</p>
 
         {/* Name input — 只在二级页显示 */}
@@ -88,10 +88,10 @@ export default function Home({ onEnterRoom }: Props) {
                   type="button"
                   onClick={() => setMaxPlayers(n)}
                   className={tx(
-                    "flex-1 py-2 text-sm rounded-lg transition border-2 bg-white",
+                    "flex-1 py-2 rounded-lg text-sm font-medium transition",
                     maxPlayers === n
-                      ? "text-indigo-600 border-indigo-600"
-                      : "text-gray-600 border-gray-200 hover:border-indigo-300",
+                      ? "bg-indigo-100 text-indigo-700 border border-indigo-300"
+                      : "bg-gray-100 text-gray-500 hover:bg-gray-200 border border-gray-200",
                   )}
                 >
                   {n}人
@@ -113,8 +113,8 @@ export default function Home({ onEnterRoom }: Props) {
               <button
                 onClick={() => setMode("create")}
                 className={tx(
-                  "w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-lg",
-                  "hover:bg-indigo-700 transition flex items-center justify-center gap-2",
+                  "w-full py-3 px-4 bg-indigo-500 text-white font-semibold rounded-lg",
+                  "hover:bg-indigo-600 transition flex items-center justify-center gap-2",
                 )}
               >
                 <span>🏠</span>
@@ -123,8 +123,8 @@ export default function Home({ onEnterRoom }: Props) {
               <button
                 onClick={() => setMode("join")}
                 className={tx(
-                  "w-full py-3 px-4 bg-white text-indigo-600 font-semibold rounded-lg",
-                  "border-2 border-indigo-600 hover:bg-indigo-50 transition",
+                  "w-full py-3 px-4 bg-indigo-50 text-indigo-600 font-semibold rounded-lg",
+                  "border-2 border-indigo-600 hover:bg-indigo-100 transition",
                   "flex items-center justify-center gap-2",
                 )}
               >
@@ -182,7 +182,7 @@ export default function Home({ onEnterRoom }: Props) {
                 "hover:bg-indigo-700 transition disabled:opacity-50",
               )}
             >
-              {loading ? "加入中..." : "加入房间"}
+              {loading ? "加入中..." : "确认加入"}
             </button>
             <button
               onClick={() => {
