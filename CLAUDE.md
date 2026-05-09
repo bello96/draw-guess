@@ -94,7 +94,7 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 ### 6. 画板坐标归一化与分辨率
 - 所有 `{x, y}` 在线上协议和存储里都是 `[0, 1]` 归一化值。画布实际像素 = 归一化 × `canvas.width`
 - `REF_WIDTH = 800` 是逻辑参考宽度，用于 `scaleLineWidth` / 字号缩放（clamp 0.5~2.0 倍）
-- `OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT = 1600 × 1200`（4:3，与 visible 比例一致）：实际离屏画布尺寸，2× 线性分辨率，曲线/油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible，显著减少阶梯锯齿
+- `OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT = 1600 × 960`（5:3，与 visible 比例一致）：实际离屏画布尺寸，2× 线性分辨率，曲线/油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible，显著减少阶梯锯齿
 - 两个常量解耦：visible 渲染用 `canvas.width / REF_WIDTH` 算 scale；offscreen 渲染用 `1600 / 800 = 2.0` 算 scale；最终 drawImage 缩到 visible 后两者视觉粗细一致
 
 ### 7. 工具系统（8 种 + 编辑态）
@@ -286,13 +286,13 @@ cd worker && npx wrangler dev
 
 **协议版本号（PROTOCOL_VERSION）**：双写在 `src/types/protocol.ts` 和 `worker/src/constants.ts`，两边必须一致。客户端把 `v` 放进 `join` 消息，服务端 `onJoin` 校验，不匹配发 error 并 `close(1000, "version mismatch")`。前端 `TERMINAL_CLOSE_REASONS` 已把 `"version mismatch"` 纳入不重连——否则刷新前会死循环重连 + 被踢。
 
-**画板比例 4:3**：visible canvas 是 **4:3**（width:height）。`Canvas.tsx` 的 `resizeCanvas` **高度驱动**：先取 `container.clientHeight` 作为高度，宽度 = 高度 × 4/3；如果宽度溢出 container 就回退成宽度驱动（高度 = 宽度 × 3/4）。`container` 的 CSS 最小尺寸改成 `min-w-[533px] min-h-[400px]`（533 = 400 × 4/3）。
+**画板比例 5:3**：visible canvas 是 **5:3**（width:height）。`Canvas.tsx` 的 `resizeCanvas` **高度驱动**：先取 `container.clientHeight` 作为高度，宽度 = 高度 × 5/3；如果宽度溢出 container 就回退成宽度驱动（高度 = 宽度 × 3/5）。`container` 的 CSS 最小尺寸改成 `min-w-[667px] min-h-[400px]`（667 = 400 × 5/3）。
 
-**离屏 canvas 缓存**：`useCanvas.ts` 维护一个固定 **1600×1200 (4:3，OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT)** 的 `offscreenRef`，作为"已完成笔画"的单一来源。2× 线性分辨率，曲线 / 油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible canvas，显著减少阶梯锯齿。所有 stroke end 分支（本地 onMouseUp / 远程 replayDraw 的 end / addTextStroke / addFill / addSelection）都会把完成的 stroke **commit 到 offscreen**。resize 时 Room 的 `handleCanvasResize` 调 `syncVisibleFromOffscreen`，直接 `drawImage(offs, 0, 0, canvas.width, canvas.height)` 一次 blit 搞定，**O(1)** 而不是 O(总点数) full replay。
+**离屏 canvas 缓存**：`useCanvas.ts` 维护一个固定 **1600×960 (5:3，OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT)** 的 `offscreenRef`，作为"已完成笔画"的单一来源。2× 线性分辨率，曲线 / 油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible canvas，显著减少阶梯锯齿。所有 stroke end 分支（本地 onMouseUp / 远程 replayDraw 的 end / addTextStroke / addFill / addSelection）都会把完成的 stroke **commit 到 offscreen**。resize 时 Room 的 `handleCanvasResize` 调 `syncVisibleFromOffscreen`，直接 `drawImage(offs, 0, 0, canvas.width, canvas.height)` 一次 blit 搞定，**O(1)** 而不是 O(总点数) full replay。
 
 关键约束：
-- offscreen 尺寸固定 1600×1200（OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT，比例 4:3）；REF_WIDTH=800 是用于 lineWidth/字号缩放的「逻辑参考」，与离屏物理尺寸**解耦**。`scaleLineWidth` clamp 范围 0.5~**2.0**（上限 2.0 是为了让 offscreen 的 1600/800 = 2× 倍率不被钳掉，否则 commit 后线突然变细）
-- aspect ratio 必须与 visible 一致，否则图形会被拉伸；`Canvas.tsx` 的 `RATIO_W/RATIO_H = 4/3` 必须等于 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT`
+- offscreen 尺寸固定 1600×960（OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT，比例 5:3）；REF_WIDTH=800 是用于 lineWidth/字号缩放的「逻辑参考」，与离屏物理尺寸**解耦**。`scaleLineWidth` clamp 范围 0.5~**2.0**（上限 2.0 是为了让 offscreen 的 1600/800 = 2× 倍率不被钳掉，否则 commit 后线突然变细）
+- aspect ratio 必须与 visible 一致，否则图形会被拉伸；`Canvas.tsx` 的 `RATIO_W/RATIO_H = 5/3` 必须等于 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT`
 - **live drawing（mousemove 中）不写 offscreen**，只在 stroke end 时 flush —— 如果用户一边 resize 一边还在画，当前未完成的 in-progress stroke 的已绘像素会丢失。这种 edge case 不处理（用户几乎不会这样操作）
 - `replayAll` / `clearCanvas` / `undo` 仍然 O(N)（rebuild offscreen），因为 canvas 无法"反绘"某条笔画
 - **改画板比例要三处联动**：Canvas.tsx 的 `RATIO_W/RATIO_H`、useCanvas 的 `OFFSCREEN_WIDTH/OFFSCREEN_HEIGHT`、字号/线宽参考 `REF_WIDTH`
@@ -342,7 +342,7 @@ cd worker && npx wrangler dev
 
 2. **服务端 redoStack 不持久化**：Hibernate 后丢失。极端场景：drawer undo 后 idle 超过 DO hibernate 时间再点 redo，服务端 redoStack 空 → 不广播 → 对端画面不同步 drawer 本地状态，造成 diverge。当前接受此 trade-off（触发条件苛刻）；真要解决就把 redoStack 加入 `saveState()`。
 
-3. **画板 aspect ratio 联动**：`Canvas.tsx` 的 `RATIO_W/H = 4/3` 与 `useCanvas.ts` 的 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT = 1600:1200` 必须**比例一致**，否则离屏 drawImage 缩放会让图形变形。改画板比例时两处必须同步；`REF_WIDTH = 800` 是逻辑参考（不影响比例）但如果要改也要联动调整。
+3. **画板 aspect ratio 联动**：`Canvas.tsx` 的 `RATIO_W/H = 5/3` 与 `useCanvas.ts` 的 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT = 1600:960` 必须**比例一致**，否则离屏 drawImage 缩放会让图形变形。改画板比例时两处必须同步；`REF_WIDTH = 800` 是逻辑参考（不影响比例）但如果要改也要联动调整。
 
 4. **`src/assets/*.svg` 只是源文件**：真正渲染用的 path 是**内联在 `Toolbar.tsx`** 的。svg 文件被修改后要手动同步到 tsx。想自动化就装 `vite-plugin-svgr`，当前没装。
 
@@ -497,3 +497,193 @@ ref 模式：每次 render 重新赋值 `messageHandlerRef.current = (msg) => { 
 
 ### 房间销毁时重置 lastActivityAt
 `processActualLeave` 末尾「空房间」分支显式 `this.lastActivityAt = 0`（与 inactivity 路径对齐）。否则下次 `/init` 复用此 DO 时，scheduleNextAlarm 可能基于旧值算出已过期的 inactivity 时间点。`saveState` 已覆盖此字段，单加一行赋值即可。
+
+
+## 十九、视觉改造任务（Apple 风格 UI）
+
+本项目正在向 Apple 设计语言迁移，**所有视觉相关代码**必须严格遵守根目录
+`DESIGN.md`（37KB / 11 章节，已就位）。该文档来自
+`VoltAgent/awesome-design-md` 的 `apple/DESIGN.md`，是 Google Stitch 规范的
+纯文本设计系统，AI 编码代理可直接读取。
+
+> **本次改造范围（已确认）**：批次 1-4。**不重构** Home / Room 页面布局，
+> **不改** Canvas 绘画核心逻辑，**不动** Worker 端代码。
+
+> **进度状态（2026-05-09，分支 `feat/apple-redesign`）**：批次 1 / 2 / 3 已完成；
+> 批次 4（字重清洗 + `active:scale-95` 微交互 + 字号语义升级）**未做**。期间针对用户
+> 反馈做了几处偏离 DESIGN.md 的调整，新接手的 AI 请按以下实际值，不要按 19.2/19.4
+> 的字面值改回去：
+>
+> 1. `hairline` 实际取 `#ebebeb`（DESIGN.md 的 `#e0e0e0` 偏深一档，用户反馈调浅）
+> 2. `shadow-product` 实际取 `rgba(0, 0, 0, 0.10) 2px 4px 20px`（轻于 DESIGN.md 的
+>    `0.22 / 3px 5px 30px` 约 60%）
+> 3. **保留 `src/assets/bg.png`**：首页 + 模态框背景仍走 bg.png（19.3 的"删除背景图"
+>    步骤被回退）。`bg-canvas` / `bg-canvas-parchment` 不要再覆盖到这两处
+> 4. **字体逻辑试做又整体撤销**：`@font-face` + `font-fun` / Douyin / Zcool 已 100%
+>    移除；当前 `fontFamily` 只有 SF Pro Display / Text 系统栈。`src/assets/font/` 下
+>    两份 ttf/otf 仍在仓库，需要再启用时直接接 `fonts.css` + Twind theme `fontFamily`
+>    即可（之前用过 `font-fun` token 名）
+> 5. **`Toolbar.tsx` 的 `FillToggle` 同期重写**：按 `shape: "rect" | "ellipse" | "triangle" | "star" | "heart"`
+>    用 SVG 渲染对应真实几何（修复之前 triangle / star / heart 的"线框 / 填充"
+>    预览全退化成圆角方块的歧义）。新增 file-level type `FillShape` 和组件
+>    `FillShapeIcon`。调用处 cast 也从 `t as "rect" | "ellipse"` 改为 `t as FillShape`
+> 6. **画板比例 4:3 → 5:3** 联动改造（详见 ch 三 6 / ch 九 3）
+
+### 19.1 改造铁律（违反必须回滚）
+
+1. **唯一主色** `primary` (#0066cc Action Blue)，禁用第二个 accent。
+2. **正文必须** `text-body`（17px / weight 400 / line-height 1.47 / letter-spacing -0.374px），**不是 16px**。
+3. **字重阶梯**：300 / 400 / 600 / 700，**禁用 500**（清除 `font-medium`）。
+4. **阴影只给画布**（`shadow-product`）。卡片 / 按钮 / 模态框 / Toast / ChatPanel 一律无阴影。
+5. **主 CTA 必须 pill**（`rounded-full`），其他卡片 `rounded-lg` (8px)。
+6. **禁用装饰渐变**。背景纯色或明暗 full-bleed 交替。
+7. **所有 `<button>`** 加 `active:scale-95 transition-transform` press 反馈。
+8. **颜色用 token**（primary / ink / canvas / hairline），**禁止内联 hex**。
+
+### 19.2 批次 1：Twind 主题层（src/main.tsx）
+
+整体替换 `install({ ... })` 内的 `theme.extend`：
+
+```ts
+theme: {
+  extend: {
+    colors: {
+      primary: "#0066cc",
+      "primary-focus": "#0071e3",
+      ink: "#1d1d1f",
+      "ink-muted": "#7a7a7a",
+      canvas: "#ffffff",
+      "canvas-parchment": "#f5f5f7",
+      "surface-tile": "#272729",
+      "surface-tile-2": "#2a2a2c",
+      hairline: "#e0e0e0",
+    },
+    fontFamily: {
+      display: ['"SF Pro Display"', "system-ui", "-apple-system", "sans-serif"],
+      text: ['"SF Pro Text"', "system-ui", "-apple-system", "sans-serif"],
+    },
+    fontSize: {
+      body: ["17px", { lineHeight: "1.47", letterSpacing: "-0.374px" }],
+      lead: ["28px", { lineHeight: "1.14", letterSpacing: "0.196px" }],
+      "display-md": ["34px", { lineHeight: "1.47", letterSpacing: "-0.374px" }],
+      "display-lg": ["40px", { lineHeight: "1.1" }],
+      hero: ["56px", { lineHeight: "1.07", letterSpacing: "-0.28px" }],
+    },
+    boxShadow: {
+      product: "rgba(0, 0, 0, 0.22) 3px 5px 30px",
+    },
+  },
+},
+```
+
+并在 `index.html` 的 `<body>` 加：`class="font-text text-body text-ink"`，
+让全局正文默认就是 Apple 规格（17px / SF Pro Text / 深墨色）。
+
+### 19.3 批次 2：色值替换（全局 grep 批量）
+
+| 旧类名 | 新类名 |
+|--------|--------|
+| `text-indigo-600` / `text-indigo-500` | `text-primary` |
+| `text-indigo-700` | `text-primary-focus` |
+| `bg-indigo-500` | `bg-primary` |
+| `hover:bg-indigo-600` | `hover:bg-primary-focus` |
+| `focus:ring-indigo-500` | `focus:ring-primary` |
+| `bg-indigo-100` | `bg-canvas-parchment` |
+| `border-indigo-300` | `border-primary` |
+| `text-gray-500` / `text-gray-700` | `text-ink-muted` / `text-ink` |
+| `border-gray-300` | `border-hairline` |
+
+**特别处理（删除装饰渐变与背景图）**：
+
+- `src/App.tsx:141` — `bg-gradient-to-br from-indigo-50 to-purple-50` → `bg-canvas`
+- `src/pages/Home.tsx:51-56` — 移除 `style={{ backgroundImage: \`url(${bgUrl})\` }}` 与 `bg-cover bg-center bg-no-repeat`，改为 `bg-canvas`
+- 同步删除 `import bgUrl from "./assets/bg.png"`（App.tsx + Home.tsx）。
+- 模态框（App.tsx:89-94）的 `bg-cover bg-center bg-no-repeat + bgUrl` → `bg-canvas-parchment`
+
+### 19.4 批次 3：圆角 + 阴影统一
+
+**圆角统一**：
+
+- 所有卡片 / 模态框 `rounded-2xl` → `rounded-lg`
+- 所有 `<button>` 的 `rounded-lg` → `rounded-full`（pill）
+- 输入框 `rounded-lg` 保留（utility 圆角合法）
+- 错误提示 `rounded-lg` 保留
+
+**阴影删除**：
+
+- `src/App.tsx:96` 模态框 `shadow-xl` → 删除
+- `src/pages/Home.tsx:58` 主卡片 `shadow-xl` → 删除
+- `src/components/Toast.tsx`、`ChatPanel.tsx`、`PlayerBar.tsx` 内所有 `shadow-*` → 删除
+- 改用 `border border-hairline` 提供分隔感
+
+**阴影唯一例外**：
+
+- `src/components/Canvas.tsx` 画布外层若有 box-shadow，改为 `shadow-product`（DESIGN.md 唯一允许的阴影）
+
+### 19.5 批次 4：字重 + 微交互
+
+**字重清洗（清除 500）**：
+
+```
+font-medium → font-normal（普通文字）
+font-medium → font-semibold（语义上是强调的标签/小标题）
+font-bold → font-semibold（除非是真正的 700 层级，比如 hero）
+```
+
+**全局 press 反馈**——每个 `<button>` 末尾追加：
+
+```
+"active:scale-95 transition-transform"
+```
+
+涉及文件清单：
+
+- `src/App.tsx`：模态框两个按钮（约 115 / 124 行）
+- `src/pages/Home.tsx`：菜单 / 创建房间 / 加入房间 / 人数选择 / 返回所有按钮
+- `src/components/Toolbar.tsx`：所有工具按钮
+- `src/components/PlayerBar.tsx`：离开房间按钮
+- `src/components/Toast.tsx`：dismiss 按钮（如有）
+- `src/components/ChatPanel.tsx`：发送按钮
+
+**字号语义升级**：
+
+- `text-4xl` 主标题 → `text-display-lg font-display font-semibold`
+- `text-3xl` / `text-2xl` 次级标题 → `text-display-md font-display font-semibold`
+- `text-xl` 卡片标题 → `text-lead font-display font-normal`
+- 默认正文 → 显式标 `text-body`（继承自 body 也行，但显式更清晰）
+
+### 19.6 改造工作流
+
+1. 新建分支：`git checkout -b feat/apple-redesign`
+2. 按批次顺序执行，**每批一次 commit**（中文 commit message）：
+   - `feat(theme): 切换 Twind 主题为 Apple 设计 token`
+   - `feat(colors): 全局替换 indigo → primary，移除装饰渐变与背景图`
+   - `feat(shapes): 统一圆角与阴影规则`
+   - `feat(motion): 字重清洗 + active:scale-95 press 微交互`
+3. 每批改完执行：
+   ```powershell
+   npm run lint
+   npm run dev   # 视觉检查 Home / Room / 模态框
+   ```
+4. 全部完成后：`npm run build` 确认 TS 编译通过。
+
+### 19.7 验收 Checklist（标准批次完成的判定）
+
+- [ ] 全工程 grep `indigo|purple|gradient|shadow-xl|shadow-md|font-medium`，应为 **0 命中**。
+- [ ] grep `rounded-2xl`，应为 **0**；`rounded-full` 用在所有主 CTA 按钮上。
+- [ ] DevTools 检查 `<body>` 计算样式：`font-size: 17px; line-height: 1.47; font-family: "SF Pro Text"...`。
+- [ ] DevTools 检查任意主按钮：`background-color: rgb(0, 102, 204);` 且圆角 9999px。
+- [ ] 点击任意按钮可见明显 scale 0.95 弹动。
+- [ ] Home 页与模态框背景为纯白 / parchment，无紫色渐变、无 bg.png。
+- [ ] Canvas 画布外有 `shadow-product` 柔和阴影（唯一例外）。
+- [ ] 主标题字体回退能命中 SF Pro Display（macOS 上验证最准）。
+
+### 19.8 改造期注意
+
+- **不要碰 Worker 端**（`worker/` 目录），改造仅限 `src/`。
+- **不要改绘画逻辑**（`useCanvas.ts` / `useWebSocket.ts`），只改外观。
+- **保留 `@uiw/react-color` 的内部样式**（已在 ignorelist 配置）。
+- **错误提示色** `bg-red-50 text-red-600` 保留不动（DESIGN.md 已知 gap，无规范）。
+- **emoji** 🎨 / 🏠 等保留——Apple 系统也用平台 emoji，不必删。
+- 改造完成前**不要删除 `src/assets/bg.png`**，等所有引用清除并验收通过后再删。
+5. 改造任何组件前，先 grep 现有色值/字号，统一替换为 DESIGN.md 中的 token

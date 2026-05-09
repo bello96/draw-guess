@@ -798,7 +798,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           ) : (
             <>
               <div className={tx("text-4xl mb-4 animate-bounce")}>🎨</div>
-              <div className={tx("text-gray-500")}>连接中...</div>
+              <div className={tx("text-ink-muted")}>连接中...</div>
             </>
           )}
         </div>

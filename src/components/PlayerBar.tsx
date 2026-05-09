@@ -46,7 +46,7 @@ function PlayerOverflow({ players, myId }: { players: PlayerInfo[]; myId: string
         type="button"
         onClick={() => setOpen((v) => !v)}
         className={tx(
-          "flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-sm bg-gray-100 text-gray-600 hover:bg-gray-200 transition",
+          "flex items-center gap-1 px-2.5 py-1.5 rounded-full text-sm bg-gray-100 text-gray-600 hover:bg-gray-200 transition",
         )}
       >
         <span>+{players.length}</span>
@@ -56,13 +56,13 @@ function PlayerOverflow({ players, myId }: { players: PlayerInfo[]; myId: string
         <div
           className={tx(
             "absolute left-1/2 -translate-x-1/2 top-full mt-1 z-30",
-            "bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[140px]",
+            "bg-white rounded-lg border border-hairline py-1 min-w-[140px]",
           )}
         >
           {players.map((p) => (
             <div
               key={p.id}
-              className={tx("px-3 py-1.5 text-sm text-gray-700 flex items-center gap-1.5")}
+              className={tx("px-3 py-1.5 text-sm text-ink flex items-center gap-1.5")}
             >
               <span>🤔</span>
               <span>{p.name}</span>
@@ -104,7 +104,7 @@ function TransferDropdown({
         type="button"
         onClick={() => setOpen((v) => !v)}
         className={tx(
-          "px-3 py-1.5 text-sm bg-amber-50 text-amber-700 hover:bg-amber-100 rounded-lg transition flex items-center gap-1",
+          "px-3 py-1.5 text-sm bg-amber-50 text-amber-700 hover:bg-amber-100 rounded-full transition flex items-center gap-1",
         )}
       >
         <span>转让画笔</span>
@@ -114,7 +114,7 @@ function TransferDropdown({
         <div
           className={tx(
             "absolute right-0 top-full mt-1 z-30",
-            "bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px]",
+            "bg-white rounded-lg border border-hairline py-1 min-w-[160px]",
           )}
         >
           {candidates.length === 0 && (
@@ -129,7 +129,7 @@ function TransferDropdown({
                 onPick(p.id);
               }}
               className={tx(
-                "w-full px-3 py-1.5 text-sm text-left text-gray-700 hover:bg-amber-50 flex items-center gap-1.5",
+                "w-full px-3 py-1.5 text-sm text-left text-ink hover:bg-amber-50 flex items-center gap-1.5",
               )}
             >
               <span>🤔</span>
@@ -177,22 +177,22 @@ export default function PlayerBar({
   };
 
   return (
-    <div className={tx("flex items-center justify-between p-3 bg-white rounded-xl shadow-sm")}>
+    <div className={tx("flex items-center justify-between p-3 bg-white rounded-lg border border-hairline")}>
       {/* Room info */}
       <div className={tx("flex items-center gap-4 flex-shrink-0")}>
         <div className={tx("flex items-center gap-2 whitespace-nowrap")}>
-          <span className={tx("text-sm text-gray-500")}>房间号</span>
-          <span className={tx("font-mono text-lg font-bold text-indigo-600 tracking-wider")}>
+          <span className={tx("text-sm text-ink-muted")}>房间号</span>
+          <span className={tx("font-mono text-lg font-bold text-primary tracking-wider")}>
             {roomCode}
           </span>
           {players.length < maxPlayers && (
             <button
               onClick={handleCopyLink}
               className={tx(
-                "px-2 py-0.5 text-xs rounded-md transition whitespace-nowrap",
+                "px-2 py-0.5 text-xs rounded-full transition whitespace-nowrap",
                 copied
                   ? "bg-green-100 text-green-700"
-                  : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100",
+                  : "bg-canvas-parchment text-primary hover:bg-canvas-parchment",
               )}
               title="复制房间链接分享给好友"
             >
@@ -211,7 +211,7 @@ export default function PlayerBar({
             phase === "waiting" && "bg-yellow-100 text-yellow-700",
             phase === "drawing" && "bg-blue-100 text-blue-700",
             phase === "guessing" && "bg-green-100 text-green-700",
-            phase === "revealed" && "bg-purple-100 text-purple-700",
+            phase === "revealed" && "bg-canvas-parchment text-ink",
           )}
         >
           {phase === "waiting" && "等待中"}
@@ -227,7 +227,7 @@ export default function PlayerBar({
               return null;
             }
             return (
-              <div className={tx("text-xs text-purple-700 whitespace-nowrap")}>
+              <div className={tx("text-xs text-ink whitespace-nowrap")}>
                 🏆 {winner.name} 即将获得画笔...
               </div>
             );
@@ -255,7 +255,7 @@ export default function PlayerBar({
                   key={p.id}
                   className={tx(
                     "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm",
-                    p.id === drawerId ? "bg-indigo-50 text-indigo-700" : "bg-gray-50 text-gray-700",
+                    p.id === drawerId ? "bg-canvas-parchment text-primary-focus" : "bg-gray-50 text-ink",
                     p.id === myId && "font-semibold",
                   )}
                 >
@@ -281,8 +281,8 @@ export default function PlayerBar({
             <button
               onClick={onContinueDrawing}
               className={tx(
-                "px-3 py-1.5 text-sm bg-indigo-50 text-indigo-700",
-                "hover:bg-indigo-100 rounded-lg transition",
+                "px-3 py-1.5 text-sm bg-canvas-parchment text-primary-focus",
+                "hover:bg-canvas-parchment rounded-full transition",
               )}
             >
               继续出题
@@ -293,7 +293,7 @@ export default function PlayerBar({
             onClick={() => onTransfer()}
             className={tx(
               "px-3 py-1.5 text-sm bg-amber-50 text-amber-700",
-              "hover:bg-amber-100 rounded-lg transition",
+              "hover:bg-amber-100 rounded-full transition",
             )}
           >
             转让画笔
@@ -313,7 +313,7 @@ export default function PlayerBar({
           onClick={onLeave}
           className={tx(
             "px-3 py-1.5 text-sm bg-gray-100 text-gray-600",
-            "hover:bg-gray-200 rounded-lg transition",
+            "hover:bg-gray-200 rounded-full transition",
           )}
         >
           离开

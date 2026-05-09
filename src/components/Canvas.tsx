@@ -271,9 +271,9 @@ export default function Canvas({
   const [isSelDragging, setIsSelDragging] = useState(false);
   const selPatchCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Canvas is 4:3. Height-driven; fall back to width-driven if the container is
-  // too narrow to fit 4:3 at its clientHeight.
-  const RATIO_W = 4;
+  // Canvas is 5:3. Height-driven; fall back to width-driven if the container is
+  // too narrow to fit 5:3 at its clientHeight.
+  const RATIO_W = 5;
   const RATIO_H = 3;
 
   useEffect(() => {
@@ -734,14 +734,14 @@ export default function Canvas({
     <div
       ref={containerRef}
       className={tx(
-        "flex items-center justify-center bg-gray-100 rounded-xl overflow-hidden",
-        "flex-1 min-h-0 relative min-w-[533px] min-h-[400px]",
+        "flex items-center justify-center bg-gray-100 rounded-lg overflow-hidden",
+        "flex-1 min-h-0 relative min-w-[667px] min-h-[400px]",
       )}
     >
       <div className={tx("relative")}>
         <canvas
           ref={canvasRef as React.RefObject<HTMLCanvasElement>}
-          className={tx("bg-white shadow-inner rounded-lg", cursorClass)}
+          className={tx("bg-white shadow-product rounded-lg", cursorClass)}
           onClick={onCanvasClick}
         />
 

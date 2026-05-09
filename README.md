@@ -10,7 +10,7 @@
 
 - 无需注册，输入昵称即可开始游戏
 - 创建 / 加入房间（6 位房间号），每个房间限 2 人，支持一键复制分享链接
-- 4:3 画板，实时同步每一笔
+- 5:3 画板，实时同步每一笔
 - **多种绘图工具**（8 种）：
   - ✏️ 画笔（4 档线宽，逐帧重绘避免 overdraw）
   - T 文本（小/中/大字号，画完可拖动位置、角点调字号）
@@ -192,13 +192,13 @@ npx wrangler pages deploy dist --project-name=draw-guess
 
 - 所有 `{x, y}` 在协议和存储里都是 `[0, 1]` 归一化值，跟画板实际像素解耦
 - 线宽 / 字号按 `REF_WIDTH = 800` 做 `scaleLineWidth`（clamp 0.5~2.0x）
-- 画板实际比例 **4:3**：visible canvas 4:3，离屏缓存 `OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT = 1600×1200`（2× 线性分辨率，曲线/油漆桶在更高分辨率下渲染再 bilinear 下采样到可见画布，显著减少阶梯锯齿）
+- 画板实际比例 **5:3**：visible canvas 5:3，离屏缓存 `OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT = 1600×960`（2× 线性分辨率，曲线/油漆桶在更高分辨率下渲染再 bilinear 下采样到可见画布，显著减少阶梯锯齿）
 
 ## 架构亮点
 
 - **Hibernatable WebSocket**：DO 闲置时可被回收，玩家身份存在 WebSocket attachment 里，醒来自动恢复
 - **两级断线 grace**：正常断线 30s，页面刷新 5s（靠 `pagehide` beacon 识别）
-- **离屏 canvas 缓存**：已完成笔画全部画到固定 1600×1200 的 offscreen canvas，resize 只需 `drawImage` blit 一次（O(1)）；2× 线性分辨率显著减少曲线锯齿
+- **离屏 canvas 缓存**：已完成笔画全部画到固定 1600×960 的 offscreen canvas，resize 只需 `drawImage` blit 一次（O(1)）；2× 线性分辨率显著减少曲线锯齿
 - **油漆桶 flood fill**：scanline + visited 位图（避免 fill 色与目标色在容差内但不相等时已染色像素被反复入栈死循环）+ 边缘 1px alpha 混合消除白晕；offscreen 用 `willReadFrequently:true` 走 CPU readback 快路径
 - **画笔逐帧重绘**：mousemove 不在累积路径上反复 stroke（避免 alpha overdraw），改为每 RAF 帧 sync offscreen + 单次重绘当前 in-progress stroke
 - **strokes 分片存储**：每条 stroke 独立 storage key（`stroke:0000000001`），避开 DO 单值 128KB 上限

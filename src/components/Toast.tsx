@@ -12,7 +12,7 @@ interface Props {
 
 const TYPE_STYLES: Record<ToastType, string> = {
   error: "bg-red-50 text-red-700 border-red-200",
-  info: "bg-indigo-50 text-indigo-700 border-indigo-200",
+  info: "bg-canvas-parchment text-primary-focus border-hairline",
   success: "bg-green-50 text-green-700 border-green-200",
 };
 
@@ -32,7 +32,7 @@ export default function Toast({ message, type = "info", onClose, duration = 3000
     <div
       onClick={onClose}
       className={tx(
-        "fixed top-4 right-4 z-[9999] px-4 py-3 rounded-lg border shadow-lg",
+        "fixed top-4 right-4 z-[9999] px-4 py-3 rounded-lg border",
         "text-sm font-medium max-w-sm cursor-pointer",
         "flex items-center gap-2",
         "animate-[toast-in_200ms_ease-out]",

@@ -93,11 +93,11 @@ export default function App() {
         )}
         style={{ backgroundImage: `url(${bgUrl})` }}
       >
-        <div className={tx("bg-white rounded-2xl shadow-xl p-8 w-full max-w-sm")}>
-          <h2 className={tx("text-xl font-bold text-center mb-2 text-indigo-600")}>
+        <div className={tx("bg-white rounded-lg p-8 w-full max-w-sm border border-hairline")}>
+          <h2 className={tx("text-xl font-bold text-center mb-2 text-primary")}>
             加入房间 {urlJoinCode}
           </h2>
-          <p className={tx("text-gray-500 text-center mb-6 text-sm")}>请输入你的昵称</p>
+          <p className={tx("text-ink-muted text-center mb-6 text-sm")}>请输入你的昵称</p>
           <input
             type="text"
             value={modalName}
@@ -107,16 +107,16 @@ export default function App() {
             maxLength={10}
             autoFocus
             className={tx(
-              "w-full px-4 py-3 border border-gray-300 rounded-lg mb-4",
-              "focus:ring-2 focus:ring-indigo-500 focus:border-transparent",
+              "w-full px-4 py-3 border border-hairline rounded-lg mb-4",
+              "focus:ring-2 focus:ring-primary focus:border-transparent",
               "outline-none transition",
             )}
           />
           <button
             onClick={handleNicknameConfirm}
             className={tx(
-              "w-full py-3 px-4 bg-indigo-500 text-white font-semibold rounded-lg",
-              "hover:bg-indigo-600 transition",
+              "w-full py-3 px-4 bg-primary text-white font-semibold rounded-full",
+              "hover:bg-primary-focus transition",
             )}
           >
             进入房间
@@ -127,7 +127,7 @@ export default function App() {
               setUrlJoinCode("");
               window.history.replaceState(null, "", "/");
             }}
-            className={tx("w-full py-2 text-gray-500 hover:text-gray-700 transition text-sm mt-2")}
+            className={tx("w-full py-2 text-ink-muted hover:text-ink transition text-sm mt-2")}
           >
             返回首页
           </button>
@@ -138,7 +138,7 @@ export default function App() {
 
   // Default: Home page
   return (
-    <div className={tx("min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50")}>
+    <div className={tx("min-h-screen bg-canvas")}>
       <Home onEnterRoom={enterRoom} />
     </div>
   );

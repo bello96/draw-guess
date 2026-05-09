@@ -48,25 +48,25 @@ interface UseCanvasOptions {
   ) => void;
 }
 
-// Logical reference canvas width (paired conceptually with a 4:3 height of
-// 600). lineWidth and fontSize values in the protocol are authored against
+// Logical reference canvas width (paired conceptually with a 5:3 height of
+// 480). lineWidth and fontSize values in the protocol are authored against
 // this width — they're scaled by canvas.width / REF_WIDTH so a `lineWidth=4`
 // stroke looks the same regardless of where the canvas is rendered.
 const REF_WIDTH = 800;
 const MIN_SCALE = 0.5;
 // 上限提到 2.0：OFFSCREEN_WIDTH=1600 时 offscreen 渲染的天然倍率就是 2×，
 // 旧值 1.5 会把 offscreen 的 lineWidth 钳成 0.75 倍，commit 后视觉上线突然变细。
-// visible canvas 通常 533~1067px（4:3，533 是 CSS min），仍不触上限。
+// visible canvas 通常 667~1067px（5:3，667 是 CSS min），仍不触上限。
 const MAX_SCALE = 2.0;
 
-// Physical offscreen canvas dimensions (4:3). Larger than REF for finer
+// Physical offscreen canvas dimensions (5:3). Larger than REF for finer
 // anti-aliasing on curves: pen strokes are rendered at 2× linear resolution,
 // then downsampled when blitted onto the visible canvas (which is typically
 // smaller than OFFSCREEN_WIDTH). This dramatically reduces stair-step
 // aliasing on curved fills/strokes vs. rendering directly at REF_*.
 // Aspect ratio MUST match RATIO_W:RATIO_H in Canvas.tsx and REF_WIDTH:REF_HEIGHT.
 const OFFSCREEN_WIDTH = 1600;
-const OFFSCREEN_HEIGHT = 1200;
+const OFFSCREEN_HEIGHT = 960;
 
 export function scaleLineWidth(baseWidth: number, canvasWidth: number): number {
   const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, canvasWidth / REF_WIDTH));

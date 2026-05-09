@@ -55,14 +55,14 @@ export default function Home({ onEnterRoom }: Props) {
       )}
       style={{ backgroundImage: `url(${bgUrl})` }}
     >
-      <div className={tx("bg-white rounded-2xl shadow-xl p-8 w-full max-w-md")}>
-        <h1 className={tx("text-4xl font-bold text-center mb-2 text-indigo-600")}>🎨 你画我猜</h1>
-        <p className={tx("text-gray-500 text-center mb-8")}>和朋友一起画画猜词吧！</p>
+      <div className={tx("bg-white rounded-lg p-8 w-full max-w-md border border-hairline")}>
+        <h1 className={tx("text-4xl font-bold text-center mb-2 text-primary")}>🎨 你画我猜</h1>
+        <p className={tx("text-ink-muted text-center mb-8")}>和朋友一起画画猜词吧！</p>
 
         {/* Name input — 只在二级页显示 */}
         {mode !== "menu" && (
           <div className={tx("mb-6")}>
-            <label className={tx("block text-sm font-medium text-gray-700 mb-1")}>你的昵称</label>
+            <label className={tx("block text-sm font-medium text-ink mb-1")}>你的昵称</label>
             <input
               type="text"
               value={name}
@@ -70,8 +70,8 @@ export default function Home({ onEnterRoom }: Props) {
               placeholder="输入昵称..."
               maxLength={10}
               className={tx(
-                "w-full px-4 py-3 border border-gray-300 rounded-lg",
-                "focus:ring-2 focus:ring-indigo-500 focus:border-transparent",
+                "w-full px-4 py-3 border border-hairline rounded-lg",
+                "focus:ring-2 focus:ring-primary focus:border-transparent",
                 "outline-none transition",
               )}
             />
@@ -88,10 +88,10 @@ export default function Home({ onEnterRoom }: Props) {
                   type="button"
                   onClick={() => setMaxPlayers(n)}
                   className={tx(
-                    "flex-1 py-2 rounded-lg text-sm font-medium transition",
+                    "flex-1 py-2 rounded-full text-sm font-medium transition",
                     maxPlayers === n
-                      ? "bg-indigo-100 text-indigo-700 border border-indigo-300"
-                      : "bg-gray-100 text-gray-500 hover:bg-gray-200 border border-gray-200",
+                      ? "bg-canvas-parchment text-primary-focus border border-primary"
+                      : "bg-gray-100 text-ink-muted hover:bg-gray-200 border border-gray-200",
                   )}
                 >
                   {n}人
@@ -113,8 +113,8 @@ export default function Home({ onEnterRoom }: Props) {
               <button
                 onClick={() => setMode("create")}
                 className={tx(
-                  "w-full py-3 px-4 bg-indigo-500 text-white font-semibold rounded-lg",
-                  "hover:bg-indigo-600 transition flex items-center justify-center gap-2",
+                  "w-full py-3 px-4 bg-primary text-white font-semibold rounded-full",
+                  "hover:bg-primary-focus transition flex items-center justify-center gap-2",
                 )}
               >
                 <span>🏠</span>
@@ -123,8 +123,8 @@ export default function Home({ onEnterRoom }: Props) {
               <button
                 onClick={() => setMode("join")}
                 className={tx(
-                  "w-full py-3 px-4 bg-indigo-50 text-indigo-600 font-semibold rounded-lg",
-                  "border-2 border-indigo-600 hover:bg-indigo-100 transition",
+                  "w-full py-3 px-4 bg-canvas-parchment text-primary font-semibold rounded-full",
+                  "border-2 border-primary hover:bg-canvas-parchment transition",
                   "flex items-center justify-center gap-2",
                 )}
               >
@@ -144,8 +144,8 @@ export default function Home({ onEnterRoom }: Props) {
               onClick={handleCreate}
               disabled={loading}
               className={tx(
-                "w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-lg",
-                "hover:bg-indigo-700 transition disabled:opacity-50",
+                "w-full py-3 px-4 bg-primary text-white font-semibold rounded-lg",
+                "hover:bg-primary-focus transition disabled:opacity-50",
               )}
             >
               {loading ? "创建中..." : "确认创建"}
@@ -155,7 +155,7 @@ export default function Home({ onEnterRoom }: Props) {
                 setMode("menu");
                 setError("");
               }}
-              className={tx("w-full py-2 text-gray-500 hover:text-gray-700 transition text-sm")}
+              className={tx("w-full py-2 text-ink-muted hover:text-ink transition text-sm")}
             >
               返回
             </button>
@@ -171,8 +171,8 @@ export default function Home({ onEnterRoom }: Props) {
               placeholder="输入6位房间号"
               maxLength={6}
               className={tx(
-                "w-full px-4 py-3 border border-gray-300 rounded-lg text-center text-2xl tracking-[0.5em]",
-                "focus:ring-2 focus:ring-indigo-500 focus:border-transparent",
+                "w-full px-4 py-3 border border-hairline rounded-lg text-center text-2xl tracking-[0.5em]",
+                "focus:ring-2 focus:ring-primary focus:border-transparent",
                 "outline-none transition",
               )}
             />
@@ -180,8 +180,8 @@ export default function Home({ onEnterRoom }: Props) {
               onClick={handleJoin}
               disabled={loading}
               className={tx(
-                "w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-lg",
-                "hover:bg-indigo-700 transition disabled:opacity-50",
+                "w-full py-3 px-4 bg-primary text-white font-semibold rounded-lg",
+                "hover:bg-primary-focus transition disabled:opacity-50",
               )}
             >
               {loading ? "加入中..." : "确认加入"}
@@ -192,7 +192,7 @@ export default function Home({ onEnterRoom }: Props) {
                 setJoinCode("");
                 setError("");
               }}
-              className={tx("w-full py-2 text-gray-500 hover:text-gray-700 transition text-sm")}
+              className={tx("w-full py-2 text-ink-muted hover:text-ink transition text-sm")}
             >
               返回
             </button>

@@ -19,6 +19,7 @@ export type ToolMode =
   | "selection"
   | "eraser";
 export type FillMode = "stroke" | "fill";
+type FillShape = "rect" | "ellipse" | "triangle" | "star" | "heart";
 export type TextSize = "small" | "medium" | "large";
 
 // ---------- Pickers' options ----------
@@ -249,7 +250,7 @@ function CustomColorPanel({
     <div
       data-color-panel="true"
       className={tx(
-        "absolute bottom-full mb-4 p-3 bg-white rounded-lg shadow-lg border border-gray-200 z-50",
+        "absolute bottom-full mb-4 p-3 bg-white rounded-lg border border-hairline z-50",
       )}
       style={{ width: 280 }}
       onMouseDown={(e) => e.stopPropagation()}
@@ -281,7 +282,7 @@ function CustomColorPanel({
             onClick={pickFromScreen}
             title="吸取屏幕颜色"
             className={tx(
-              "w-7 h-7 rounded border border-gray-300 flex items-center justify-center text-gray-600 hover:bg-gray-100 transition flex-shrink-0",
+              "w-7 h-7 rounded border border-hairline flex items-center justify-center text-gray-600 hover:bg-gray-100 transition flex-shrink-0",
             )}
           >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
@@ -300,14 +301,14 @@ function CustomColorPanel({
             }
           }}
           className={tx(
-            "flex-1 min-w-0 px-2 py-1 border border-gray-300 rounded text-sm font-mono outline-none focus:border-indigo-400",
+            "flex-1 min-w-0 px-2 py-1 border border-hairline rounded text-sm font-mono outline-none focus:border-primary",
           )}
           spellCheck={false}
         />
         <button
           onClick={onCancel}
           className={tx(
-            "px-3 ml-5 py-1 text-sm rounded border border-gray-300 hover:bg-gray-100 transition flex-shrink-0",
+            "px-3 ml-5 py-1 text-sm rounded border border-hairline hover:bg-gray-100 transition flex-shrink-0",
           )}
         >
           关闭
@@ -315,7 +316,7 @@ function CustomColorPanel({
         <button
           onClick={onConfirm}
           className={tx(
-            "px-3 py-1 text-sm rounded bg-indigo-500 text-white hover:bg-indigo-600 transition flex-shrink-0",
+            "px-3 py-1 text-sm rounded bg-primary text-white hover:bg-primary-focus transition flex-shrink-0",
           )}
         >
           确定
@@ -392,7 +393,7 @@ function ColorPalette({
           onClick={() => handleSelect(c)}
           className={tx(
             "w-5 h-5 rounded transition border",
-            isActive(c) ? "ring-2 ring-indigo-400 scale-110" : "border-gray-300",
+            isActive(c) ? "ring-2 ring-primary scale-110" : "border-hairline",
           )}
           style={{ backgroundColor: c }}
         />
@@ -403,7 +404,7 @@ function ColorPalette({
         onClick={() => setPanelOpen((v) => !v)}
         className={tx(
           "w-5 h-5 rounded transition relative overflow-hidden hover:scale-110",
-          customActive ? "ring-2 ring-indigo-400 scale-110" : "border border-gray-300",
+          customActive ? "ring-2 ring-primary scale-110" : "border border-hairline",
         )}
         style={{
           backgroundImage: "repeating-conic-gradient(#e5e7eb 0% 25%, #ffffff 0% 50%)",
@@ -447,7 +448,7 @@ function LineWidthPicker({ value, onChange }: { value: number; onChange: (w: num
           onClick={() => onChange(w)}
           className={tx(
             "w-7 h-7 rounded flex items-center justify-center transition",
-            w === value ? "bg-indigo-100" : "hover:bg-gray-100",
+            w === value ? "bg-canvas-parchment" : "hover:bg-gray-100",
           )}
           title={`${w}px`}
         >
@@ -458,53 +459,85 @@ function LineWidthPicker({ value, onChange }: { value: number; onChange: (w: num
   );
 }
 
+// FillToggle 用：用 SVG 渲染当前工具自己的几何形状（之前 triangle / star / heart
+// 的线框 / 填充预览都退化成方块或圆，有歧义）。viewBox 24×24 + size 14；stroke
+// 默认 center-align，每个形状各留 2px 边避免被裁。
+function FillShapeIcon({ shape, filled }: { shape: FillShape; filled: boolean }) {
+  const fill = filled ? "currentColor" : "none";
+  const stroke = "currentColor";
+  const strokeWidth = 2;
+  const common = { fill, stroke, strokeWidth, strokeLinejoin: "round" as const };
+  let body: JSX.Element;
+  switch (shape) {
+    case "rect":
+      body = <rect x={2} y={2} width={20} height={20} {...common} />;
+      break;
+    case "ellipse":
+      body = <circle cx={12} cy={12} r={10} {...common} />;
+      break;
+    case "triangle":
+      body = <polygon points="12,2 2,22 22,22" {...common} />;
+      break;
+    case "star": {
+      const cx = 12;
+      const cy = 12;
+      const rOuter = 10;
+      const rInner = 4.2;
+      const pts: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const a = -Math.PI / 2 + (i * Math.PI) / 5;
+        const r = i % 2 === 0 ? rOuter : rInner;
+        pts.push(`${(cx + r * Math.cos(a)).toFixed(2)},${(cy + r * Math.sin(a)).toFixed(2)}`);
+      }
+      body = <polygon points={pts.join(" ")} {...common} />;
+      break;
+    }
+    case "heart":
+      body = (
+        <path
+          d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+          {...common}
+        />
+      );
+      break;
+  }
+  return (
+    <svg width={14} height={14} viewBox="0 0 24 24" style={{ display: "block" }}>
+      {body}
+    </svg>
+  );
+}
+
 function FillToggle({
   shape,
   value,
   onChange,
 }: {
-  shape: "rect" | "ellipse";
+  shape: FillShape;
   value: FillMode;
   onChange: (m: FillMode) => void;
 }) {
-  const radius = shape === "ellipse" ? "50%" : "2px";
   return (
     <div className={tx("flex gap-1 items-center")}>
       <button
         onClick={() => onChange("stroke")}
         className={tx(
           "w-7 h-7 rounded flex items-center justify-center transition",
-          value === "stroke" ? "bg-indigo-100" : "hover:bg-gray-100",
+          value === "stroke" ? "bg-canvas-parchment" : "hover:bg-gray-100",
         )}
         title="线框"
       >
-        <span
-          style={{
-            display: "block",
-            width: 14,
-            height: 14,
-            border: "2px solid currentColor",
-            borderRadius: radius,
-          }}
-        />
+        <FillShapeIcon shape={shape} filled={false} />
       </button>
       <button
         onClick={() => onChange("fill")}
         className={tx(
           "w-7 h-7 rounded flex items-center justify-center transition",
-          value === "fill" ? "bg-indigo-100" : "hover:bg-gray-100",
+          value === "fill" ? "bg-canvas-parchment" : "hover:bg-gray-100",
         )}
         title="填充"
       >
-        <span
-          style={{
-            display: "block",
-            width: 14,
-            height: 14,
-            background: "currentColor",
-            borderRadius: radius,
-          }}
-        />
+        <FillShapeIcon shape={shape} filled={true} />
       </button>
     </div>
   );
@@ -520,8 +553,8 @@ function TextSizePicker({ value, onChange }: { value: TextSize; onChange: (s: Te
           className={tx(
             "h-7 px-2 rounded flex items-center justify-center transition text-sm",
             value === s
-              ? "bg-indigo-100 text-indigo-700 font-semibold"
-              : "hover:bg-gray-100 text-gray-700",
+              ? "bg-canvas-parchment text-primary-focus font-semibold"
+              : "hover:bg-gray-100 text-ink",
           )}
         >
           {TEXT_SIZE_LABEL[s]}
@@ -629,7 +662,7 @@ function BrushPicker({
         title={`画笔类型：${BRUSH_LABELS[value]}`}
         className={tx(
           "h-7 px-2 rounded flex items-center gap-1.5 transition text-sm",
-          open ? "bg-indigo-100 text-indigo-700" : "hover:bg-gray-100 text-gray-700",
+          open ? "bg-canvas-parchment text-primary-focus" : "hover:bg-gray-100 text-ink",
         )}
       >
         <BrushPreview brush={value} width={42} height={16} lineWidth={3} />
@@ -641,7 +674,7 @@ function BrushPicker({
         <div
           data-brush-panel="true"
           className={tx(
-            "absolute bottom-full mb-2 left-0 bg-white rounded-lg shadow-lg border border-gray-200 z-50 py-1",
+            "absolute bottom-full mb-2 left-0 bg-white rounded-lg border border-hairline z-50 py-1",
           )}
           style={{ minWidth: 140 }}
         >
@@ -655,8 +688,8 @@ function BrushPicker({
               className={tx(
                 "w-full px-3 py-1.5 flex items-center gap-3 transition text-sm",
                 b === value
-                  ? "bg-indigo-50 text-indigo-700"
-                  : "hover:bg-gray-50 text-gray-700",
+                  ? "bg-canvas-parchment text-primary-focus"
+                  : "hover:bg-gray-50 text-ink",
               )}
             >
               <span className={tx("min-w-[3.5em] text-left")}>{BRUSH_LABELS[b]}</span>
@@ -719,7 +752,7 @@ function ToolPopover({
       ref={popoverRef}
       className={tx(
         "absolute bottom-full mb-2",
-        "bg-white rounded-xl shadow-lg border border-gray-100",
+        "bg-white rounded-lg border border-hairline",
         "px-3 py-2 flex items-center gap-2 whitespace-nowrap",
       )}
       style={{
@@ -862,9 +895,9 @@ export default function Toolbar({
           onClick={() => handleToolClick(t)}
           title={meta.label}
           className={tx(
-            "w-9 h-9 rounded-lg flex items-center justify-center transition",
+            "w-9 h-9 rounded-full flex items-center justify-center transition",
             active
-              ? "bg-indigo-100 text-indigo-700 ring-1 ring-indigo-300"
+              ? "bg-canvas-parchment text-primary-focus ring-1 ring-primary"
               : "text-gray-600 hover:bg-gray-100",
           )}
         >
@@ -890,7 +923,7 @@ export default function Toolbar({
               <>
                 <div className={tx("w-px h-6 bg-gray-200")} />
                 <FillToggle
-                  shape={t as "rect" | "ellipse"}
+                  shape={t as FillShape}
                   value={fillMode}
                   onChange={onFillModeChange}
                 />
@@ -917,7 +950,7 @@ export default function Toolbar({
     <div
       ref={toolbarRef}
       className={tx(
-        "flex items-center gap-2 p-2 bg-white rounded-xl shadow-sm relative",
+        "flex items-center gap-2 p-2 bg-white rounded-lg border border-hairline relative",
         disabled && "opacity-50 pointer-events-none",
       )}
     >
@@ -955,7 +988,7 @@ export default function Toolbar({
           disabled={!canUndo}
           title="撤销"
           className={tx(
-            "w-9 h-9 rounded-lg flex items-center justify-center transition",
+            "w-9 h-9 rounded-full flex items-center justify-center transition",
             canUndo ? "text-gray-600 hover:bg-gray-100" : "text-gray-300 cursor-not-allowed",
           )}
         >
@@ -966,7 +999,7 @@ export default function Toolbar({
           disabled={!canRedo}
           title="重做"
           className={tx(
-            "w-9 h-9 rounded-lg flex items-center justify-center transition",
+            "w-9 h-9 rounded-full flex items-center justify-center transition",
             canRedo ? "text-gray-600 hover:bg-gray-100" : "text-gray-300 cursor-not-allowed",
           )}
         >
@@ -982,7 +1015,7 @@ export default function Toolbar({
           onClick={onClear}
           title="清除"
           className={tx(
-            "w-9 h-9 rounded-lg flex items-center justify-center transition",
+            "w-9 h-9 rounded-full flex items-center justify-center transition",
             "text-red-500 hover:bg-red-50",
           )}
         >

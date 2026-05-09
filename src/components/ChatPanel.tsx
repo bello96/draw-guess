@@ -32,7 +32,7 @@ const MODE_CONFIG: Record<
   chat: {
     label: "聊天",
     btnText: "发送",
-    borderColor: "border-gray-300",
+    borderColor: "border-hairline",
     focusRing: "focus:ring-gray-400",
     btnBg: "bg-gray-600",
     btnHover: "hover:bg-gray-700",
@@ -41,10 +41,10 @@ const MODE_CONFIG: Record<
   setAnswer: {
     label: "答案",
     btnText: "确认",
-    borderColor: "border-indigo-400",
-    focusRing: "focus:ring-indigo-400",
-    btnBg: "bg-indigo-600",
-    btnHover: "hover:bg-indigo-700",
+    borderColor: "border-primary",
+    focusRing: "focus:ring-primary",
+    btnBg: "bg-primary",
+    btnHover: "hover:bg-primary-focus",
     placeholder: "输入正确答案...",
   },
   guess: {
@@ -133,12 +133,16 @@ export default function ChatPanel({
   const cfg = MODE_CONFIG[mode];
 
   return (
-    <div className={tx("flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden")}>
+    <div
+      className={tx(
+        "flex flex-col h-full bg-white rounded-lg overflow-hidden border border-hairline",
+      )}
+    >
       {/* Header */}
       <div className={tx("px-4 py-3 border-b border-gray-100")}>
-        <h3 className={tx("font-semibold text-gray-700")}>聊天</h3>
+        <h3 className={tx("font-semibold text-ink")}>聊天区</h3>
         {isDrawer && answerText && (phase === "guessing" || phase === "revealed") && (
-          <div className={tx("text-sm text-indigo-600 mt-1")}>答案：{answerText}</div>
+          <div className={tx("text-sm text-primary mt-1")}>答案：{answerText}</div>
         )}
         {!isDrawer && phase === "guessing" && answerLength && (
           <div className={tx("text-sm text-green-600 mt-1")}>
@@ -172,12 +176,12 @@ export default function ChatPanel({
               </div>
             ) : (
               <div className={tx("text-sm")}>
-                <span className={tx("font-medium text-indigo-600")}>
+                <span className={tx("font-medium text-primary")}>
                   {msg.playerName}
                   {msg.playerId === myId && "（你）"}
                 </span>
                 <span className={tx("text-gray-400 mx-1")}>:</span>
-                <span className={tx("text-gray-700")}>{msg.text}</span>
+                <span className={tx("text-ink")}>{msg.text}</span>
               </div>
             )}
           </div>
@@ -187,7 +191,7 @@ export default function ChatPanel({
       {/* Unified input */}
       <div className={tx("px-3 py-2 border-t border-gray-100")}>
         {mode === "setAnswer" && (
-          <div className={tx("text-xs text-indigo-600 mb-1.5")}>
+          <div className={tx("text-xs text-primary mb-1.5")}>
             {playerCount > 2 ? "设置答案后其他玩家才能开始猜" : "设置答案后对方才能开始猜"}
           </div>
         )}
@@ -212,7 +216,7 @@ export default function ChatPanel({
           <button
             onClick={handleSubmit}
             className={tx(
-              "px-4 py-2 text-sm text-white rounded-lg transition shrink-0",
+              "px-4 py-2 text-sm text-white rounded-full transition shrink-0",
               cfg.btnBg,
               cfg.btnHover,
             )}
@@ -224,9 +228,10 @@ export default function ChatPanel({
               onClick={cycleMode}
               title="切换输入模式"
               className={tx(
-                "px-2.5 py-2 text-xs font-medium rounded-lg transition shrink-0",
+                "px-2.5 py-2 text-xs font-medium rounded-full transition shrink-0",
                 mode === "chat" && "bg-gray-100 text-gray-600 hover:bg-gray-200",
-                mode === "setAnswer" && "bg-indigo-100 text-indigo-700 hover:bg-indigo-200",
+                mode === "setAnswer" &&
+                  "bg-canvas-parchment text-primary-focus hover:bg-canvas-parchment",
                 mode === "guess" && "bg-green-100 text-green-700 hover:bg-green-200",
               )}
             >
