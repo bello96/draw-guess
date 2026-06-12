@@ -9,6 +9,7 @@ import {
   svgPathStar,
   svgPathHeart,
   getStrokeBBoxPx,
+  HAND_FONT_FAMILY,
 } from "../hooks/useCanvas";
 
 type Point = { x: number; y: number };
@@ -77,7 +78,7 @@ function measureTextWidth(text: string, fontSize: number): number {
   if (!ctx) {
     return 60;
   }
-  ctx.font = `${fontSize}px sans-serif`;
+  ctx.font = `${fontSize}px ${HAND_FONT_FAMILY}`;
   const lines = text.split("\n");
   const maxWidth = Math.max(...lines.map((l) => ctx.measureText(l || " ").width));
   return Math.max(60, maxWidth + 8);
@@ -855,7 +856,7 @@ export default function Canvas({
                 style={{
                   fontSize: displayFontSize,
                   lineHeight: 1.2,
-                  fontFamily: "sans-serif",
+                  fontFamily: HAND_FONT_FAMILY,
                   color: textColor,
                   background: "transparent",
                   border: "none",

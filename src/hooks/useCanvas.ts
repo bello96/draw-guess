@@ -73,6 +73,35 @@ const MIN_SCALE = 0.5;
 // visible canvas 通常 667~1067px（5:3，667 是 CSS min），仍不触上限。
 const MAX_SCALE = 2.0;
 
+// 画板文本的手写字体栈：Excalifont 覆盖英文/数字，Xiaolai（小赖体）覆盖中文。
+// 字体由自托管 CDN 提供（index.html 引入 fonts.dengjiabei.cn/hand.css），按
+// unicode-range 子集懒加载；CDN 不可达时回退 cursive / 系统字体。
+export const HAND_FONT_FAMILY = '"Excalifont", "Xiaolai", cursive';
+
+// document.fonts.check / load 用的探针串。故意不含 cursive：generic family
+// 永远视作已加载，带上它 check() 恒为 true，真正需要的网络加载会被跳过。
+const HAND_FONT_PROBE = '16px "Excalifont", "Xiaolai"';
+
+/**
+ * 触发 text 所需手写字体子集的下载。canvas 的 fillText 不像 DOM 文本那样会
+ * 自动触发 @font-face（unicode-range 子集）加载，必须显式 load；加载完成后
+ * 由 useCanvas 里的 "loadingdone" 监听统一重建离屏，把回退字形换成手写体。
+ */
+function kickHandFontLoad(text: string): void {
+  if (typeof document === "undefined" || !document.fonts) {
+    return;
+  }
+  try {
+    if (!document.fonts.check(HAND_FONT_PROBE, text)) {
+      document.fonts.load(HAND_FONT_PROBE, text).catch(() => {
+        // CDN 不可达：维持回退字体渲染，不重试不报错
+      });
+    }
+  } catch {
+    // 老浏览器无 FontFaceSet API：直接用回退字体
+  }
+}
+
 // Physical offscreen canvas dimensions (5:3). Larger than REF for finer
 // anti-aliasing on curves: pen strokes are rendered at 2× linear resolution,
 // then downsampled when blitted onto the visible canvas (which is typically
@@ -318,7 +347,7 @@ export function getStrokeBBoxPx(
     }
     // 与 renderStrokeToCtx 的文字渲染同一套字号/行高公式，bbox 才会贴合实绘。
     const fontSize = (stroke.fontSize || 24) * (canvas.width / REF_WIDTH);
-    ctx.font = `${fontSize}px sans-serif`;
+    ctx.font = `${fontSize}px ${HAND_FONT_FAMILY}`;
     const lines = stroke.text.split("\n");
     let maxW = 0;
     for (const line of lines) {
@@ -1148,7 +1177,8 @@ function renderStrokeToCtx(
       return;
     }
     const fontSize = (stroke.fontSize || 24) * (canvas.width / REF_WIDTH);
-    ctx.font = `${fontSize}px sans-serif`;
+    kickHandFontLoad(stroke.text);
+    ctx.font = `${fontSize}px ${HAND_FONT_FAMILY}`;
     ctx.fillStyle = stroke.color;
     ctx.textBaseline = "top";
     const px = stroke.points[0].x * canvas.width;
@@ -1272,6 +1302,9 @@ export function useCanvas({
   } | null>(null);
   const pendingPointsRef = useRef<Point[]>([]);
   const rafIdRef = useRef<number | null>(null);
+  // 框选悬空标记：beginSelection 已把 src 区域涂白、patch 还浮在 overlay 上。
+  // 此窗口内禁止 rebuildOffscreen（会把 src 原像素恢复出来，commit 后变重影）。
+  const hasPendingSelectionRef = useRef(false);
 
   // Offscreen canvas — single source of truth for committed strokes.
   // Initialized with an opaque white background so the bucket tool has
@@ -1334,6 +1367,30 @@ export function useCanvas({
     }
   }, []);
 
+  // 手写字体（Excalifont / Xiaolai）按 unicode-range 子集异步加载：roomState
+  // 回放或远端 textStroke 到达时字体可能尚未就绪，文字先以回退字体绘制。
+  // 任一批字体加载完成（loadingdone）后整体重建离屏并同步可见画布，替换
+  // 回退字形。pen 进行中的 live 笔画只画在 visible 上，下一 RAF 帧会自愈。
+  useEffect(() => {
+    if (typeof document === "undefined" || !document.fonts) {
+      return;
+    }
+    const fonts = document.fonts;
+    const onFontsLoaded = () => {
+      // 框选悬空期跳过：rebuild 会恢复已涂白的 src 像素造成重影。此时不重绘，
+      // 字形等下一次全量重建（undo / clear / 撤销框选等）再矫正。
+      if (hasPendingSelectionRef.current) {
+        return;
+      }
+      rebuildOffscreen(strokesRef.current);
+      syncVisibleFromOffscreen();
+    };
+    fonts.addEventListener("loadingdone", onFontsLoaded);
+    return () => {
+      fonts.removeEventListener("loadingdone", onFontsLoaded);
+    };
+  }, [rebuildOffscreen, syncVisibleFromOffscreen]);
+
   /**
    * Drawer-side: open a selection. Extracts a patch from the offscreen src rect,
    * whitens src on the offscreen, mirrors to visible, and returns the patch
@@ -1368,6 +1425,7 @@ export function useCanvas({
       offCtx.fillStyle = "#ffffff";
       offCtx.fillRect(srcPxX, srcPxY, srcPxW, srcPxH);
       syncVisibleFromOffscreen();
+      hasPendingSelectionRef.current = true;
       return patch;
     },
     [syncVisibleFromOffscreen],
@@ -1383,6 +1441,7 @@ export function useCanvas({
       srcNorm: { x: number; y: number; w: number; h: number },
       dstNorm: { x: number; y: number },
     ) => {
+      hasPendingSelectionRef.current = false;
       const offs = offscreenRef.current;
       if (!offs) {
         return;
@@ -1421,6 +1480,7 @@ export function useCanvas({
    * selection). Called when the user switches away or clears without commit.
    */
   const cancelLocalSelection = useCallback(() => {
+    hasPendingSelectionRef.current = false;
     rebuildOffscreen(strokesRef.current);
     syncVisibleFromOffscreen();
   }, [rebuildOffscreen, syncVisibleFromOffscreen]);
