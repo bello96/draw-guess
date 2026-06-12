@@ -1180,13 +1180,18 @@ function renderStrokeToCtx(
     kickHandFontLoad(stroke.text);
     ctx.font = `${fontSize}px ${HAND_FONT_FAMILY}`;
     ctx.fillStyle = stroke.color;
-    ctx.textBaseline = "top";
+    // 每行占 1.2em 的"行槽"，stroke.points[0] 是槽位区域的左上角。字形用
+    // textBaseline="middle" 画在槽位垂直中心：CJK 无下伸笔画时上下留白对称
+    // （旧 textBaseline="top" 把 descent + 行距全堆到槽底，框内文字偏上）。
+    // CSS 行盒的 half-leading 也是把字形内容盒居中，textarea 预览（Canvas.tsx，
+    // marginTop 0 + line-height 1.2）与这里天然对齐，改一边必须同步另一边。
+    ctx.textBaseline = "middle";
     const px = stroke.points[0].x * canvas.width;
     const py = stroke.points[0].y * canvas.height;
     const lineHeight = fontSize * 1.2;
     const lines = stroke.text.split("\n");
     for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], px, py + i * lineHeight);
+      ctx.fillText(lines[i], px, py + (i + 0.5) * lineHeight);
     }
     return;
   }

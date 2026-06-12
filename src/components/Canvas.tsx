@@ -863,7 +863,10 @@ export default function Canvas({
                   outline: "none",
                   resize: "none",
                   padding: 0,
-                  marginTop: -displayFontSize * 0.1,
+                  // 不再上提 -0.1em：canvas 端已改为槽内垂直居中绘制
+                  // （useCanvas renderStrokeToCtx 的 textBaseline="middle"），
+                  // CSS half-leading 自动居中行盒内容，两边语义一致。
+                  marginTop: 0,
                   marginLeft: 0,
                   marginRight: 0,
                   marginBottom: 0,
