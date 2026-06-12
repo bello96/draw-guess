@@ -34,6 +34,16 @@ export interface PlayerInfo {
   isOwner: boolean;
 }
 
+/**
+ * 文本笔画的局部颜色区间：[start, end) 为字符索引（按整段 text 计数，含 \n）。
+ * 约定互不重叠、按 start 升序；未被任何区间覆盖的字符用 stroke.color 默认色。
+ */
+export interface TextColorRange {
+  start: number;
+  end: number;
+  color: string;
+}
+
 export interface SerializedStroke {
   points: { x: number; y: number }[];
   color: string;
@@ -43,6 +53,8 @@ export interface SerializedStroke {
   // Text stroke fields (optional)
   text?: string;
   fontSize?: number;
+  // 文本局部上色（可选；缺省 = 整段用 color）。纯加字段，不 bump 协议版本。
+  colorRanges?: TextColorRange[];
   // Shape stroke fields (optional).
   // - rect/ellipse/triangle/star/heart: points = [topLeft, bottomRight] (normalized, min→max)
   // - arrow/line:                       points = [start, end]           (normalized; arrow preserves direction)
@@ -125,6 +137,7 @@ export interface C_TextStroke {
   y: number;
   color: string;
   fontSize: number;
+  colorRanges?: TextColorRange[];
 }
 
 export interface C_Shape {
@@ -300,6 +313,7 @@ export interface S_TextStroke {
   y: number;
   color: string;
   fontSize: number;
+  colorRanges?: TextColorRange[];
 }
 
 export interface S_Shape {

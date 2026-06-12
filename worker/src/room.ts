@@ -8,6 +8,7 @@ import {
   MAX_DELETE_STROKES,
   MAX_MAX_PLAYERS,
   MAX_NAME_LENGTH,
+  MAX_TEXT_COLOR_RANGES,
   MAX_TEXT_STROKE_LENGTH,
   MIN_MAX_PLAYERS,
   PROTOCOL_VERSION,
@@ -419,6 +420,7 @@ export class GameRoom implements DurableObject {
             y: number;
             color: string;
             fontSize: number;
+            colorRanges?: { start: number; end: number; color: string }[];
           },
         );
         break;
@@ -821,6 +823,7 @@ export class GameRoom implements DurableObject {
       y: number;
       color: string;
       fontSize: number;
+      colorRanges?: { start: number; end: number; color: string }[];
     },
   ) {
     const player = this.getPlayer(ws);
@@ -836,6 +839,32 @@ export class GameRoom implements DurableObject {
       return;
     }
 
+    // 局部上色区间校验：逐项检查整数 / 范围内 / start<end，非法项丢弃；
+    // 数量截断防滥用。引用被截断文本之外的区间一并丢弃。
+    let colorRanges: { start: number; end: number; color: string }[] | undefined;
+    if (Array.isArray(msg.colorRanges)) {
+      const cleaned: { start: number; end: number; color: string }[] = [];
+      for (const r of msg.colorRanges.slice(0, MAX_TEXT_COLOR_RANGES)) {
+        if (
+          !r ||
+          typeof r !== "object" ||
+          !Number.isInteger(r.start) ||
+          !Number.isInteger(r.end) ||
+          typeof r.color !== "string" ||
+          r.color.length > 32 ||
+          r.start < 0 ||
+          r.end > text.length ||
+          r.start >= r.end
+        ) {
+          continue;
+        }
+        cleaned.push({ start: r.start, end: r.end, color: r.color });
+      }
+      if (cleaned.length > 0) {
+        colorRanges = cleaned;
+      }
+    }
+
     const stroke: SerializedStroke = {
       points: [{ x: msg.x, y: msg.y }],
       color: msg.color,
@@ -843,6 +872,9 @@ export class GameRoom implements DurableObject {
       text,
       fontSize: msg.fontSize,
     };
+    if (colorRanges) {
+      stroke.colorRanges = colorRanges;
+    }
     this.strokes.push(stroke);
     this.redoStack = []; // new stroke invalidates redo history
     await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
@@ -855,6 +887,7 @@ export class GameRoom implements DurableObject {
         y: msg.y,
         color: msg.color,
         fontSize: msg.fontSize,
+        colorRanges,
       },
       ws,
     );

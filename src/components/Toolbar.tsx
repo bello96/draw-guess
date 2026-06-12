@@ -320,7 +320,7 @@ function CustomColorPanel({
   );
 }
 
-function ColorPalette({
+export function ColorPalette({
   value,
   onChange,
   customColor,

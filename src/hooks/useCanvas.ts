@@ -5,8 +5,10 @@ import type {
   GamePhase,
   S_Draw,
   SerializedStroke,
+  TextColorRange,
 } from "../types/protocol";
 import type { FillMode, ToolMode } from "../components/Toolbar";
+import { lineSegments } from "../utils/textColor";
 
 type Point = { x: number; y: number };
 
@@ -1190,8 +1192,25 @@ function renderStrokeToCtx(
     const py = stroke.points[0].y * canvas.height;
     const lineHeight = fontSize * 1.2;
     const lines = stroke.text.split("\n");
+    const ranges = stroke.colorRanges;
+    let lineStart = 0;
     for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], px, py + (i + 0.5) * lineHeight);
+      const lineY = py + (i + 0.5) * lineHeight;
+      if (ranges && ranges.length > 0) {
+        // 局部上色：按颜色区间切段逐段绘制，x 按各段 advance 宽度累加。
+        // 分段 fillText 会丢段间 kerning，但 CJK 无 kerning、误差可忽略。
+        let segX = px;
+        for (const seg of lineSegments(lines[i], lineStart, ranges)) {
+          if (seg.text) {
+            ctx.fillStyle = seg.color ?? stroke.color;
+            ctx.fillText(seg.text, segX, lineY);
+            segX += ctx.measureText(seg.text).width;
+          }
+        }
+      } else {
+        ctx.fillText(lines[i], px, lineY);
+      }
+      lineStart += lines[i].length + 1; // +1 算上行尾 \n
     }
     return;
   }
@@ -2095,7 +2114,14 @@ export function useCanvas({
 
   // Add a text stroke from remote (commit to offscreen + mirror to visible)
   const addTextStroke = useCallback(
-    (text: string, x: number, y: number, textColor: string, fontSize: number) => {
+    (
+      text: string,
+      x: number,
+      y: number,
+      textColor: string,
+      fontSize: number,
+      colorRanges?: TextColorRange[],
+    ) => {
       const stroke: SerializedStroke = {
         points: [{ x, y }],
         color: textColor,
@@ -2103,6 +2129,9 @@ export function useCanvas({
         text,
         fontSize,
       };
+      if (colorRanges && colorRanges.length > 0) {
+        stroke.colorRanges = colorRanges;
+      }
       commitToOffscreen(stroke);
       const canvas = canvasRef.current;
       if (canvas) {

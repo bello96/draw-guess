@@ -19,6 +19,8 @@ export const MAX_NAME_LENGTH = 10;
 export const MAX_ANSWER_LENGTH = 20;
 export const MAX_CHAT_LENGTH = 200; // shared by chat + guess
 export const MAX_TEXT_STROKE_LENGTH = 100;
+// 文本局部上色：colorRanges 数组长度上限（text ≤ 100 字符，合法区间数不会超过）
+export const MAX_TEXT_COLOR_RANGES = 100;
 
 // ---------- Stroke storage (per-key sharding) ----------
 // Strokes are stored as individual KV entries under STROKE_KEY_PREFIX so a

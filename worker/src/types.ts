@@ -22,6 +22,8 @@ export interface SerializedStroke {
   // Text stroke fields (optional)
   text?: string;
   fontSize?: number;
+  // 文本局部上色区间（镜像 src/types/protocol.ts 的 TextColorRange）
+  colorRanges?: { start: number; end: number; color: string }[];
   // Shape stroke fields (optional).
   // - rect/ellipse/triangle/star/heart: points = [topLeft, bottomRight] (min→max)
   // - arrow/line:                       points = [start, end] (direction preserved for arrow; irrelevant for line)

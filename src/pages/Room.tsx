@@ -362,7 +362,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         break;
 
       case "textStroke":
-        addTextStroke(msg.text, msg.x, msg.y, msg.color, msg.fontSize);
+        addTextStroke(msg.text, msg.x, msg.y, msg.color, msg.fontSize, msg.colorRanges);
         redoStackRef.current = [];
         syncHistoryFlags();
         break;
@@ -607,12 +607,14 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       setEditingText(null);
       return;
     }
+    const colorRanges = editingText.colorRanges.length > 0 ? editingText.colorRanges : undefined;
     addTextStroke(
       editingText.text,
       editingText.normalizedX,
       editingText.normalizedY,
       color,
       editingText.fontSize,
+      colorRanges,
     );
     send({
       type: "textStroke",
@@ -621,6 +623,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       y: editingText.normalizedY,
       color,
       fontSize: editingText.fontSize,
+      colorRanges,
     });
     redoStackRef.current = []; // new stroke invalidates redo history
     syncHistoryFlags();
@@ -654,6 +657,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         normalizedX: offsetX / rect.width,
         normalizedY: offsetY / rect.height,
         fontSize: TEXT_SIZE_TO_PX[textSize],
+        colorRanges: [],
       });
     },
     [phase, isDrawer, tool, canvasRef, editingText, commitEditingText, textSize],

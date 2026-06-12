@@ -1,7 +1,9 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { tx } from "@twind/core";
 import type { ToolMode } from "./Toolbar";
-import type { GamePhase, SerializedStroke } from "../types/protocol";
+import { ColorPalette } from "./Toolbar";
+import type { GamePhase, SerializedStroke, TextColorRange } from "../types/protocol";
+import { adjustRangesForTextChange, applyColorToRanges, lineSegments } from "../utils/textColor";
 import {
   scaleLineWidth,
   computeArrowGeometry,
@@ -21,6 +23,8 @@ export interface EditingText {
   normalizedX: number;
   normalizedY: number;
   fontSize: number;
+  /** 局部上色区间（无则空数组）。编辑中实时维护，commit 时随 textStroke 发送。 */
+  colorRanges: TextColorRange[];
 }
 
 export interface EditingShape {
@@ -407,6 +411,117 @@ export default function Canvas({
     () => (editingText ? measureTextWidth(editingText.text, displayFontSize) : 60),
     [editingText?.text, displayFontSize],
   );
+
+  // --- Text selection coloring（选中一段文字 → 弹色板上色） ---
+
+  const [textSelection, setTextSelection] = useState<{ start: number; end: number } | null>(null);
+  // 上色面板的自定义已确认色（与工具栏弹层的 customColor 相互独立）
+  const [panelCustomColor, setPanelCustomColor] = useState<string | null>(null);
+
+  const hasEditingText = editingText != null;
+  useEffect(() => {
+    if (!hasEditingText) {
+      setTextSelection(null);
+      return;
+    }
+    const onSelectionChange = () => {
+      const ta = textareaRef.current;
+      if (!ta) {
+        return;
+      }
+      // 焦点不在 textarea（如面板 hex 输入框 / 吸色器）时保留上次选区，
+      // 用户仍可继续对它应用颜色
+      if (document.activeElement !== ta) {
+        return;
+      }
+      if (ta.selectionStart !== ta.selectionEnd) {
+        setTextSelection({ start: ta.selectionStart, end: ta.selectionEnd });
+      } else {
+        setTextSelection(null);
+      }
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, [hasEditingText]);
+
+  // 面板当前值：选区起点已有的区间色，否则工具默认色
+  const selectionColor = useMemo(() => {
+    const fallback = textColor ?? "#000000";
+    if (!editingText || !textSelection) {
+      return fallback;
+    }
+    const hit = editingText.colorRanges.find(
+      (r) => r.start <= textSelection.start && textSelection.start < r.end,
+    );
+    return hit?.color ?? fallback;
+  }, [editingText, textSelection, textColor]);
+
+  const applySelectionColor = useCallback(
+    (c: string) => {
+      if (!editingText || !textSelection) {
+        return;
+      }
+      const len = editingText.text.length;
+      const start = Math.min(textSelection.start, len);
+      const end = Math.min(textSelection.end, len);
+      if (start >= end) {
+        return;
+      }
+      onEditingTextUpdate?.({
+        colorRanges: applyColorToRanges(editingText.colorRanges, start, end, c, len),
+      });
+    },
+    [editingText, textSelection, onEditingTextUpdate],
+  );
+
+  // 面板内 mousedown 阻止默认行为，避免 textarea 失焦丢选区；hex 输入框
+  // 需要真实焦点所以放行。stopPropagation 防止触发外层边框拖拽。
+  const handleColorPanelMouseDown = useCallback((e: React.MouseEvent) => {
+    if (!(e.target instanceof HTMLInputElement)) {
+      e.preventDefault();
+    }
+    e.stopPropagation();
+  }, []);
+
+  const handleTextareaChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      if (!editingText) {
+        return;
+      }
+      const newText = e.target.value;
+      onEditingTextUpdate?.({
+        text: newText,
+        colorRanges: adjustRangesForTextChange(editingText.colorRanges, editingText.text, newText),
+      });
+    },
+    [editingText, onEditingTextUpdate],
+  );
+
+  // 彩色文本层节点：按行 × 颜色区间切段；默认色段继承容器 color
+  const coloredTextNodes = useMemo(() => {
+    if (!editingText) {
+      return null;
+    }
+    const lines = editingText.text.split("\n");
+    const nodes: React.ReactNode[] = [];
+    let lineStart = 0;
+    lines.forEach((line, i) => {
+      lineSegments(line, lineStart, editingText.colorRanges).forEach((seg, j) => {
+        if (seg.text) {
+          nodes.push(
+            <span key={`${i}-${j}`} style={seg.color ? { color: seg.color } : undefined}>
+              {seg.text}
+            </span>,
+          );
+        }
+      });
+      if (i < lines.length - 1) {
+        nodes.push("\n");
+      }
+      lineStart += line.length + 1;
+    });
+    return nodes;
+  }, [editingText]);
 
   const handleBorderMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -836,6 +951,31 @@ export default function Canvas({
             data-text-overlay="true"
             style={{ left: editingText.x - 10, top: editingText.y - 10 }}
           >
+            {/* 选中一段文字时弹出的上色面板（默认值 = 当前文本工具颜色）。
+             *  位于 data-text-overlay 容器内，点击不会触发外部 commit。 */}
+            {textSelection && (
+              <div
+                onMouseDown={handleColorPanelMouseDown}
+                className={tx("absolute bg-white border border-hairline rounded-lg")}
+                style={{
+                  padding: "6px 10px",
+                  zIndex: 40,
+                  whiteSpace: "nowrap",
+                  left: 0,
+                  // 贴画布顶部时翻到下方，避免被容器 overflow 裁剪
+                  ...(editingText.y - 10 < 90
+                    ? { top: "100%", marginTop: 8 }
+                    : { bottom: "100%", marginBottom: 8 }),
+                }}
+              >
+                <ColorPalette
+                  value={selectionColor}
+                  onChange={applySelectionColor}
+                  customColor={panelCustomColor}
+                  onCustomColorChange={setPanelCustomColor}
+                />
+              </div>
+            )}
             <div
               onMouseDown={handleBorderMouseDown}
               style={{
@@ -846,37 +986,62 @@ export default function Canvas({
                 position: "relative",
               }}
             >
-              <textarea
-                ref={textareaRef}
-                value={editingText.text}
-                onChange={(e) => onEditingTextUpdate?.({ text: e.target.value })}
-                onMouseDown={(e) => e.stopPropagation()}
-                maxLength={100}
-                autoFocus
-                style={{
-                  fontSize: displayFontSize,
-                  lineHeight: 1.2,
-                  fontFamily: HAND_FONT_FAMILY,
-                  color: textColor,
-                  background: "transparent",
-                  border: "none",
-                  outline: "none",
-                  resize: "none",
-                  padding: 0,
-                  // 不再上提 -0.1em：canvas 端已改为槽内垂直居中绘制
-                  // （useCanvas renderStrokeToCtx 的 textBaseline="middle"），
-                  // CSS half-leading 自动居中行盒内容，两边语义一致。
-                  marginTop: 0,
-                  marginLeft: 0,
-                  marginRight: 0,
-                  marginBottom: 0,
-                  display: "block",
-                  minWidth: 40,
-                  minHeight: displayFontSize * 1.2,
-                  width: textareaWidth,
-                  overflow: "hidden",
-                }}
-              />
+              <div style={{ position: "relative" }}>
+                {/* 彩色文本层：textarea 文字透明，由这层渲染真实颜色（含局部
+                 *  上色）。与 textarea 同字体/字号/行高，white-space: pre 保留
+                 *  换行，两层逐像素对齐。 */}
+                <div
+                  aria-hidden="true"
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: 0,
+                    fontSize: displayFontSize,
+                    lineHeight: 1.2,
+                    fontFamily: HAND_FONT_FAMILY,
+                    whiteSpace: "pre",
+                    pointerEvents: "none",
+                    color: textColor,
+                  }}
+                >
+                  {coloredTextNodes}
+                </div>
+                <textarea
+                  ref={textareaRef}
+                  value={editingText.text}
+                  onChange={handleTextareaChange}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  maxLength={100}
+                  autoFocus
+                  spellCheck={false}
+                  style={{
+                    fontSize: displayFontSize,
+                    lineHeight: 1.2,
+                    fontFamily: HAND_FONT_FAMILY,
+                    // 文字透明，由底下的彩色文本层显示；光标保持可见
+                    color: "transparent",
+                    caretColor: textColor,
+                    background: "transparent",
+                    border: "none",
+                    outline: "none",
+                    resize: "none",
+                    padding: 0,
+                    // 不再上提 -0.1em：canvas 端已改为槽内垂直居中绘制
+                    // （useCanvas renderStrokeToCtx 的 textBaseline="middle"），
+                    // CSS half-leading 自动居中行盒内容，两边语义一致。
+                    marginTop: 0,
+                    marginLeft: 0,
+                    marginRight: 0,
+                    marginBottom: 0,
+                    display: "block",
+                    minWidth: 40,
+                    minHeight: displayFontSize * 1.2,
+                    width: textareaWidth,
+                    overflow: "hidden",
+                    position: "relative",
+                  }}
+                />
+              </div>
 
               {CORNERS.map((corner) => (
                 <div
