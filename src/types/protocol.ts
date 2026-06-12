@@ -159,6 +159,16 @@ export interface C_Selection {
   dstY: number;
 }
 
+export interface C_DeleteStrokes {
+  type: "deleteStrokes";
+  /**
+   * Indices into the strokes array, sorted **descending** so the receiver can
+   * splice sequentially without index shifting. Includes cascade-deleted
+   * dependent fill strokes (seeds inside a deleted closed shape).
+   */
+  indices: number[];
+}
+
 export interface C_ContinueDrawing {
   type: "continueDrawing";
 }
@@ -188,6 +198,7 @@ export type ClientMessage =
   | C_Shape
   | C_Fill
   | C_Selection
+  | C_DeleteStrokes
   | C_Transfer
   | C_ContinueDrawing
   | C_ClaimDrawer
@@ -321,6 +332,12 @@ export interface S_Selection {
   dstY: number;
 }
 
+export interface S_DeleteStrokes {
+  type: "deleteStrokes";
+  /** Same semantics as C_DeleteStrokes: descending-sorted indices. */
+  indices: number[];
+}
+
 export interface S_TransferDone {
   type: "transferDone";
   newDrawerId: string;
@@ -355,6 +372,7 @@ export type ServerMessage =
   | S_Shape
   | S_Fill
   | S_Selection
+  | S_DeleteStrokes
   | S_TransferDone
   | S_Error
   | S_RoomClosed

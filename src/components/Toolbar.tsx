@@ -35,15 +35,7 @@ const TEXT_SIZE_LABEL: Record<TextSize, string> = { small: "小", medium: "中",
 //   3. shapes   : rect / ellipse / triangle / star / heart / line / arrow (规则形状)
 //   4. selection: 单独分一栏    (像素搬运)
 const PRIMARY_TOOLS: ToolMode[] = ["pen", "text"];
-const SHAPE_TOOLS: ToolMode[] = [
-  "rect",
-  "ellipse",
-  "triangle",
-  "star",
-  "heart",
-  "line",
-  "arrow",
-];
+const SHAPE_TOOLS: ToolMode[] = ["rect", "ellipse", "triangle", "star", "heart", "line", "arrow"];
 
 // ---------- Icons ----------
 // SVG path data mirrored from src/assets/*.svg. Inlining (instead of importing
@@ -174,9 +166,11 @@ const TOOL_META: Record<ToolMode, ToolMeta> = {
   pen: { icon: IconPen, label: "画笔", hasFill: false, picker: "lineWidth", hasColor: true },
   text: { icon: IconText, label: "文本", hasFill: false, picker: "textSize", hasColor: true },
   bucket: { icon: IconBucket, label: "油漆桶", hasFill: false, picker: "none", hasColor: true },
+  // 框选工具身兼两职：拖拽 = 框选移动；单击 = 选中元素（hover 浅虚线提示，
+  // 点击深虚线框 + 删除按钮，同点再击向下层循环）。
   selection: {
     icon: IconSelectBox,
-    label: "框选移动",
+    label: "选择 / 框选",
     hasFill: false,
     picker: "none",
     hasColor: false,
@@ -618,21 +612,10 @@ function BrushPreview({
     }
     renderBrushStroke(ctx, points, color, lineWidth, brush);
   }, [brush, width, height, color, lineWidth]);
-  return (
-    <canvas
-      ref={ref}
-      style={{ width, height, display: "block", pointerEvents: "none" }}
-    />
-  );
+  return <canvas ref={ref} style={{ width, height, display: "block", pointerEvents: "none" }} />;
 }
 
-function BrushPicker({
-  value,
-  onChange,
-}: {
-  value: BrushType;
-  onChange: (b: BrushType) => void;
-}) {
+function BrushPicker({ value, onChange }: { value: BrushType; onChange: (b: BrushType) => void }) {
   const [open, setOpen] = useState(false);
 
   // 外点关闭：捕获阶段，避免被画布 mousedown 抢先
@@ -922,11 +905,7 @@ export default function Toolbar({
             {meta.hasFill && (
               <>
                 <div className={tx("w-px h-6 bg-gray-200")} />
-                <FillToggle
-                  shape={t as FillShape}
-                  value={fillMode}
-                  onChange={onFillModeChange}
-                />
+                <FillToggle shape={t as FillShape} value={fillMode} onChange={onFillModeChange} />
               </>
             )}
             {meta.hasColor && (meta.picker !== "none" || meta.hasFill || t === "pen") && (

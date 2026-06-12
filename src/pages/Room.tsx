@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback } from "react";
 import { tx } from "@twind/core";
 import { useWebSocket } from "../hooks/useWebSocket";
-import { useCanvas } from "../hooks/useCanvas";
+import { useCanvas, findDependentFillIndices } from "../hooks/useCanvas";
 import Canvas from "../components/Canvas";
 import type { EditingSelection, EditingShape, EditingText } from "../components/Canvas";
 import type { DrawnShape } from "../hooks/useCanvas";
@@ -18,6 +18,7 @@ import type {
   ChatHistoryEntry,
   ServerMessage,
   BrushType,
+  SerializedStroke,
 } from "../types/protocol";
 import { useEffect } from "react";
 
@@ -70,6 +71,11 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   // Selection (marquee move) editing state — offscreen src region has already
   // been whitened and the patch is held in memory; commits on click-outside.
   const [editingSelection, setEditingSelection] = useState<EditingSelection | null>(null);
+  // 框选工具的元素选中态：当前选中的已提交笔画。stroke 对象快照用于删除时的
+  // 失效校验 —— 所有会改动 strokes 数组的路径都应先清掉本状态。
+  const [picked, setPicked] = useState<{ index: number; stroke: SerializedStroke } | null>(null);
+  // hover 提示：浅虚线框暗示"可点击选择"。仅框选工具空闲悬浮时由 useCanvas 上报。
+  const [hovered, setHovered] = useState<SerializedStroke | null>(null);
   // Undone strokes, LIFO. Any new stroke invalidates this stack — mirrors the
   // server-side redoStack so both sides stay in sync.
   const redoStackRef = useRef<import("../types/protocol").SerializedStroke[]>([]);
@@ -133,6 +139,34 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     [],
   );
 
+  // Bridge: 框选工具单击。hits = 光标下全部可选元素（最上层在前）。
+  // 同点再击下钻：当前选中者仍在命中列表里 → 选它下面一层，到底循环回顶。
+  const handleStrokePicked = useCallback((hits: number[]) => {
+    if (hits.length === 0) {
+      setPicked(null);
+      return;
+    }
+    setPicked((prev) => {
+      let nextIndex = hits[0];
+      if (prev && strokesRef.current[prev.index] === prev.stroke) {
+        const pos = hits.indexOf(prev.index);
+        if (pos !== -1) {
+          nextIndex = hits[(pos + 1) % hits.length];
+        }
+      }
+      const stroke = strokesRef.current[nextIndex];
+      return stroke ? { index: nextIndex, stroke } : null;
+    });
+    // strokesRef 是 useCanvas 返回的稳定 ref 实例（与 syncHistoryFlags 同款约定）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Bridge: 框选工具空闲悬浮（useCanvas 已按命中变化去抖，只在进出元素时回调）。
+  const handleStrokeHovered = useCallback((index: number | null) => {
+    setHovered(index !== null ? (strokesRef.current[index] ?? null) : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Canvas
   const {
     replayDraw,
@@ -158,6 +192,8 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     onShapeDrawn: handleShapeDrawn,
     onLocalPenEnd: handleLocalPenEnd,
     onSelectionDrawn: handleSelectionDrawn,
+    onStrokePicked: handleStrokePicked,
+    onStrokeHovered: handleStrokeHovered,
     phase,
   });
 
@@ -165,7 +201,40 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   // visible canvas. O(1) regardless of stroke count.
   const handleCanvasResize = useCallback(() => {
     syncVisibleFromOffscreen();
+    // 高亮框基于像素 bbox 计算，resize 后失真 → 直接取消选中
+    setPicked(null);
   }, [syncVisibleFromOffscreen]);
+
+  // 选择删除：删除选中笔画 + 级联删除其内部的油漆桶填充（否则重放时种子
+  // 落在白底上会把整张画布灌成填充色），本地重建 + 同步对端 + 清空重做栈。
+  const handlePickedDelete = useCallback(() => {
+    if (!picked) {
+      return;
+    }
+    if (phase === "guessing" || phase === "revealed") {
+      setPicked(null);
+      return;
+    }
+    const strokes = strokesRef.current;
+    const { index, stroke } = picked;
+    // 失效保护：选中后 strokes 已被其他路径改动（正常情况下那些路径都会先清选中态）
+    if (strokes[index] !== stroke) {
+      setPicked(null);
+      return;
+    }
+    // 降序排列：依次 splice 不会移位。级联数量裁到服务端单次上限（128）以内。
+    const indices = [index, ...findDependentFillIndices(strokes, index).slice(0, 127)].sort(
+      (a, b) => b - a,
+    );
+    for (const i of indices) {
+      strokes.splice(i, 1);
+    }
+    replayAll([...strokes]);
+    redoStackRef.current = [];
+    send({ type: "deleteStrokes", indices });
+    syncHistoryFlags();
+    setPicked(null);
+  }, [picked, phase, strokesRef, replayAll, send, syncHistoryFlags]);
 
   const addSystemMessage = useCallback((text: string) => {
     setMessages((prev) => [
@@ -245,6 +314,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         // Replay strokes (strokesRef is saved even if canvas isn't mounted yet)
         replayAll(msg.strokes);
         syncHistoryFlags();
+        setPicked(null);
         // Restore chat history
         if (msg.chatHistory && msg.chatHistory.length > 0) {
           setMessages(
@@ -288,6 +358,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         clearCanvas();
         redoStackRef.current = [];
         syncHistoryFlags();
+        setPicked(null);
         break;
 
       case "textStroke":
@@ -324,6 +395,21 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         syncHistoryFlags();
         break;
 
+      case "deleteStrokes": {
+        // indices 按约定降序发送；防御性再排一次，依次 splice 不会移位
+        const sorted = [...msg.indices].sort((a, b) => b - a);
+        for (const i of sorted) {
+          if (i >= 0 && i < strokesRef.current.length) {
+            strokesRef.current.splice(i, 1);
+          }
+        }
+        replayAll([...strokesRef.current]);
+        redoStackRef.current = [];
+        syncHistoryFlags();
+        setPicked(null);
+        break;
+      }
+
       case "undo": {
         const popped = strokesRef.current.pop();
         if (popped) {
@@ -331,6 +417,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         }
         replayAll([...strokesRef.current]);
         syncHistoryFlags();
+        setPicked(null);
         break;
       }
 
@@ -341,6 +428,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           replayAll([...strokesRef.current]);
         }
         syncHistoryFlags();
+        setPicked(null);
         break;
       }
 
@@ -361,6 +449,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         if (msg.phase === "guessing" || msg.phase === "revealed") {
           setEditingShape(null);
           setEditingText(null);
+          setPicked(null);
           if (editingSelection) {
             cancelLocalSelection();
             setEditingSelection(null);
@@ -415,6 +504,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       case "transferDone":
         setDrawerId(msg.newDrawerId);
         addSystemMessage("画笔权限已转移！");
+        setPicked(null);
         break;
 
       case "error":
@@ -444,6 +534,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const handleClear = () => {
     setEditingShape(null);
     setEditingSelection(null);
+    setPicked(null);
     redoStackRef.current = [];
     send({ type: "clear" });
     clearCanvas();
@@ -454,6 +545,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     if (strokesRef.current.length === 0) {
       return;
     }
+    setPicked(null);
     const popped = strokesRef.current[strokesRef.current.length - 1];
     strokesRef.current.pop();
     redoStackRef.current.push(popped);
@@ -466,6 +558,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     if (redoStackRef.current.length === 0) {
       return;
     }
+    setPicked(null);
     const redone = redoStackRef.current.pop();
     if (!redone) {
       return;
@@ -478,6 +571,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   const handleTransfer = (targetId?: string) => {
     setEditingShape(null);
+    setPicked(null);
     if (editingSelection) {
       cancelLocalSelection();
       setEditingSelection(null);
@@ -493,6 +587,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   const handleContinueDrawing = () => {
     setEditingShape(null);
+    setPicked(null);
     if (editingSelection) {
       cancelLocalSelection();
       setEditingSelection(null);
@@ -653,6 +748,53 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     setEditingSelection((prev) => (prev ? { ...prev, ...updates } : null));
   }, []);
 
+  // --- 编辑态 × 按钮 ---
+
+  // 新建文字/形状尚未 commit，丢弃即可（还没发过任何网络消息）。
+  const handleEditingTextDelete = useCallback(() => {
+    setEditingText(null);
+  }, []);
+
+  const handleEditingShapeDelete = useCallback(() => {
+    setEditingShape(null);
+  }, []);
+
+  // 框选 ×：删除框住的内容 = 丢弃 patch + 把"src 涂白"固化成一条白色填充
+  // 矩形笔画（复用 shape 协议，零新增消息；undo 弹掉白矩形即恢复原内容）。
+  const handleEditingSelectionDelete = useCallback(() => {
+    if (!editingSelection) {
+      return;
+    }
+    if (phase === "guessing" || phase === "revealed") {
+      cancelLocalSelection();
+      setEditingSelection(null);
+      return;
+    }
+    const { srcNorm } = editingSelection;
+    addShape(
+      { x: srcNorm.x, y: srcNorm.y },
+      { x: srcNorm.x + srcNorm.w, y: srcNorm.y + srcNorm.h },
+      "#ffffff",
+      0,
+      "rect",
+      true,
+    );
+    send({
+      type: "shape",
+      shape: "rect",
+      filled: true,
+      x: srcNorm.x,
+      y: srcNorm.y,
+      width: srcNorm.w,
+      height: srcNorm.h,
+      color: "#ffffff",
+      lineWidth: 0,
+    });
+    redoStackRef.current = [];
+    syncHistoryFlags();
+    setEditingSelection(null);
+  }, [editingSelection, phase, cancelLocalSelection, addShape, send, syncHistoryFlags]);
+
   // When switching tools, commit whichever in-edit item is active.
   const handleToolChange = useCallback(
     (t: ToolMode) => {
@@ -664,6 +806,9 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       }
       if (t !== "selection" && editingSelection) {
         commitEditingSelection();
+      }
+      if (t !== "selection") {
+        setPicked(null);
       }
       setTool(t);
     },
@@ -860,6 +1005,12 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             onEditingShapeUpdate={handleEditingShapeUpdate}
             editingSelection={editingSelection}
             onEditingSelectionUpdate={handleEditingSelectionUpdate}
+            onEditingTextDelete={handleEditingTextDelete}
+            onEditingShapeDelete={handleEditingShapeDelete}
+            onEditingSelectionDelete={handleEditingSelectionDelete}
+            pickedStroke={picked?.stroke ?? null}
+            onPickedDelete={handlePickedDelete}
+            hoveredStroke={tool === "selection" ? hovered : null}
           />
           <Toolbar
             color={color}

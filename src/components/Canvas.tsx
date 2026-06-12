@@ -1,13 +1,14 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { tx } from "@twind/core";
 import type { ToolMode } from "./Toolbar";
-import type { GamePhase } from "../types/protocol";
+import type { GamePhase, SerializedStroke } from "../types/protocol";
 import {
   scaleLineWidth,
   computeArrowGeometry,
   svgPathTriangle,
   svgPathStar,
   svgPathHeart,
+  getStrokeBBoxPx,
 } from "../hooks/useCanvas";
 
 type Point = { x: number; y: number };
@@ -58,6 +59,15 @@ interface Props {
   // Selection (marquee move)
   editingSelection?: EditingSelection | null;
   onEditingSelectionUpdate?: (updates: Partial<EditingSelection>) => void;
+  // Delete buttons on editing overlays
+  onEditingTextDelete?: () => void;
+  onEditingShapeDelete?: () => void;
+  onEditingSelectionDelete?: () => void;
+  // Pick (select-to-delete) highlight for a committed stroke
+  pickedStroke?: SerializedStroke | null;
+  onPickedDelete?: () => void;
+  /** Hover hint (selection tool): faint dashed box, no controls. */
+  hoveredStroke?: SerializedStroke | null;
 }
 
 /** Measure the pixel width of the longest line in a string */
@@ -85,6 +95,73 @@ const CORNERS = [
 ] as const;
 
 type ShapeCorner = "nw" | "ne" | "sw" | "se";
+
+// ---------- Delete badge (×) ----------
+
+// 与 overlay 角的对角偏移：避开角点 handle（±5px）且留出呼吸感。
+const BADGE_GAP = 34;
+const BADGE_SIZE = 24;
+
+/**
+ * Position the × badge relative to its overlay container. Prefers floating
+ * outside the top-right corner; flips below / pulls inside when the canvas
+ * container's overflow-hidden would clip it. All inputs in canvas pixels.
+ */
+function deleteBadgeStyle(
+  overlayTop: number,
+  overlayRight: number,
+  overlayBottom: number,
+  canvasW: number,
+  canvasH: number,
+): React.CSSProperties {
+  let vertical: React.CSSProperties;
+  if (overlayTop - BADGE_GAP >= 0) {
+    vertical = { top: -BADGE_GAP };
+  } else if (overlayBottom + BADGE_GAP <= canvasH) {
+    vertical = { bottom: -BADGE_GAP };
+  } else {
+    vertical = { top: 6 };
+  }
+  const horizontal: React.CSSProperties =
+    overlayRight + BADGE_GAP > canvasW ? { right: 6 } : { right: -BADGE_GAP };
+  return { position: "absolute", ...vertical, ...horizontal };
+}
+
+function DeleteBadge({
+  style,
+  onDelete,
+  title = "删除",
+}: {
+  style: React.CSSProperties;
+  onDelete?: () => void;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onMouseDown={(e) => {
+        // 阻断 overlay 整体拖拽的 mousedown。badge 渲染在 data-*-overlay 容器
+        // 内部，全局 click-outside commit 监听经由 closest() 自动忽略它。
+        e.stopPropagation();
+        e.preventDefault();
+      }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onDelete?.();
+      }}
+      className={tx(
+        "flex items-center justify-center rounded-full bg-white border border-hairline",
+        "text-red-500 hover:bg-red-50 active:scale-95 transition-transform",
+      )}
+      style={{ width: BADGE_SIZE, height: BADGE_SIZE, pointerEvents: "auto", zIndex: 10, ...style }}
+    >
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+        <path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+      </svg>
+    </button>
+  );
+}
 
 /** Unified mousedown-driven interaction on editing shape overlay. */
 type ShapeInteraction =
@@ -243,6 +320,12 @@ export default function Canvas({
   onEditingShapeUpdate,
   editingSelection,
   onEditingSelectionUpdate,
+  onEditingTextDelete,
+  onEditingShapeDelete,
+  onEditingSelectionDelete,
+  pickedStroke,
+  onPickedDelete,
+  hoveredStroke,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -806,6 +889,21 @@ export default function Canvas({
                   }}
                 />
               ))}
+
+              <DeleteBadge
+                style={deleteBadgeStyle(
+                  editingText.y - 10,
+                  editingText.x - 10 + textareaWidth + 20,
+                  editingText.y -
+                    10 +
+                    displayFontSize * 1.2 * editingText.text.split("\n").length +
+                    20,
+                  canvasRef.current?.width ?? 800,
+                  canvasRef.current?.height ?? 480,
+                )}
+                onDelete={onEditingTextDelete}
+                title="删除文本"
+              />
             </div>
           </div>
         )}
@@ -885,6 +983,18 @@ export default function Canvas({
                 "grab",
                 (e) => startShapeEndpointDrag(e, 1),
               )}
+
+              <DeleteBadge
+                style={deleteBadgeStyle(
+                  shapeBox.by - SHAPE_OVERLAY_PADDING,
+                  shapeBox.bx + shapeBox.bw + SHAPE_OVERLAY_PADDING,
+                  shapeBox.by + shapeBox.bh + SHAPE_OVERLAY_PADDING,
+                  canvasRef.current?.width ?? 800,
+                  canvasRef.current?.height ?? 480,
+                )}
+                onDelete={onEditingShapeDelete}
+                title="删除形状"
+              />
             </div>
           )}
 
@@ -984,6 +1094,18 @@ export default function Canvas({
                 "se-resize",
                 (e) => startShapeResize(e, "se"),
               )}
+
+              <DeleteBadge
+                style={deleteBadgeStyle(
+                  shapeBox.by - SHAPE_OVERLAY_PADDING,
+                  shapeBox.bx + shapeBox.bw + SHAPE_OVERLAY_PADDING,
+                  shapeBox.by + shapeBox.bh + SHAPE_OVERLAY_PADDING,
+                  canvasRef.current?.width ?? 800,
+                  canvasRef.current?.height ?? 480,
+                )}
+                onDelete={onEditingShapeDelete}
+                title="删除形状"
+              />
             </div>
           )}
 
@@ -1033,6 +1155,85 @@ export default function Canvas({
                     boxSizing: "border-box",
                     pointerEvents: "none",
                   }}
+                />
+
+                <DeleteBadge
+                  style={deleteBadgeStyle(top, left + srcWPx, top + srcHPx, vis.width, vis.height)}
+                  onDelete={onEditingSelectionDelete}
+                  title="删除框选内容"
+                />
+              </div>
+            );
+          })()}
+
+        {/* Hover hint (selection tool) — faint dashed box, no controls.
+         *  选中态（深框）存在时同元素不再叠加浅框。 */}
+        {hoveredStroke &&
+          hoveredStroke !== pickedStroke &&
+          canDraw &&
+          canvasRef.current &&
+          (() => {
+            const vis = canvasRef.current;
+            if (!vis) {
+              return null;
+            }
+            const box = getStrokeBBoxPx(hoveredStroke, vis);
+            if (!box) {
+              return null;
+            }
+            const PAD = 6;
+            return (
+              <div
+                className={tx("absolute select-none")}
+                style={{
+                  left: box.x - PAD,
+                  top: box.y - PAD,
+                  width: box.w + PAD * 2,
+                  height: box.h + PAD * 2,
+                  border: "1.5px dashed rgba(129, 140, 248, 0.55)",
+                  boxSizing: "border-box",
+                  pointerEvents: "none",
+                }}
+              />
+            );
+          })()}
+
+        {/* Picked-stroke highlight (select-to-delete tool) — read-only dashed
+         *  box + delete badge. No drag, no resize handles. */}
+        {pickedStroke &&
+          canvasRef.current &&
+          (() => {
+            const vis = canvasRef.current;
+            if (!vis) {
+              return null;
+            }
+            const box = getStrokeBBoxPx(pickedStroke, vis);
+            if (!box) {
+              return null;
+            }
+            const PAD = 6;
+            const left = box.x - PAD;
+            const top = box.y - PAD;
+            const w = box.w + PAD * 2;
+            const h = box.h + PAD * 2;
+            return (
+              <div
+                className={tx("absolute select-none")}
+                style={{ left, top, width: w, height: h, pointerEvents: "none" }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    border: "2px dashed #818cf8",
+                    boxSizing: "border-box",
+                    pointerEvents: "none",
+                  }}
+                />
+                <DeleteBadge
+                  style={deleteBadgeStyle(top, left + w, top + h, vis.width, vis.height)}
+                  onDelete={onPickedDelete}
+                  title="删除该元素"
                 />
               </div>
             );

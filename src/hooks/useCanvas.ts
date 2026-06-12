@@ -1,5 +1,11 @@
 import { useRef, useCallback, useEffect } from "react";
-import type { BrushType, ClientMessage, GamePhase, S_Draw, SerializedStroke } from "../types/protocol";
+import type {
+  BrushType,
+  ClientMessage,
+  GamePhase,
+  S_Draw,
+  SerializedStroke,
+} from "../types/protocol";
 import type { FillMode, ToolMode } from "../components/Toolbar";
 
 type Point = { x: number; y: number };
@@ -46,6 +52,14 @@ interface UseCanvasOptions {
     srcNorm: { x: number; y: number; w: number; h: number },
     patch: HTMLCanvasElement,
   ) => void;
+  /**
+   * Selection tool, single click: all pickable strokes under the cursor,
+   * topmost first (empty array = clicked blank space). Upstream owns the
+   * picked state and the click-again-to-cycle-down behavior.
+   */
+  onStrokePicked?: (hitIndices: number[]) => void;
+  /** Selection tool, idle hover: topmost pickable stroke under cursor (null = none). */
+  onStrokeHovered?: (index: number | null) => void;
 }
 
 // Logical reference canvas width (paired conceptually with a 5:3 height of
@@ -258,6 +272,249 @@ export function svgPathHeart(w: number, h: number): string {
     `C ${w} ${h * 0.506}, ${w * 0.83} ${h * 0.673}, ${cx} ${h}`,
     "Z",
   ].join(" ");
+}
+
+// ---------- Pick (select-to-delete) helpers ----------
+
+// Shared scratch 2D context for text measurement and Path2D containment tests.
+let scratchCtx: CanvasRenderingContext2D | null = null;
+function getScratchCtx(): CanvasRenderingContext2D | null {
+  if (scratchCtx === null && typeof document !== "undefined") {
+    scratchCtx = document.createElement("canvas").getContext("2d");
+  }
+  return scratchCtx;
+}
+
+/**
+ * Pixel-space bounding box of a committed stroke on the given canvas.
+ * Returns null for stroke kinds that aren't pickable (pen / fill / selection).
+ */
+export function getStrokeBBoxPx(
+  stroke: SerializedStroke,
+  canvas: HTMLCanvasElement,
+): { x: number; y: number; w: number; h: number } | null {
+  if (stroke.fill || stroke.selection) {
+    return null;
+  }
+  if (stroke.shape) {
+    if (stroke.points.length < 2) {
+      return null;
+    }
+    const [p0, p1] = stroke.points;
+    return {
+      x: Math.min(p0.x, p1.x) * canvas.width,
+      y: Math.min(p0.y, p1.y) * canvas.height,
+      w: Math.abs(p1.x - p0.x) * canvas.width,
+      h: Math.abs(p1.y - p0.y) * canvas.height,
+    };
+  }
+  if (stroke.text) {
+    if (stroke.points.length === 0) {
+      return null;
+    }
+    const ctx = getScratchCtx();
+    if (!ctx) {
+      return null;
+    }
+    // 与 renderStrokeToCtx 的文字渲染同一套字号/行高公式，bbox 才会贴合实绘。
+    const fontSize = (stroke.fontSize || 24) * (canvas.width / REF_WIDTH);
+    ctx.font = `${fontSize}px sans-serif`;
+    const lines = stroke.text.split("\n");
+    let maxW = 0;
+    for (const line of lines) {
+      maxW = Math.max(maxW, ctx.measureText(line || " ").width);
+    }
+    return {
+      x: stroke.points[0].x * canvas.width,
+      y: stroke.points[0].y * canvas.height,
+      w: maxW,
+      h: lines.length * fontSize * 1.2,
+    };
+  }
+  // Freehand pen strokes are not pickable.
+  return null;
+}
+
+function distToSegmentPx(
+  px: number,
+  py: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): number {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) {
+    return Math.hypot(px - x0, py - y0);
+  }
+  let t = ((px - x0) * dx + (py - y0) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x0 + t * dx), py - (y0 + t * dy));
+}
+
+// bbox 命中余量：让文本等 bbox 类元素更容易被点中。
+const PICK_BBOX_PAD = 6;
+
+/** Build a closed-shape Path2D in local (0,0,w,h) space. Shared by precise
+ *  hit-testing and the fill-cascade containment test — 与 canvas 渲染几何
+ *  严格同源（svgPath* 字符串）。 */
+function buildClosedShapePath(
+  shape: "rect" | "ellipse" | "triangle" | "star" | "heart",
+  w: number,
+  h: number,
+): Path2D {
+  const path = new Path2D();
+  if (shape === "rect") {
+    path.rect(0, 0, w, h);
+  } else if (shape === "ellipse") {
+    path.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+  } else if (shape === "triangle") {
+    path.addPath(new Path2D(svgPathTriangle(w, h)));
+  } else if (shape === "star") {
+    path.addPath(new Path2D(svgPathStar(w, h)));
+  } else {
+    path.addPath(new Path2D(svgPathHeart(w, h)));
+  }
+  return path;
+}
+
+/**
+ * Precise top-down hit test. Returns ALL pickable strokes under (px, py),
+ * topmost first — upstream uses the full list for click-again-to-cycle-down.
+ *
+ * 命中规则（层级覆盖的关键）：
+ * - 线框闭合形状只在描边带附近命中，空心内部**穿透**到下层
+ * - 填充形状全身命中（视觉不透明，所见即所选）
+ * - line/arrow 按点到线段距离；text 按实测 bbox
+ * - pen / 油漆桶 / 框选结果不可选（栅格或种子语义）
+ */
+function findStrokesAtPoint(
+  strokes: SerializedStroke[],
+  canvas: HTMLCanvasElement,
+  px: number,
+  py: number,
+): number[] {
+  const ctx = getScratchCtx();
+  const hits: number[] = [];
+  for (let i = strokes.length - 1; i >= 0; i--) {
+    const s = strokes[i];
+    if (s.fill || s.selection) {
+      continue;
+    }
+    if (s.shape === "line" || s.shape === "arrow") {
+      if (s.points.length < 2) {
+        continue;
+      }
+      const [p0, p1] = s.points;
+      const threshold = Math.max(8, scaleLineWidth(s.lineWidth, canvas.width) / 2 + 6);
+      const d = distToSegmentPx(
+        px,
+        py,
+        p0.x * canvas.width,
+        p0.y * canvas.height,
+        p1.x * canvas.width,
+        p1.y * canvas.height,
+      );
+      if (d <= threshold) {
+        hits.push(i);
+      }
+      continue;
+    }
+    if (s.shape) {
+      if (s.points.length < 2 || !ctx) {
+        continue;
+      }
+      const [p0, p1] = s.points;
+      const x = Math.min(p0.x, p1.x) * canvas.width;
+      const y = Math.min(p0.y, p1.y) * canvas.height;
+      const w = Math.abs(p1.x - p0.x) * canvas.width;
+      const h = Math.abs(p1.y - p0.y) * canvas.height;
+      if (w === 0 || h === 0) {
+        continue;
+      }
+      const path = buildClosedShapePath(s.shape, w, h);
+      const lx = px - x;
+      const ly = py - y;
+      if (s.filled) {
+        if (ctx.isPointInPath(path, lx, ly)) {
+          hits.push(i);
+        }
+      } else {
+        // 描边带 = 实际线宽 + 两侧各 ~6px 余量，细线框也好点中
+        const lw = scaleLineWidth(s.lineWidth, canvas.width);
+        ctx.lineWidth = Math.max(16, lw + 12);
+        if (ctx.isPointInStroke(path, lx, ly)) {
+          hits.push(i);
+        }
+      }
+      continue;
+    }
+    if (s.text) {
+      const box = getStrokeBBoxPx(s, canvas);
+      if (
+        box &&
+        px >= box.x - PICK_BBOX_PAD &&
+        px <= box.x + box.w + PICK_BBOX_PAD &&
+        py >= box.y - PICK_BBOX_PAD &&
+        py <= box.y + box.h + PICK_BBOX_PAD
+      ) {
+        hits.push(i);
+      }
+    }
+  }
+  return hits;
+}
+
+// 有"内部"概念的闭合形状 —— 只有它们可能圈住油漆桶种子。
+const CLOSED_SHAPES = new Set<string>(["rect", "ellipse", "triangle", "star", "heart"]);
+
+/**
+ * 删除级联：找出种子点落在指定闭合形状内部、且时序在它之后的油漆桶笔画。
+ * 不连带删除的话，重建重放时种子落在白底上会把整张画布灌成填充色。
+ * 包含性判定与坐标空间无关（仿射不变），统一在 1000×1000 虚拟空间测试。
+ */
+export function findDependentFillIndices(
+  strokes: SerializedStroke[],
+  shapeIndex: number,
+): number[] {
+  const shape = strokes[shapeIndex];
+  if (!shape?.shape || !CLOSED_SHAPES.has(shape.shape) || shape.points.length < 2) {
+    return [];
+  }
+  const ctx = getScratchCtx();
+  if (!ctx) {
+    return [];
+  }
+  const SPACE = 1000;
+  const [p0, p1] = shape.points;
+  const x = Math.min(p0.x, p1.x) * SPACE;
+  const y = Math.min(p0.y, p1.y) * SPACE;
+  const w = Math.abs(p1.x - p0.x) * SPACE;
+  const h = Math.abs(p1.y - p0.y) * SPACE;
+  if (w === 0 || h === 0) {
+    return [];
+  }
+  // 路径建在 (0,0,w,h) 本地空间，测试点平移 (-x, -y)。
+  const path = buildClosedShapePath(
+    shape.shape as "rect" | "ellipse" | "triangle" | "star" | "heart",
+    w,
+    h,
+  );
+  const result: number[] = [];
+  for (let j = shapeIndex + 1; j < strokes.length; j++) {
+    const f = strokes[j];
+    if (!f.fill || f.points.length === 0) {
+      continue;
+    }
+    const sx = f.points[0].x * SPACE - x;
+    const sy = f.points[0].y * SPACE - y;
+    if (ctx.isPointInPath(path, sx, sy)) {
+      result.push(j);
+    }
+  }
+  return result;
 }
 
 /** Draw a straight stroke line (no arrow head) in pixel coords. */
@@ -1001,6 +1258,8 @@ export function useCanvas({
   onShapeDrawn,
   onLocalPenEnd,
   onSelectionDrawn,
+  onStrokePicked,
+  onStrokeHovered,
   phase,
 }: UseCanvasOptions) {
   const isDrawingRef = useRef(false);
@@ -1454,23 +1713,39 @@ export function useCanvas({
       return () => canvas.removeEventListener("click", onClick);
     }
 
-    // ========== Selection (marquee) tool ==========
-    // mousedown + drag → dashed rectangle preview. mouseup (with non-trivial
-    // size) emits srcNorm upstream; upstream opens the selection overlay.
+    // ========== Selection (marquee + element pick) tool ==========
+    // 拖拽 → 框选移动（原有行为）；单击 → 命中已提交元素上报（选中删除）；
+    // 空闲悬浮 → hover 浅虚线提示。位移 < CLICK_EPS_PX 视为单击，介于单击与
+    // 最小框选尺寸之间的微小拖拽按误触丢弃。
     if (tool === "selection") {
       const MIN_SIZE_PX = 20;
+      const CLICK_EPS_PX = 4;
       let startPx: Point | null = null;
+      let lastHover: number | null = null;
+      const reportHover = (idx: number | null) => {
+        if (idx !== lastHover) {
+          lastHover = idx;
+          onStrokeHovered?.(idx);
+        }
+        // 行内 style 覆盖 Twind cursor class；空串还原为工具默认光标
+        canvas.style.cursor = idx !== null ? "pointer" : "";
+      };
       const onDown = (e: MouseEvent) => {
         if (phase === "guessing" || phase === "revealed") {
           return;
         }
         startPx = { x: e.offsetX, y: e.offsetY };
+        // 拖拽期间不显示 hover 提示
+        reportHover(null);
       };
       const onMove = (e: MouseEvent) => {
         if (phase === "guessing" || phase === "revealed") {
           return;
         }
         if (!startPx) {
+          // 空闲悬浮：浅虚线提示最上层可选元素
+          const hits = findStrokesAtPoint(strokesRef.current, canvas, e.offsetX, e.offsetY);
+          reportHover(hits.length > 0 ? hits[0] : null);
           return;
         }
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1497,6 +1772,12 @@ export function useCanvas({
         const by = Math.min(start.y, e.offsetY);
         const bw = Math.abs(e.offsetX - start.x);
         const bh = Math.abs(e.offsetY - start.y);
+        if (Math.max(bw, bh) < CLICK_EPS_PX) {
+          // 单击：上报光标下全部命中（最上层在前），上游负责选中 / 下钻 / 取消
+          syncVisibleFromOffscreen();
+          onStrokePicked?.(findStrokesAtPoint(strokesRef.current, canvas, e.offsetX, e.offsetY));
+          return;
+        }
         if (bw < MIN_SIZE_PX || bh < MIN_SIZE_PX) {
           // Clear any preview stroke off the visible canvas and abort.
           syncVisibleFromOffscreen();
@@ -1512,6 +1793,8 @@ export function useCanvas({
         // syncs visible — no need to explicitly clear the preview stroke.
         const patch = beginSelection(srcNorm);
         if (patch) {
+          // 进入框选移动时取消元素选中，避免两种虚线框叠加
+          onStrokePicked?.([]);
           onSelectionDrawn?.(srcNorm, patch);
         }
       };
@@ -1519,6 +1802,7 @@ export function useCanvas({
         if (phase === "guessing" || phase === "revealed") {
           return;
         }
+        reportHover(null);
         if (!startPx) {
           return;
         }
@@ -1534,6 +1818,8 @@ export function useCanvas({
         canvas.removeEventListener("mousemove", onMove);
         canvas.removeEventListener("mouseup", onUp);
         canvas.removeEventListener("mouseleave", onLeave);
+        onStrokeHovered?.(null);
+        canvas.style.cursor = "";
       };
     }
 
@@ -1638,6 +1924,8 @@ export function useCanvas({
     onShapeDrawn,
     onLocalPenEnd,
     onSelectionDrawn,
+    onStrokePicked,
+    onStrokeHovered,
     addFill,
     beginSelection,
     phase,

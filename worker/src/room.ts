@@ -5,6 +5,7 @@ import {
   MAX_ANSWER_LENGTH,
   MAX_CHAT_HISTORY,
   MAX_CHAT_LENGTH,
+  MAX_DELETE_STROKES,
   MAX_MAX_PLAYERS,
   MAX_NAME_LENGTH,
   MAX_TEXT_STROKE_LENGTH,
@@ -462,6 +463,9 @@ export class GameRoom implements DurableObject {
             dstY: number;
           },
         );
+        break;
+      case "deleteStrokes":
+        await this.onDeleteStrokes(ws, msg as { type: string; indices: number[] });
         break;
       case "claimDrawer":
         await this.onClaimDrawer(ws);
@@ -1008,6 +1012,67 @@ export class GameRoom implements DurableObject {
       },
       ws,
     );
+  }
+
+  /**
+   * 选择删除：按索引删除若干笔画（含客户端算好的级联依赖填充）。
+   * indices 约定降序排列，依次 splice 不会移位。
+   */
+  private async onDeleteStrokes(ws: WebSocket, msg: { type: string; indices: number[] }) {
+    const player = this.getPlayer(ws);
+    if (!player || player.id !== this.drawerId) {
+      return;
+    }
+    if (!this.canMutateCanvas()) {
+      return;
+    }
+    const raw = msg.indices;
+    if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_DELETE_STROKES) {
+      return;
+    }
+    // 校验：整数、范围内、无重复。任何一项不合法则整条丢弃（保守失败，
+    // 不做部分应用 —— 部分应用会造成两端 strokes 数组错位）。
+    const seen = new Set<number>();
+    for (const i of raw) {
+      if (!Number.isInteger(i) || i < 0 || i >= this.strokes.length || seen.has(i)) {
+        return;
+      }
+      seen.add(i);
+    }
+    const indices = [...raw].sort((a, b) => b - a);
+    const oldLength = this.strokes.length;
+    for (const i of indices) {
+      this.strokes.splice(i, 1);
+    }
+    this.redoStack = [];
+
+    // 分片存储重排：删除让 minIdx 之后的条目整体左移 —— 重写受影响区间，
+    // 再删除尾部残留的旧 key。put / delete 都按 DELETE_BATCH_SIZE 分批。
+    const minIdx = indices[indices.length - 1];
+    let batch: Record<string, SerializedStroke> = {};
+    let batchCount = 0;
+    for (let i = minIdx; i < this.strokes.length; i++) {
+      batch[strokeKey(i)] = this.strokes[i];
+      batchCount++;
+      if (batchCount >= DELETE_BATCH_SIZE) {
+        await this.state.storage.put(batch);
+        batch = {};
+        batchCount = 0;
+      }
+    }
+    if (batchCount > 0) {
+      await this.state.storage.put(batch);
+    }
+    const staleKeys: string[] = [];
+    for (let i = this.strokes.length; i < oldLength; i++) {
+      staleKeys.push(strokeKey(i));
+    }
+    for (let i = 0; i < staleKeys.length; i += DELETE_BATCH_SIZE) {
+      await this.state.storage.delete(staleKeys.slice(i, i + DELETE_BATCH_SIZE));
+    }
+
+    // Exclude sender — drawer 本地已删除，回传会二次 splice。
+    this.broadcast({ type: "deleteStrokes", indices }, ws);
   }
 
   private async onClear(ws: WebSocket) {

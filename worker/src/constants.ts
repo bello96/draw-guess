@@ -29,6 +29,8 @@ export const STROKE_KEY_PREFIX = "stroke:";
 export const STROKE_INDEX_PAD = 10;
 // DO storage batch delete is capped at 128 keys per call.
 export const DELETE_BATCH_SIZE = 128;
+// 单条 deleteStrokes 消息允许的最大删除条数（含级联删除的依赖填充笔画）。
+export const MAX_DELETE_STROKES = 128;
 
 // ---------- Rate limit ----------
 // Rolling window, per WebSocket connection. Legitimate traffic ceiling is
