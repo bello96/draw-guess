@@ -54,8 +54,9 @@ export function applyColorToRanges(
 /**
  * 文本单次连续编辑（输入 / 删除 / 选区替换 / 粘贴）后平移颜色区间。
  * 用公共前缀/后缀定位变更段。纯插入发生在某区间内部时该区间随之扩张
- * （颜色跟随续打，与常见富文本编辑器一致）；其余情况切掉被替换的部分，
- * 新插入字符用默认色。
+ * （颜色跟随续打）；替换段完整落在某区间内部时区间整体伸缩（IME 组词
+ * 提交、选中一段重打都继承颜色，与常见富文本编辑器一致）；其余情况
+ * 切掉被替换的部分，新插入字符用默认色。
  */
 export function adjustRangesForTextChange(
   ranges: TextColorRange[],
@@ -95,6 +96,14 @@ export function adjustRangesForTextChange(
     }
     if (isPureInsert && r.start < prefix && prefix < r.end) {
       out.push({ start: r.start, end: r.end + insertLen, color: r.color });
+      continue;
+    }
+    // 替换段被该区间完整覆盖：区间随 delta 整体伸缩，替换文本继承区间色。
+    // 典型路径是 IME 组词——拼音预编辑串在区间内逐字符纯插入（上一分支已
+    // 扩张），提交时候选词替换预编辑串；若走切残段逻辑，提交的字符会掉色。
+    // 区间被整段删空时 end+delta === start，由 normalizeRanges 过滤。
+    if (!isPureInsert && r.start <= prefix && r.end >= oldEnd) {
+      out.push({ start: r.start, end: r.end + delta, color: r.color });
       continue;
     }
     const leftEnd = Math.min(r.end, prefix);

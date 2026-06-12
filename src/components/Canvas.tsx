@@ -17,6 +17,9 @@ import {
 type Point = { x: number; y: number };
 
 export interface EditingText {
+  /** 编辑会话 id（每次新建递增）。commit 旧 + 同批次新建时 editingText
+   *  不经过 null，靠 id 变化识别"换了一段文字"以重置选区等会话内状态。 */
+  id: number;
   text: string;
   x: number;
   y: number;
@@ -418,6 +421,16 @@ export default function Canvas({
   // 上色面板的自定义已确认色（与工具栏弹层的 customColor 相互独立）
   const [panelCustomColor, setPanelCustomColor] = useState<string | null>(null);
 
+  // 换了一段编辑文字时在 render 期重置选区（React 官方 adjust-state 模式）。
+  // 不能依赖下面 keyed [hasEditingText] 的 effect：点画布 "commit 旧 + 新建"
+  // 在同一 handler 里完成，批处理后 editingText 从 A 直达 B 不经过 null，
+  // 旧选区会残留成"幽灵面板"，甚至误染新文本的同号字符区间。
+  const [prevEditingTextId, setPrevEditingTextId] = useState(editingText?.id);
+  if (prevEditingTextId !== editingText?.id) {
+    setPrevEditingTextId(editingText?.id);
+    setTextSelection(null);
+  }
+
   const hasEditingText = editingText != null;
   useEffect(() => {
     if (!hasEditingText) {
@@ -469,6 +482,17 @@ export default function Canvas({
       }
       onEditingTextUpdate?.({
         colorRanges: applyColorToRanges(editingText.colorRanges, start, end, c, len),
+      });
+      // 自定义拾色面板 / 吸色器会把焦点带离 textarea（hex 输入框、EyeDropper
+      // 接管页面）。上色后归还焦点并恢复选区，否则 selectionchange 的
+      // activeElement 守卫会让选区从此冻结，必须手动点回 textarea 才能恢复。
+      // 预设色点击路径焦点未离开，此处为 no-op。
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta && document.activeElement !== ta) {
+          ta.focus();
+          ta.setSelectionRange(start, end);
+        }
       });
     },
     [editingText, textSelection, onEditingTextUpdate],

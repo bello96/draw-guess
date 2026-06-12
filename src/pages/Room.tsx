@@ -36,6 +36,10 @@ function nextMsgId() {
   return `msg-${++msgIdCounter}`;
 }
 
+// 文本编辑会话 id（见 Canvas.tsx 的 EditingText.id）。模块级自增，
+// StrictMode remount 不重置也无妨——只要求单调变化。
+let editingTextIdCounter = 0;
+
 export default function Room({ roomCode, playerName, playerId, onLeave }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -651,6 +655,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       const offsetX = e.clientX - rect.left;
       const offsetY = e.clientY - rect.top;
       setEditingText({
+        id: ++editingTextIdCounter,
         text: "",
         x: offsetX,
         y: offsetY,
