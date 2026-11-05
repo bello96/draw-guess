@@ -16,6 +16,18 @@
  */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * 单笔手绘的最大点数，和 `worker/src/constants.ts` 保持一致。`draw end` 要带上整笔，
+ * 服务端按它存盘，单值上限 2 MB。超过这个点数时客户端自动分段（结束当前笔，从同一点接着画）。
+ */
+export const MAX_STROKE_POINTS = 30_000;
+
+/**
+ * 单笔手绘路径长度上限（归一化坐标下的累计距离），和 `worker/src/constants.ts` 保持一致。
+ * 蜡笔、喷枪的渲染成本和它成正比。客户端到 3/4 就分段，留出余量给下一次移动的跳变。
+ */
+export const MAX_STROKE_PATH = 200;
+
 export type GamePhase = "waiting" | "drawing" | "guessing" | "revealed";
 
 /**
@@ -83,6 +95,9 @@ export interface C_Join {
   type: "join";
   playerName: string;
   playerId?: string; // For reconnection — reuse previous player ID
+  // 重连凭证，客户端自己生成并存在 sessionStorage，服务端不回传。playerId 是公开的，
+  // 取回身份要靠它。不依赖 roomState，所以 roomState 没送到就断线时重试也能回到原身份。
+  playerToken?: string;
   v?: number; // Protocol version — server rejects mismatched clients
 }
 
@@ -98,6 +113,9 @@ export interface C_Draw {
   // Optional batched points for 'move' action (RAF-throttled).
   // When present, server appends all points; x/y is redundantly the last one.
   points?: { x: number; y: number }[];
+  // 仅 action="end"：这一笔的完整内容。服务端以它为准存盘，不依赖 start / move 的缓存
+  // （DO 休眠会丢缓存，断线时 start 也可能发不出去）。旧客户端不带，服务端回退到缓存。
+  stroke?: SerializedStroke;
 }
 
 export interface C_Clear {
@@ -280,6 +298,8 @@ export interface S_Draw {
   brushType?: BrushType;
   // Batched move points (same semantics as client side).
   points?: { x: number; y: number }[];
+  // 仅 action="end"：服务端存下的这一笔。对端以它为准，中途加入或漏了 start 也能补全。
+  stroke?: SerializedStroke;
 }
 
 export interface S_Clear {

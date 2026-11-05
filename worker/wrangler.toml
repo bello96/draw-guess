@@ -12,6 +12,18 @@ bindings = [
   { name = "GAME_ROOM", class_name = "GameRoom" }
 ]
 
+# 按来源 IP 限流，防洪泛（每个 Cloudflare 节点各自计数，近似值）。
+# NAT 后面可能有很多人，上限放得很宽。namespace_id 在账号内要唯一。
+[[ratelimits]]
+name = "ROOM_CREATE_LIMITER"
+namespace_id = "39101"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "CONNECT_LIMITER"
+namespace_id = "39102"
+simple = { limit = 240, period = 60 }
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GameRoom"]

@@ -26,6 +26,10 @@ export default function Home({ onEnterRoom }: Props) {
     try {
       const res = await fetch(apiUrl(`/api/rooms?max=${maxPlayers}`), { method: "POST" });
       const data = await res.json();
+      if (!res.ok || !data.roomCode) {
+        setError(data.error || "创建房间失败，请重试");
+        return;
+      }
       onEnterRoom(data.roomCode, name.trim());
     } catch {
       setError("创建房间失败，请重试");

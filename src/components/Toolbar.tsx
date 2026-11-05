@@ -964,7 +964,7 @@ export default function Toolbar({
       <div className={tx("flex gap-1 items-center")}>
         <button
           onClick={onUndo}
-          disabled={!canUndo}
+          disabled={disabled || !canUndo}
           title="撤销"
           className={tx(
             "w-9 h-9 rounded-full flex items-center justify-center transition",
@@ -975,7 +975,7 @@ export default function Toolbar({
         </button>
         <button
           onClick={onRedo}
-          disabled={!canRedo}
+          disabled={disabled || !canRedo}
           title="重做"
           className={tx(
             "w-9 h-9 rounded-full flex items-center justify-center transition",
@@ -992,6 +992,7 @@ export default function Toolbar({
       <div className={tx("flex items-center")}>
         <button
           onClick={onClear}
+          disabled={disabled}
           title="清除"
           className={tx(
             "w-9 h-9 rounded-full flex items-center justify-center transition",

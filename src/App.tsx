@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { tx } from "@twind/core";
 import Home from "./pages/Home";
 import Room from "./pages/Room";
+import { PLAYER_ID_KEY, PLAYER_TOKEN_KEY } from "./hooks/useWebSocket";
 import bgUrl from "./assets/bg.png";
 
 /** Extract a 6-digit room code from the URL path, e.g. /438907 */
@@ -16,7 +17,6 @@ function defaultNickname(): string {
 }
 
 const NICKNAME_KEY = "draw-guess-nickname";
-const PLAYER_ID_KEY = "draw-guess-playerId";
 
 export default function App() {
   const [roomCode, setRoomCode] = useState("");
@@ -66,6 +66,7 @@ export default function App() {
     setPlayerId(undefined);
     sessionStorage.removeItem(NICKNAME_KEY);
     sessionStorage.removeItem(PLAYER_ID_KEY);
+    sessionStorage.removeItem(PLAYER_TOKEN_KEY);
     window.history.replaceState(null, "", "/");
   }, []);
 

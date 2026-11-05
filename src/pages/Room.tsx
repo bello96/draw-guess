@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 import { tx } from "@twind/core";
-import { useWebSocket, TERMINAL_CLOSE_REASONS } from "../hooks/useWebSocket";
+import { useWebSocket, PLAYER_ID_KEY, TERMINAL_CLOSE_REASONS } from "../hooks/useWebSocket";
 import { useCanvas, findDependentFillIndices } from "../hooks/useCanvas";
 import Canvas from "../components/Canvas";
 import type { EditingSelection, EditingShape, EditingText } from "../components/Canvas";
@@ -29,12 +29,13 @@ interface Props {
   onLeave: () => void;
 }
 
-const PLAYER_ID_KEY = "draw-guess-playerId";
-
 let msgIdCounter = 0;
 function nextMsgId() {
   return `msg-${++msgIdCounter}`;
 }
+
+// 设答案后本地锁定画布的最长时间，正常一个 RTT 就解除了。
+const ANSWER_LOCK_MAX_MS = 5000;
 
 // 文本编辑会话 id（见 Canvas.tsx 的 EditingText.id）。模块级自增，
 // StrictMode remount 不重置也无妨——只要求单调变化。
@@ -89,6 +90,14 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   const [canRedo, setCanRedo] = useState(false);
 
   const isDrawer = myId !== null && myId === drawerId;
+  // 答案发出去、phaseChange 还没回来的这一小段时间。服务端一处理 setAnswer 就会丢弃之后的画布
+  // 操作，这段时间画的东西只会留在本地，所以先把画布锁住。phase 本身不动，它只听服务端的：
+  // 万一答案没送到，界面还在答案模式，用户再回车不会把答案发到公开聊天里。
+  const [answerPending, setAnswerPending] = useState(false);
+  // 画布这边看到的阶段
+  const canvasPhase: GamePhase = answerPending ? "guessing" : phase;
+  // 能不能改画布。未提交的编辑内容（文字、形状、框选）提交前都要看它，服务端按同样的条件拒收。
+  const canEdit = isDrawer && canvasPhase !== "guessing" && canvasPhase !== "revealed";
 
   // WebSocket
   const {
@@ -183,6 +192,8 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     addSelection,
     commitLocalSelection,
     cancelLocalSelection,
+    releaseLocalSelection,
+    resetStrokeInProgress,
     syncVisibleFromOffscreen,
     strokesRef,
   } = useCanvas({
@@ -199,7 +210,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     onSelectionDrawn: handleSelectionDrawn,
     onStrokePicked: handleStrokePicked,
     onStrokeHovered: handleStrokeHovered,
-    phase,
+    phase: canvasPhase,
   });
 
   // Canvas resize handler — blit the cached offscreen onto the (now resized)
@@ -274,6 +285,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       return;
     }
     const timer = window.setTimeout(() => {
+      // roomState 可能已经到了，只是处理它的长任务（全量重放）跨过了截止点，effect 还没来得及清定时器
+      if (myIdRef.current) {
+        return;
+      }
       setJoinError("加入房间超时，请检查网络或刷新页面");
     }, 10_000);
     return () => window.clearTimeout(timer);
@@ -318,6 +333,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         setPlayers(msg.players);
         setDrawerId(msg.drawerId);
         setPhase(msg.phase);
+        setAnswerPending(false);
         setPendingPromotionId(msg.pendingPromotionId ?? null);
         if (typeof msg.maxPlayers === "number") {
           setMaxPlayers(msg.maxPlayers);
@@ -330,11 +346,22 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         }
         // Replay strokes (strokesRef is saved even if canvas isn't mounted yet)
         replayAll(msg.strokes);
+        // 对端的半截笔画作废：重连期间漏了点，再收到的 move 会连成错误的线（end 会带整笔）。
+        // 自己正按着鼠标且还是画手时保留，松手时 end 带整笔发出去。
+        resetStrokeInProgress(
+          msg.yourId === msg.drawerId && msg.phase !== "guessing" && msg.phase !== "revealed",
+        );
+        // 悬浮的框选作废：replayAll 已把来源区域的像素画回去，再提交就成了重影
+        if (editingSelection) {
+          releaseLocalSelection();
+          setEditingSelection(null);
+        }
         // 重做栈以服务端为准：本地可能已过期；刷新后和新人的本地栈是空的，
         // 而后续 redo 广播不带笔画内容，没有它就跟不上。
         redoStackRef.current = msg.redoStack ?? [];
         syncHistoryFlags();
         setPicked(null);
+        setHovered(null);
         // Restore chat history
         if (msg.chatHistory && msg.chatHistory.length > 0) {
           setMessages(
@@ -458,6 +485,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
       case "phaseChange":
         setPhase(msg.phase);
+        setAnswerPending(false);
         setDrawerId(msg.drawerId);
         if (msg.phase === "revealed") {
           setPendingPromotionId(msg.pendingPromotionId ?? null);
@@ -467,22 +495,13 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         if (msg.answerLength) {
           setAnswerLength(msg.answerLength);
         }
-        // 切到 guessing/revealed 阶段时清理所有 in-progress editing overlay，
-        // 避免本地继续操作未 commit 的 overlay 后两端画面 diverge。waiting 阶段
-        // 仍允许 drawer 涂鸦，overlay 不清。
-        if (msg.phase === "guessing" || msg.phase === "revealed") {
-          setEditingShape(null);
-          setEditingText(null);
-          setPicked(null);
-          if (editingSelection) {
-            cancelLocalSelection();
-            setEditingSelection(null);
-          }
-        }
         if (msg.phase === "guessing") {
           addSystemMessage("答案已设定，开始猜词！");
         } else if (msg.phase === "revealed") {
-          addSystemMessage("🎉 猜对了！可以继续出题或转让画笔");
+          // 猜对者离开时服务端会重发 revealed（只是去掉 pendingPromotionId），不是又猜对一次
+          if (phase !== "revealed") {
+            addSystemMessage("🎉 猜对了！可以继续出题或转让画笔");
+          }
         } else if (msg.phase === "drawing") {
           addSystemMessage("新一轮开始，画手开始画画吧！");
           setAnswerLength(null);
@@ -555,7 +574,40 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     return addListener((msg) => messageHandlerRef.current(msg));
   }, [addListener]);
 
+  // 答案的本地锁定要能解除：phaseChange 或 roomState 没回来（断线、半开）时不能一直锁着。
+  useEffect(() => {
+    if (!answerPending) {
+      return;
+    }
+    if (!connected) {
+      setAnswerPending(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setAnswerPending(false), ANSWER_LOCK_MAX_MS);
+    return () => window.clearTimeout(timer);
+  }, [answerPending, connected]);
+
+  // 不能再改画布时（进入猜词阶段、转让出去、掉线回来变猜词方……）丢掉未提交的内容，
+  // 否则提交时服务端会拒收，本地永久多一条。waiting 阶段仍允许画手涂鸦，不清。
+  useEffect(() => {
+    if (canEdit) {
+      return;
+    }
+    setEditingShape(null);
+    setEditingText(null);
+    setPicked(null);
+    setHovered(null);
+    if (editingSelection) {
+      cancelLocalSelection();
+      setEditingSelection(null);
+    }
+  }, [canEdit, editingSelection, cancelLocalSelection]);
+
+  // 下面三个操作都改画布。键盘能触发工具栏按钮，所以这里也要看 canEdit，否则只改了本地。
   const handleClear = () => {
+    if (!canEdit) {
+      return;
+    }
     setEditingShape(null);
     setEditingSelection(null);
     setPicked(null);
@@ -565,10 +617,19 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     syncHistoryFlags();
   };
 
+  // 用键盘操作时没有 mousedown，悬浮的框选不会先提交。replayAll 会把来源像素画回去，要先取消。
+  const cancelFloatingSelection = () => {
+    if (editingSelection) {
+      cancelLocalSelection();
+      setEditingSelection(null);
+    }
+  };
+
   const handleUndo = () => {
-    if (strokesRef.current.length === 0) {
+    if (!canEdit || strokesRef.current.length === 0) {
       return;
     }
+    cancelFloatingSelection();
     setPicked(null);
     const popped = strokesRef.current[strokesRef.current.length - 1];
     strokesRef.current.pop();
@@ -579,9 +640,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   };
 
   const handleRedo = () => {
-    if (redoStackRef.current.length === 0) {
+    if (!canEdit || redoStackRef.current.length === 0) {
       return;
     }
+    cancelFloatingSelection();
     setPicked(null);
     const redone = redoStackRef.current.pop();
     if (!redone) {
@@ -600,13 +662,12 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       cancelLocalSelection();
       setEditingSelection(null);
     }
-    redoStackRef.current = [];
+    // 重做历史不在这里清：服务端可能拒绝（对方刚好掉线），接受时会广播 clear，到时一起清
     if (targetId) {
       send({ type: "transfer", targetId });
     } else {
       send({ type: "transfer" });
     }
-    syncHistoryFlags();
   };
 
   const handleContinueDrawing = () => {
@@ -623,7 +684,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit editing text to canvas and sync to server
   const commitEditingText = useCallback(() => {
-    if (phase === "guessing" || phase === "revealed") {
+    if (!canEdit) {
       setEditingText(null);
       return;
     }
@@ -652,7 +713,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     redoStackRef.current = []; // new stroke invalidates redo history
     syncHistoryFlags();
     setEditingText(null);
-  }, [phase, editingText, color, addTextStroke, send, syncHistoryFlags]);
+  }, [canEdit, editingText, color, addTextStroke, send, syncHistoryFlags]);
 
   // Text tool: click on canvas to create editing text
   const handleCanvasClickForText = useCallback(
@@ -697,7 +758,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit the current editing shape: draw onto canvas + sync to the other player.
   const commitEditingShape = useCallback(() => {
-    if (phase === "guessing" || phase === "revealed") {
+    if (!canEdit) {
       setEditingShape(null);
       return;
     }
@@ -729,7 +790,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     redoStackRef.current = []; // new stroke invalidates redo history
     syncHistoryFlags();
     setEditingShape(null);
-  }, [phase, editingShape, addShape, send, syncHistoryFlags]);
+  }, [canEdit, editingShape, addShape, send, syncHistoryFlags]);
 
   // Drag the overlay around (pixel + normalized both get updated)
   const handleEditingShapeUpdate = useCallback((updates: Partial<EditingShape>) => {
@@ -740,12 +801,12 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // Commit the current editing selection: paste patch at final dst + sync peer.
   const commitEditingSelection = useCallback(() => {
-    if (phase === "guessing" || phase === "revealed") {
-      cancelLocalSelection();
-      setEditingSelection(null);
+    if (!editingSelection) {
       return;
     }
-    if (!editingSelection) {
+    if (!canEdit) {
+      cancelLocalSelection();
+      setEditingSelection(null);
       return;
     }
     const canvas = canvasRef.current;
@@ -770,7 +831,14 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     redoStackRef.current = [];
     syncHistoryFlags();
     setEditingSelection(null);
-  }, [phase, editingSelection, cancelLocalSelection, commitLocalSelection, send, syncHistoryFlags]);
+  }, [
+    canEdit,
+    editingSelection,
+    cancelLocalSelection,
+    commitLocalSelection,
+    send,
+    syncHistoryFlags,
+  ]);
 
   // Drag the selection overlay (pixel offset only — no resize).
   const handleEditingSelectionUpdate = useCallback((updates: Partial<EditingSelection>) => {
@@ -794,12 +862,13 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     if (!editingSelection) {
       return;
     }
-    if (phase === "guessing" || phase === "revealed") {
+    if (!canEdit) {
       cancelLocalSelection();
       setEditingSelection(null);
       return;
     }
     const { srcNorm } = editingSelection;
+    releaseLocalSelection();
     addShape(
       { x: srcNorm.x, y: srcNorm.y },
       { x: srcNorm.x + srcNorm.w, y: srcNorm.y + srcNorm.h },
@@ -822,7 +891,15 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     redoStackRef.current = [];
     syncHistoryFlags();
     setEditingSelection(null);
-  }, [editingSelection, phase, cancelLocalSelection, addShape, send, syncHistoryFlags]);
+  }, [
+    editingSelection,
+    canEdit,
+    cancelLocalSelection,
+    releaseLocalSelection,
+    addShape,
+    send,
+    syncHistoryFlags,
+  ]);
 
   // When switching tools, commit whichever in-edit item is active.
   const handleToolChange = useCallback(
@@ -955,9 +1032,15 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     send({ type: "guess", text });
   };
 
-  const handleSetAnswer = (answer: string) => {
-    send({ type: "setAnswer", answer });
+  // 返回答案是否发出去了。没发出去时 ChatPanel 保留输入内容，用户可以直接重试。
+  const handleSetAnswer = (answer: string): boolean => {
+    if (!send({ type: "setAnswer", answer })) {
+      setToast({ message: "网络异常，答案没有发出去，请稍后再试", type: "error", id: Date.now() });
+      return false;
+    }
     setAnswerText(answer);
+    setAnswerPending(true);
+    return true;
   };
 
   // 全屏 loading / 错误屏的两种触发：
@@ -1040,7 +1123,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           <Canvas
             canvasRef={canvasRef}
             isDrawer={isDrawer}
-            phase={phase}
+            phase={canvasPhase}
             tool={tool}
             onResize={handleCanvasResize}
             onCanvasClick={handleCanvasClickForText}
@@ -1076,7 +1159,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             onRedo={handleRedo}
             canUndo={canUndo}
             canRedo={canRedo}
-            disabled={!isDrawer || phase === "guessing" || phase === "revealed"}
+            disabled={!canEdit}
           />
         </div>
 

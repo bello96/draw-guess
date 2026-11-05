@@ -5,6 +5,10 @@
 
 export const RECONNECT_GRACE_MS = 30_000; // 30 seconds
 export const QUICK_LEAVE_GRACE_MS = 5_000; // 5 seconds (page refresh fast path)
+// quickleave 标记的有效期。页面卸载时 beacon 和断线几乎同时发生，过了这么久再断线就是普通断线。
+export const QUICK_LEAVE_MARK_TTL_MS = 10_000;
+// 查不到名字的玩家（名册字段上线前的房间遇到实例崩溃）在玩家列表里显示这个
+export const UNKNOWN_PLAYER_NAME = "玩家";
 export const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 // touchActivity 持久化节流间隔。高频 draw 下（60Hz）避免每条都写 storage + 重设 alarm。
 // 取 30s 是相对 INACTIVITY_TIMEOUT_MS (10min) 而言的可忽略误差，换 ~1800x 写入降幅。
@@ -21,6 +25,33 @@ export const MAX_CHAT_LENGTH = 200; // shared by chat + guess
 export const MAX_TEXT_STROKE_LENGTH = 100;
 // 文本局部上色：colorRanges 数组长度上限（text ≤ 100 字符，合法区间数不会超过）
 export const MAX_TEXT_COLOR_RANGES = 100;
+
+// 单笔手绘的最大点数，和 src/types/protocol.ts 保持一致。draw end 带整笔，存盘单值上限 2 MB，
+// 3 万个点约 1.5 MB JSON（存储里是更紧凑的二进制）。客户端到这个数会自动分段。
+export const MAX_STROKE_POINTS = 30_000;
+// 单笔手绘路径长度上限（归一化坐标下的累计距离，1 约等于一个画布宽），和 protocol.ts 保持一致。
+// 蜡笔、喷枪的渲染成本和路径长度成正比，不限的话一笔就能卡死所有人。客户端到 3/4 就分段，
+// 连续乱涂也要几分钟才到得了，用户看不出来。
+export const MAX_STROKE_PATH = 200;
+// 房间笔画总量预算，单位见 helpers.ts 的 strokeCost。全部笔画都常驻内存，每次唤醒和每个新人
+// 都要全量处理。最坏情况约 60 万个点（约 60 MB 内存）或约 28 秒的全量重放。普通一笔成本约 3，
+// 要连续画半小时以上才到得了，一轮清一次画板就回到 0。
+export const MAX_ROOM_STROKE_COST = 3000;
+
+// ---------- Message validation bounds (see validate.ts) ----------
+// 这些是防滥用的上限，都比前端能发出的值宽很多：合法消息被丢弃会造成分叉。
+
+// 最大的合法消息是带整笔的 draw end（约 1.5 MB）。更大的不解析，直接丢弃。
+export const MAX_MESSAGE_LENGTH = 4 * 1024 * 1024;
+// 归一化坐标的绝对值上限。编辑框按屏幕拖动，多显示器下能到画布宽度的十几倍。
+export const MAX_COORDINATE = 64;
+// 框选的来源矩形：只能在画布内开始，留一点余量给舍入。
+export const MAX_SELECTION_EXTENT = 1.05;
+export const MAX_LINE_WIDTH = 200; // UI 里最大 12
+export const MAX_FONT_SIZE = 512; // UI 里最大 72
+export const MAX_TOLERANCE = 255; // 填充容差是单通道差值
+// playerId 和重连 token 都是 UUID（36 字符）
+export const MAX_ID_LENGTH = 64;
 
 // ---------- Stroke storage (per-key sharding) ----------
 // Strokes are stored as individual KV entries under STROKE_KEY_PREFIX so a
@@ -53,6 +84,17 @@ export const MAX_DELETE_STROKES = 128;
 export const RATE_LIMIT_PER_SECOND = 300;
 export const RATE_LIMIT_BURST = 3000;
 
+// 写存储的消息（聊天、猜词、落笔等）另算一个桶：上面的限额按消息数算，防不住写入额度被刷光。
+// 人的操作远低于持续速率；突发按卡顿 50 秒、每秒几次操作的积压来留。
+export const WRITE_RATE_LIMIT_PER_SECOND = 20;
+export const WRITE_RATE_LIMIT_BURST = 600;
+
+// ---------- Connections that never join ----------
+// 连上后要马上发 join。超时或超过数量上限就关掉（最旧的先关），挡不住新人进房。
+// close reason 不在客户端的终止态名单里：真有慢客户端被关，它会自己重连。
+export const UNJOINED_TIMEOUT_MS = 30_000;
+export const MAX_UNJOINED_CONNECTIONS = 16;
+
 // ---------- Wire protocol version ----------
 // Must stay in sync with `PROTOCOL_VERSION` in `src/types/protocol.ts`.
 // Bump only on BREAKING changes (removed fields, changed types, changed
@@ -62,6 +104,11 @@ export const RATE_LIMIT_BURST = 3000;
 // as a legacy grace. Once all clients are v1+, tighten to strict equality.
 
 export const PROTOCOL_VERSION = 1;
+
+// ---------- Internal Worker → DO ----------
+// quickleave 的 token 走 beacon 的请求体（不进 URL，免得出现在日志里）。Worker 读出来后
+// 放进这个头转给 DO，这样超长的请求体不用读，也不用把请求流接到 DO 上。
+export const PLAYER_TOKEN_HEADER = "X-Player-Token";
 
 // ---------- Multiplayer room capacity ----------
 // Range for `?max=N` query on POST /api/rooms. Values outside this range fall back to MIN_MAX_PLAYERS.

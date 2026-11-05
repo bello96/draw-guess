@@ -28,7 +28,7 @@
 - 画手设定答案后，猜词方可输入猜测；答对自动揭晓并撒彩带
 - 画笔权限可在两人之间转移，一键转让进入下一轮
 - 右侧实时聊天面板
-- 断线自动重连（指数退避 1s→30s）+ 心跳保活；重连期间画板和聊天保留，仅顶部 banner 提示，不阻断 UI；页面刷新 5s 内可恢复身份；首次加入 10s 仍未收到房间状态会自动报错回首页
+- 断线自动重连（指数退避 1s→8s，网络恢复时立刻重连）+ 心跳保活（发现半开连接会主动重连）；重连期间画板和聊天保留，仅顶部 banner 提示，不阻断 UI；页面刷新 5s 内可恢复身份；首次加入 10s 仍未收到房间状态会自动报错回首页
 
 ## 技术栈
 
@@ -74,8 +74,9 @@
 │   │   ├── room.ts               # ⭐ GameRoom Durable Object
 │   │   ├── types.ts              # DO 内部类型
 │   │   ├── constants.ts          # 可调参数 + PROTOCOL_VERSION
+│   │   ├── validate.ts           # 客户端消息的入口校验
 │   │   └── helpers.ts            # 纯函数 helpers
-│   ├── wrangler.toml             # durable_objects + routes
+│   ├── wrangler.toml             # durable_objects + 限流绑定 + routes
 │   └── package.json
 ├── .github/workflows/            # CI/CD
 │   ├── deploy-pages.yml          # 前端自动部署到 Pages
@@ -157,9 +158,9 @@ npx wrangler pages deploy dist --project-name=draw-guess
 
 | 消息 | 说明 |
 |------|------|
-| `join` | 加入房间，带 `v: PROTOCOL_VERSION` 做版本校验 |
+| `join` | 加入房间，带 `v: PROTOCOL_VERSION` 做版本校验；重连时带 `playerId` 和 `playerToken` |
 | `ping` | 心跳保活（每 25s） |
-| `draw` | 自由笔画（`start` / `move` / `end`，`move` 支持 RAF 批量 `points[]`） |
+| `draw` | 自由笔画（`start` / `move` / `end`，`move` 支持 RAF 批量 `points[]`，`end` 带整笔 `stroke`，服务端和对端以它为准） |
 | `textStroke` | 文字笔画 |
 | `shape` | 形状笔画（矩形 / 椭圆 / 直线 / 箭头） |
 | `fill` | 油漆桶填充（seed 点 + color + tolerance） |
@@ -177,7 +178,7 @@ npx wrangler pages deploy dist --project-name=draw-guess
 
 | 消息 | 说明 |
 |------|------|
-| `roomState` | 房间完整状态（加入时下发，含 strokes 和 chatHistory） |
+| `roomState` | 房间完整状态（加入时下发，含 strokes、chatHistory 和只给本人的重连凭证 `yourToken`） |
 | `pong` | 心跳响应（前端吞掉不分发 listener） |
 | `playerJoined` / `playerLeft` | 玩家进出 |
 | `draw` / `textStroke` / `shape` / `fill` / `selection` / `clear` / `undo` / `redo` | 绘图同步 |
@@ -196,16 +197,18 @@ npx wrangler pages deploy dist --project-name=draw-guess
 
 ## 架构亮点
 
-- **Hibernatable WebSocket**：DO 闲置时可被回收，玩家身份存在 WebSocket attachment 里，醒来自动恢复
+- **Hibernatable WebSocket**：DO 闲置时可被回收，玩家身份存在 WebSocket attachment 里，醒来自动恢复；实例崩溃时靠持久化的名册把玩家转入保留期
 - **两级断线 grace**：正常断线 30s，页面刷新 5s（靠 `pagehide` beacon 识别）
+- **公开 id 和重连凭证分开**：`playerId` 人人可见，取回身份要靠只下发给本人的 token
 - **离屏 canvas 缓存**：已完成笔画全部画到固定 1600×960 的 offscreen canvas，resize 只需 `drawImage` blit 一次（O(1)）；2× 线性分辨率显著减少曲线锯齿
 - **油漆桶 flood fill**：scanline + visited 位图（避免 fill 色与目标色在容差内但不相等时已染色像素被反复入栈死循环）+ 边缘 1px alpha 混合消除白晕；offscreen 用 `willReadFrequently:true` 走 CPU readback 快路径
 - **画笔逐帧重绘**：mousemove 不在累积路径上反复 stroke（避免 alpha overdraw），改为每 RAF 帧 sync offscreen + 单次重绘当前 in-progress stroke
-- **strokes 分片存储**：每条 stroke 独立 storage key（`stroke:0000000001`），避开 DO 单值 128KB 上限
+- **strokes 分片存储**：每条 stroke 独立 storage key（`stroke:0000000001`），避开 DO 单值大小上限；单笔手绘超过 3 万个点时客户端自动分段
 - **服务端 storage 写入节流**：`touchActivity` 高频路径（每条 draw）下 `lastActivityAt` 持久化 + `setAlarm` 节流到 30s 一次，写入量降 ~1800 倍；`onDisconnect` / `/quickleave` 路径不节流以保证 grace 准时
 - **客户端连接管理**：消息 listener 用 ref 模式注册一次永不卸载（避免 ws.onmessage 撞上 listener 卸载窗口丢消息）；首次加入 10s 兜底超时；重连期间主 UI 保留 + 顶部 banner
 - **协议版本号**：`join` 消息带 `v`，服务端拒绝不匹配并提示刷新
-- **Origin 白名单 + rate limit**：所有 API 和 WS upgrade 都校验 Origin；每 WS 令牌桶限流（持续 300 条/秒，允许突发 3000 条）
+- **Origin 白名单 + rate limit**：所有 API 和 WS upgrade 都校验 Origin；每 WS 令牌桶限流（持续 300 条/秒，允许突发 3000 条；写存储的消息另算，持续 20 条/秒，突发 600 条）；建房和建连按来源 IP 限流；未加入的连接有超时和数量上限
+- **消息校验**：所有客户端消息先过 `validate.ts`，类型和范围不合法的直接丢弃
 - **中文答案归一化**：NFKC + lowercase + 去空格 + 去 Unicode 标点，全角半角 / "你好！" vs "你好" 都能对上
 
 详细实现见 [`CLAUDE.md`](./CLAUDE.md)。

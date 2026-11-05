@@ -5,29 +5,50 @@ import {
   MAX_ANSWER_LENGTH,
   MAX_CHAT_HISTORY,
   MAX_CHAT_LENGTH,
-  MAX_DELETE_STROKES,
   MAX_MAX_PLAYERS,
   MAX_NAME_LENGTH,
-  MAX_TEXT_COLOR_RANGES,
-  MAX_TEXT_STROKE_LENGTH,
+  MAX_ROOM_STROKE_COST,
+  MAX_STROKE_PATH,
+  MAX_STROKE_POINTS,
+  MAX_UNJOINED_CONNECTIONS,
   MIN_MAX_PLAYERS,
+  PLAYER_TOKEN_HEADER,
   PROTOCOL_VERSION,
   QUICK_LEAVE_GRACE_MS,
+  QUICK_LEAVE_MARK_TTL_MS,
   RATE_LIMIT_BURST,
   RATE_LIMIT_PER_SECOND,
   RECONNECT_GRACE_MS,
   REDO_KEY_PREFIX,
   STROKE_KEY_PREFIX,
+  UNJOINED_TIMEOUT_MS,
+  UNKNOWN_PLAYER_NAME,
+  WRITE_RATE_LIMIT_BURST,
+  WRITE_RATE_LIMIT_PER_SECOND,
 } from "./constants";
-import { normalizeForCompare, redoKey, strokeKey } from "./helpers";
+import { answerMatches, pathLength, redoKey, strokeCost, strokeKey } from "./helpers";
 import type {
+  BrushType,
   ChatHistoryEntry,
   DisconnectedPlayer,
   GamePhase,
   PlayerAttachment,
   PlayerInfo,
+  RosterEntry,
   SerializedStroke,
+  UnjoinedAttachment,
 } from "./types";
+import { parseClientMessage, writesStorage } from "./validate";
+import type {
+  DrawMessage,
+  FillMessage,
+  JoinMessage,
+  SelectionMessage,
+  ShapeMessage,
+  TextStrokeMessage,
+} from "./validate";
+
+type RateBuckets = WeakMap<WebSocket, { tokens: number; refilledAt: number }>;
 
 // ============ GameRoom Durable Object ============
 
@@ -53,18 +74,23 @@ export class GameRoom implements DurableObject {
   private lastActivityPersistedAt = 0;
   private maxPlayers = MIN_MAX_PLAYERS;
   private joinOrder: string[] = [];
+  // joinOrder 里每个玩家的名字和 token，见 reconcilePlayers
+  private roster = new Map<string, RosterEntry>();
   // 3+ 人房 revealed 阶段的猜对者，自动晋升前要等几秒，期间 DO 可能休眠，所以要持久化
   private pendingPromotionId: string | null = null;
 
   // Transient state (not persisted, OK to lose on hibernation)
+  // 进行中的笔画缓存：给旧客户端的 end 回退用，也用来限制 move 的累计量。
   private currentStrokePoints: { x: number; y: number }[] = [];
-  private currentStrokeColor = "#000000";
-  private currentStrokeWidth = 3;
+  private currentStrokePath = 0;
+  // 这一笔的 start 还在缓存里（休眠或断线后就没了，缓存只剩后半截）
+  private currentStrokeStarted = false;
   // Pen 笔型缓存：start 时存下，move/end 透传到广播；end 写入持久化 stroke。
-  private currentStrokeBrush: "pen" | "airbrush" | "crayon" | "watercolor" = "pen";
-  // Per-ws token bucket for rate limiting. WeakMap ensures the entry is GC'd when
+  private currentStrokeBrush: BrushType = "pen";
+  // Per-ws token buckets for rate limiting. WeakMap ensures the entry is GC'd when
   // the ws is collected, and hibernation resets it naturally (back to a full bucket).
-  private wsRateBuckets = new WeakMap<WebSocket, { tokens: number; refilledAt: number }>();
+  private wsRateBuckets: RateBuckets = new WeakMap();
+  private wsWriteBuckets: RateBuckets = new WeakMap();
 
   constructor(
     private state: DurableObjectState,
@@ -98,6 +124,7 @@ export class GameRoom implements DurableObject {
       "lastActivityAt",
       "maxPlayers",
       "joinOrder",
+      "roster",
       "pendingPromotionId",
     ]);
 
@@ -131,18 +158,69 @@ export class GameRoom implements DurableObject {
     if (this.joinOrder.length === 0 && this.drawerId) {
       this.joinOrder = [this.drawerId];
     }
+    this.roster = new Map((data.get("roster") as [string, RosterEntry][] | undefined) ?? []);
     this.pendingPromotionId = (data.get("pendingPromotionId") as string | null) ?? null;
+
+    await this.reconcilePlayers();
+  }
+
+  /**
+   * 实例崩溃或强制更新时，连接消失了但 close 事件没有运行：玩家还在 joinOrder 里，却既没有
+   * 连接，也不在保留期。不处理的话他们回来只能当新玩家，留在 drawerId 里的旧 id 变成幽灵，
+   * 房间再也动不了。这里把他们转入保留期，和普通断线走同一条路。
+   */
+  private async reconcilePlayers() {
+    const online = new Map(this.getJoinedWebSockets().map(({ player }) => [player.id, player]));
+    let changed = false;
+    for (const id of this.joinOrder) {
+      const player = online.get(id);
+      if (player) {
+        // 这个字段上线前就在线的玩家：名册里没有，趁现在补上
+        if (!this.roster.has(id)) {
+          this.roster.set(id, { name: player.name, ...(player.token ? { token: player.token } : {}) });
+          changed = true;
+        }
+        continue;
+      }
+      if (this.disconnectedPlayers.has(id)) {
+        continue;
+      }
+      const known = this.roster.get(id);
+      this.disconnectedPlayers.set(id, {
+        id,
+        // 名册字段上线前的房间可能查不到名字：先留空，重连时用他带来的昵称
+        name: known?.name ?? "",
+        ...(known?.token ? { token: known.token } : {}),
+        disconnectedAt: Date.now(),
+        graceMs: RECONNECT_GRACE_MS,
+      });
+      changed = true;
+    }
+    if (changed) {
+      await this.saveState();
+      this.scheduleNextAlarm();
+      this.broadcastPlayerList();
+    }
   }
 
   /** Token-bucket rate check. Returns false when the bucket is exhausted. */
-  private checkRateLimit(ws: WebSocket): boolean {
+  private takeToken(buckets: RateBuckets, ws: WebSocket, perSecond: number, burst: number): boolean {
     const now = Date.now();
-    const bucket = this.wsRateBuckets.get(ws) ?? { tokens: RATE_LIMIT_BURST, refilledAt: now };
-    const refill = ((now - bucket.refilledAt) / 1000) * RATE_LIMIT_PER_SECOND;
-    bucket.tokens = Math.min(RATE_LIMIT_BURST, bucket.tokens + refill) - 1;
+    const bucket = buckets.get(ws) ?? { tokens: burst, refilledAt: now };
+    const refill = ((now - bucket.refilledAt) / 1000) * perSecond;
+    bucket.tokens = Math.min(burst, bucket.tokens + refill) - 1;
     bucket.refilledAt = now;
-    this.wsRateBuckets.set(ws, bucket);
+    buckets.set(ws, bucket);
     return bucket.tokens >= 0;
+  }
+
+  private closeForRateLimit(ws: WebSocket) {
+    this.send(ws, { type: "error", message: "消息频率过高，连接已断开" });
+    try {
+      ws.close(1008, "rate limited");
+    } catch {
+      /* ignore */
+    }
   }
 
   /** Storage caps batch deletes at DELETE_BATCH_SIZE keys per call. */
@@ -174,13 +252,46 @@ export class GameRoom implements DurableObject {
   /**
    * Append a finished stroke and invalidate redo history. Both writes are issued
    * before the first await, so storage commits them as one atomic batch.
+   *
+   * 房间超出笔画预算时拒收并返回 false，调用方不要广播。全部笔画都常驻内存，每次唤醒和每个
+   * 新人都要全量处理，所以总量要有上限。正常一局到不了（见 MAX_ROOM_STROKE_COST）。
+   * redoStack 不算：新笔画会把它清空。
    */
-  private async commitStroke(stroke: SerializedStroke) {
+  private async commitStroke(ws: WebSocket, stroke: SerializedStroke): Promise<boolean> {
+    const used = this.strokes.reduce((sum, s) => sum + strokeCost(s), 0);
+    if (used + strokeCost(stroke) > MAX_ROOM_STROKE_COST) {
+      this.send(ws, { type: "error", message: "画板内容太多了，清除后才能继续画" });
+      return false;
+    }
     this.strokes.push(stroke);
     await Promise.all([
       this.state.storage.put(strokeKey(this.strokes.length - 1), stroke),
       this.clearRedoStack(),
     ]);
+    return true;
+  }
+
+  private resetCurrentStroke() {
+    this.currentStrokePoints = [];
+    this.currentStrokePath = 0;
+    this.currentStrokeStarted = false;
+  }
+
+  /** 累积 move 的点。超过单笔上限时返回 false，这一批既不累积也不转发。 */
+  private extendCurrentStroke(points: { x: number; y: number }[]): boolean {
+    const last = this.currentStrokePoints[this.currentStrokePoints.length - 1];
+    const path = this.currentStrokePath + pathLength(last ? [last, ...points] : points);
+    if (
+      this.currentStrokePoints.length + points.length > MAX_STROKE_POINTS ||
+      path > MAX_STROKE_PATH
+    ) {
+      return false;
+    }
+    for (const point of points) {
+      this.currentStrokePoints.push(point);
+    }
+    this.currentStrokePath = path;
+    return true;
   }
 
   /**
@@ -202,8 +313,13 @@ export class GameRoom implements DurableObject {
     this.lastActivityPersistedAt = 0;
     this.maxPlayers = MIN_MAX_PLAYERS;
     this.joinOrder = [];
+    this.roster.clear();
     this.pendingPromotionId = null;
-    this.currentStrokePoints = [];
+    this.resetCurrentStroke();
+    // 房间没了，还没 join 的连接也没有留着的必要
+    for (const { ws } of this.getUnjoinedWebSockets()) {
+      this.closeUnjoined(ws, 1000, "room not found");
+    }
     await this.state.storage.deleteAlarm();
     await this.state.storage.deleteAll();
   }
@@ -222,6 +338,7 @@ export class GameRoom implements DurableObject {
       lastActivityAt: this.lastActivityAt,
       maxPlayers: this.maxPlayers,
       joinOrder: this.joinOrder,
+      roster: Array.from(this.roster.entries()),
       pendingPromotionId: this.pendingPromotionId,
     });
   }
@@ -257,6 +374,12 @@ export class GameRoom implements DurableObject {
       candidates.push(this.lastActivityAt + INACTIVITY_TIMEOUT_MS);
     }
 
+    // Connections that never sent join
+    const oldestUnjoined = this.getUnjoinedWebSockets()[0];
+    if (oldestUnjoined) {
+      candidates.push(oldestUnjoined.since + UNJOINED_TIMEOUT_MS);
+    }
+
     if (candidates.length > 0) {
       this.state.storage.setAlarm(Math.min(...candidates));
     }
@@ -270,7 +393,41 @@ export class GameRoom implements DurableObject {
   // ============ Player helpers using WebSocket attachments ============
 
   private getPlayer(ws: WebSocket): PlayerAttachment | null {
-    return ws.deserializeAttachment() as PlayerAttachment | null;
+    const attachment = ws.deserializeAttachment() as PlayerAttachment | UnjoinedAttachment | null;
+    return attachment && "id" in attachment ? attachment : null;
+  }
+
+  /** 连上了但还没发 join 的连接，最旧的在前。 */
+  private getUnjoinedWebSockets(): { ws: WebSocket; since: number }[] {
+    const result: { ws: WebSocket; since: number }[] = [];
+    for (const ws of this.state.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as PlayerAttachment | UnjoinedAttachment | null;
+      if (attachment && "unjoinedSince" in attachment) {
+        result.push({ ws, since: attachment.unjoinedSince });
+      }
+    }
+    return result.sort((a, b) => a.since - b.since);
+  }
+
+  private closeUnjoined(ws: WebSocket, code: number, reason: string) {
+    try {
+      ws.serializeAttachment(null);
+      ws.close(code, reason);
+    } catch {
+      /* already closed */
+    }
+  }
+
+  /** 关掉超时的未加入连接；数量超限时从最旧的开始关，新连接总能留下。 */
+  private sweepUnjoined() {
+    const unjoined = this.getUnjoinedWebSockets();
+    const overflow = unjoined.length - MAX_UNJOINED_CONNECTIONS;
+    const now = Date.now();
+    unjoined.forEach(({ ws, since }, i) => {
+      if (i < overflow || now - since >= UNJOINED_TIMEOUT_MS) {
+        this.closeUnjoined(ws, 1008, "join timeout");
+      }
+    });
   }
 
   private getJoinedWebSockets(): { ws: WebSocket; player: PlayerAttachment }[] {
@@ -288,13 +445,6 @@ export class GameRoom implements DurableObject {
     return this.getJoinedWebSockets().length;
   }
 
-  private isPlayerActive(id: string): boolean {
-    if (this.disconnectedPlayers.has(id)) {
-      return true;
-    }
-    return this.getJoinedWebSockets().some(({ player }) => player.id === id);
-  }
-
   private getPlayerInfoList(): PlayerInfo[] {
     const joined = new Map(
       this.getJoinedWebSockets().map(({ player }) => [player.id, player]),
@@ -306,7 +456,7 @@ export class GameRoom implements DurableObject {
       if (player) {
         result.push({
           id: player.id,
-          name: player.name,
+          name: player.name || UNKNOWN_PLAYER_NAME,
           isOwner: player.id === this.drawerId,
           connected: joined.has(id),
         });
@@ -392,18 +542,22 @@ export class GameRoom implements DurableObject {
       if (!playerId) {
         return new Response("Missing playerId", { status: 400 });
       }
+      // 只有本人能缩短自己的保留期。凭证不对时和“查无此人”一样直接返回。
+      const token = request.headers.get(PLAYER_TOKEN_HEADER) || undefined;
 
       // Case 1: Player still connected (beacon arrived before WS close) — mark for short grace
       for (const { ws, player } of this.getJoinedWebSockets()) {
         if (player.id === playerId) {
-          ws.serializeAttachment({ ...player, quickLeave: true });
+          if (this.ownsIdentity(player, playerId, token)) {
+            ws.serializeAttachment({ ...player, quickLeaveAt: Date.now() });
+          }
           return new Response("OK");
         }
       }
 
       // Case 2: Already disconnected (WS closed before beacon) — shorten grace
       const dp = this.disconnectedPlayers.get(playerId);
-      if (dp) {
+      if (dp && this.ownsIdentity(dp, playerId, token)) {
         dp.disconnectedAt = Date.now();
         dp.graceMs = QUICK_LEAVE_GRACE_MS;
         await this.saveState();
@@ -413,17 +567,8 @@ export class GameRoom implements DurableObject {
       return new Response("OK");
     }
 
-    // Room info endpoint (non-WebSocket)
     if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response(
-        JSON.stringify({
-          playerCount: this.getEffectivePlayerCount(),
-          closed: this.getEffectivePlayerCount() >= this.maxPlayers, // 满员才视为已关闭
-          phase: this.phase,
-          created: this.created,
-        }),
-        { headers: { "Content-Type": "application/json" } },
-      );
+      return new Response("Upgrade Required", { status: 426 });
     }
 
     // WebSocket upgrade — always accept; capacity is validated in onJoin
@@ -434,67 +579,72 @@ export class GameRoom implements DurableObject {
     // Accept WebSocket for hibernation; attachment will be set on "join"
     this.state.acceptWebSocket(server);
 
+    // 房间不存在也要先接受再关：升级时直接拒绝的话，前端读不到错误消息和 close reason
+    if (!this.created) {
+      this.rejectJoin(server, "房间不存在", "room not found");
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    const unjoined: UnjoinedAttachment = { unjoinedSince: Date.now() };
+    server.serializeAttachment(unjoined);
+    this.sweepUnjoined();
+    this.scheduleNextAlarm();
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
   // ============ Hibernatable WebSocket API handlers ============
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-    if (typeof message !== "string") {
-      return;
-    }
     await this.ensureLoaded();
 
-    if (!this.checkRateLimit(ws)) {
-      this.send(ws, { type: "error", message: "消息频率过高，连接已断开" });
-      try {
-        ws.close(1008, "rate limited");
-      } catch {
-        /* ignore */
-      }
+    // 服务端已经关掉这条连接（接管、拒绝、超时）：close 帧还在路上时到达的消息一律不算数，
+    // 否则迟到的 join 会占座，甚至接管本人的新连接。新连接从接受起就有 attachment，见 fetch。
+    if (ws.deserializeAttachment() === null) {
       return;
     }
 
-    let msg: Record<string, unknown>;
-    try {
-      msg = JSON.parse(message);
-    } catch {
+    if (!this.takeToken(this.wsRateBuckets, ws, RATE_LIMIT_PER_SECOND, RATE_LIMIT_BURST)) {
+      this.closeForRateLimit(ws);
+      return;
+    }
+
+    // 入口统一校验：之后的 handler 拿到的都是类型和范围合法的消息
+    const msg = typeof message === "string" ? parseClientMessage(message) : null;
+
+    // 加入之前只能发 join 和心跳。合法客户端不会这样，不留着这条连接。
+    if (!this.getPlayer(ws) && msg?.type !== "join" && msg?.type !== "ping") {
+      this.closeUnjoined(ws, 1008, "join required");
+      return;
+    }
+    if (!msg) {
+      return;
+    }
+
+    if (
+      writesStorage(msg) &&
+      !this.takeToken(this.wsWriteBuckets, ws, WRITE_RATE_LIMIT_PER_SECOND, WRITE_RATE_LIMIT_BURST)
+    ) {
+      this.closeForRateLimit(ws);
       return;
     }
 
     // Update activity on any joined player's message (except join and ping
     // heartbeat). Ping would otherwise reset the inactivity timer and defeat
     // auto-close; so would a connection that never joined.
-    if (msg.type !== "join" && msg.type !== "ping" && this.getPlayer(ws)) {
+    if (msg.type !== "join" && msg.type !== "ping") {
       await this.touchActivity();
     }
 
     switch (msg.type) {
       case "join":
-        await this.onJoin(
-          ws,
-          msg.playerName as string,
-          msg.playerId as string | undefined,
-          typeof msg.v === "number" ? msg.v : undefined,
-        );
+        await this.onJoin(ws, msg);
         break;
       case "ping":
         this.send(ws, { type: "pong" });
         break;
       case "draw":
-        await this.onDraw(
-          ws,
-          msg as {
-            type: string;
-            action: "start" | "move" | "end";
-            x: number;
-            y: number;
-            color: string;
-            lineWidth: number;
-            brushType?: "pen" | "airbrush" | "crayon" | "watercolor";
-            points?: { x: number; y: number }[];
-          },
-        );
+        await this.onDraw(ws, msg);
         break;
       case "clear":
         await this.onClear(ws);
@@ -506,75 +656,31 @@ export class GameRoom implements DurableObject {
         await this.onRedo(ws);
         break;
       case "setAnswer":
-        await this.onSetAnswer(ws, msg.answer as string);
+        await this.onSetAnswer(ws, msg.answer);
         break;
       case "guess":
-        await this.onGuess(ws, msg.text as string);
+        await this.onGuess(ws, msg.text);
         break;
       case "chat":
-        await this.onChat(ws, msg.text as string);
+        await this.onChat(ws, msg.text);
         break;
       case "transfer":
-        await this.onTransfer(ws, msg as { type: string; targetId?: string });
+        await this.onTransfer(ws, msg.targetId);
         break;
       case "textStroke":
-        await this.onTextStroke(
-          ws,
-          msg as {
-            type: string;
-            text: string;
-            x: number;
-            y: number;
-            color: string;
-            fontSize: number;
-            colorRanges?: { start: number; end: number; color: string }[];
-          },
-        );
+        await this.onTextStroke(ws, msg);
         break;
       case "shape":
-        await this.onShape(
-          ws,
-          msg as {
-            type: string;
-            shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
-            filled: boolean;
-            x: number;
-            y: number;
-            width: number;
-            height: number;
-            color: string;
-            lineWidth: number;
-          },
-        );
+        await this.onShape(ws, msg);
         break;
       case "fill":
-        await this.onFill(
-          ws,
-          msg as {
-            type: string;
-            x: number;
-            y: number;
-            color: string;
-            tolerance: number;
-          },
-        );
+        await this.onFill(ws, msg);
         break;
       case "selection":
-        await this.onSelection(
-          ws,
-          msg as {
-            type: string;
-            srcX: number;
-            srcY: number;
-            w: number;
-            h: number;
-            dstX: number;
-            dstY: number;
-          },
-        );
+        await this.onSelection(ws, msg);
         break;
       case "deleteStrokes":
-        await this.onDeleteStrokes(ws, msg as { type: string; indices: number[] });
+        await this.onDeleteStrokes(ws, msg.indices);
         break;
       case "claimDrawer":
         await this.onClaimDrawer(ws);
@@ -588,7 +694,14 @@ export class GameRoom implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket) {
+  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+    // 回一个 close 帧完成握手。当前兼容日期下运行时不会自动回（web_socket_auto_reply_to_close
+    // 从 2026-04-07 才默认开启），不回的话对端要等 10 秒才算关闭。1005 / 1006 不能写进 close 帧。
+    try {
+      ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
+    } catch {
+      /* already closed */
+    }
     await this.ensureLoaded();
     await this.onDisconnect(ws);
   }
@@ -602,6 +715,8 @@ export class GameRoom implements DurableObject {
     await this.ensureLoaded();
 
     const now = Date.now();
+
+    this.sweepUnjoined();
 
     // --- 1. Process expired disconnected players ---
     const expired: DisconnectedPlayer[] = [];
@@ -647,88 +762,63 @@ export class GameRoom implements DurableObject {
 
   // ============ Message Handlers ============
 
-  private async onJoin(
-    ws: WebSocket,
-    playerName: string,
-    playerId?: string,
-    clientVersion?: number,
-  ) {
+  private async onJoin(ws: WebSocket, msg: JoinMessage) {
+    const { playerName, playerId, v: clientVersion } = msg;
+
+    // 同一条连接只能加入一次。否则第二次 join 会拿到新身份，旧身份变成没有连接的幽灵。
+    if (this.getPlayer(ws)) {
+      return;
+    }
+
     // Protocol version check. `clientVersion == null` is a legacy-client grace
     // (see PROTOCOL_VERSION comment) — remove the null branch once pre-v1
     // clients are no longer expected in the wild.
     if (clientVersion != null && clientVersion !== PROTOCOL_VERSION) {
-      this.send(ws, {
-        type: "error",
-        message: "客户端版本过旧，请刷新页面",
-      });
-      try {
-        ws.close(1000, "version mismatch");
-      } catch {
-        /* ignore */
-      }
+      this.rejectJoin(ws, "客户端版本过旧，请刷新页面", "version mismatch");
       return;
     }
 
     // Reject joins to non-existent rooms
     if (!this.created) {
-      this.send(ws, { type: "error", message: "房间不存在" });
-      try {
-        ws.close(1000, "room not found");
-      } catch {
-        /* ignore */
-      }
+      this.rejectJoin(ws, "房间不存在", "room not found");
       return;
     }
 
-    if (playerId) {
-      // Check disconnectedPlayers first (normal reconnection after close was processed)
-      const disconnected = this.disconnectedPlayers.get(playerId);
-
-      if (disconnected) {
+    // 凭证校验不通过的统一当新玩家：不提示原因，也不影响身份的真正主人。
+    // Check disconnectedPlayers first (normal reconnection after close was processed)
+    for (const disconnected of this.disconnectedPlayers.values()) {
+      if (this.ownsIdentity(disconnected, playerId, msg.playerToken)) {
         // ---- Reconnection from disconnectedPlayers ----
-        this.disconnectedPlayers.delete(playerId);
+        this.disconnectedPlayers.delete(disconnected.id);
 
-        const player: PlayerAttachment = {
-          id: disconnected.id,
-          name: disconnected.name,
-        };
-
+        const player = this.reclaimIdentity(disconnected, msg);
         ws.serializeAttachment(player);
         await this.finishRejoin(ws, player);
         return;
       }
+    }
 
-      // Check active WebSockets — the old connection may not have closed yet (race condition)
-      for (const { ws: oldWs, player: existing } of this.getJoinedWebSockets()) {
-        if (existing.id === playerId && oldWs !== ws) {
-          // Take over: close old WS, reuse identity on new WS
-          oldWs.serializeAttachment(null);
-          try {
-            oldWs.close(1000, "reconnected");
-          } catch {
-            /* already closed */
-          }
-
-          const player: PlayerAttachment = {
-            id: existing.id,
-            name: existing.name,
-          };
-
-          ws.serializeAttachment(player);
-          await this.finishRejoin(ws, player);
-          return;
+    // Check active WebSockets — the old connection may not have closed yet (race condition)
+    for (const { ws: oldWs, player: existing } of this.getJoinedWebSockets()) {
+      if (this.ownsIdentity(existing, playerId, msg.playerToken)) {
+        // Take over: close old WS, reuse identity on new WS
+        oldWs.serializeAttachment(null);
+        try {
+          oldWs.close(1000, "reconnected");
+        } catch {
+          /* already closed */
         }
+
+        const player = this.reclaimIdentity(existing, msg);
+        ws.serializeAttachment(player);
+        await this.finishRejoin(ws, player);
+        return;
       }
     }
 
     // ---- New player join ----
     if (this.getEffectivePlayerCount() >= this.maxPlayers) {
-      this.send(ws, { type: "error", message: "房间已满" });
-      try {
-        ws.close(1000, "room full");
-      } catch {
-        /* ignore */
-      }
+      this.rejectJoin(ws, "房间已满", "room full");
       return;
     }
 
@@ -741,11 +831,13 @@ export class GameRoom implements DurableObject {
       name: (
         playerName || `玩家${this.joinOrder.length + 1}`
       ).slice(0, MAX_NAME_LENGTH),
+      ...(msg.playerToken ? { token: msg.playerToken } : {}),
     };
 
     // Store player info as WebSocket attachment (survives hibernation)
     ws.serializeAttachment(player);
     this.joinOrder.push(player.id);
+    this.rememberPlayer(player);
 
     if (isFirst) {
       this.drawerId = player.id;
@@ -779,9 +871,50 @@ export class GameRoom implements DurableObject {
     this.scheduleNextAlarm();
   }
 
+  /** 更新名册。只改内存，调用方负责 saveState。 */
+  private rememberPlayer(player: PlayerAttachment) {
+    this.roster.set(player.id, { name: player.name, ...(player.token ? { token: player.token } : {}) });
+  }
+
+  /** 拒绝加入：先发错误消息（前端靠它显示原因），再带着客户端认识的 reason 关闭。 */
+  private rejectJoin(ws: WebSocket, message: string, reason: string) {
+    this.send(ws, { type: "error", message });
+    this.closeUnjoined(ws, 1000, reason);
+  }
+
+  /**
+   * 这个请求是不是身份的主人。id 是公开的，只有 token 能证明是本人。token 由客户端生成，
+   * 只有它自己知道，能直接定位身份：roomState 没送到就断线时，客户端还不知道自己的 id。
+   *
+   * 过渡期：旧客户端（不认识 token 的 JS）的身份没有 token，只能凭 id，开着的旧标签页还要能
+   * 重连。线上不再有旧客户端后，去掉 stored.id === playerId 这个分支。
+   */
+  private ownsIdentity(
+    stored: { id: string; token?: string },
+    playerId?: string,
+    token?: string,
+  ): boolean {
+    return stored.token !== undefined ? stored.token === token : stored.id === playerId;
+  }
+
+  /** 取回身份后的 attachment。旧身份遇到认识 token 的客户端（刷新拿到了新 JS）时记下它的 token。 */
+  private reclaimIdentity(
+    stored: { id: string; name: string; token?: string },
+    msg: JoinMessage,
+  ): PlayerAttachment {
+    const token = stored.token ?? msg.playerToken;
+    return {
+      id: stored.id,
+      // 名册里没有的玩家（见 reconcilePlayers）名字是空的，用他这次带来的
+      name: stored.name || msg.playerName.slice(0, MAX_NAME_LENGTH) || UNKNOWN_PLAYER_NAME,
+      ...(token ? { token } : {}),
+    };
+  }
+
   /** Shared tail of both rejoin paths (back from grace, or taking over a live connection). */
   private async finishRejoin(ws: WebSocket, player: PlayerAttachment) {
     await this.touchActivity();
+    this.rememberPlayer(player); // 可能刚记下 token 或真实昵称
 
     const phaseChanged = this.recomputePhase();
 
@@ -825,19 +958,7 @@ export class GameRoom implements DurableObject {
     this.broadcast({ type: "playerList", players: this.getPlayerInfoList() }, exclude);
   }
 
-  private async onDraw(
-    ws: WebSocket,
-    msg: {
-      type: string;
-      action: "start" | "move" | "end";
-      x: number;
-      y: number;
-      color: string;
-      lineWidth: number;
-      brushType?: "pen" | "airbrush" | "crayon" | "watercolor";
-      points?: { x: number; y: number }[];
-    },
-  ) {
+  private async onDraw(ws: WebSocket, msg: DrawMessage) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
@@ -846,39 +967,44 @@ export class GameRoom implements DurableObject {
       return;
     }
 
+    // 要告诉对端的整笔，只有内容完整时才有
+    let authoritative: SerializedStroke | null = null;
+
     // Track stroke for replay
     if (msg.action === "start") {
       this.currentStrokePoints = [{ x: msg.x, y: msg.y }];
-      this.currentStrokeColor = msg.color;
-      this.currentStrokeWidth = msg.lineWidth;
+      this.currentStrokePath = 0;
+      this.currentStrokeStarted = true;
       // brushType 只在 start 上发；缺值视作 "pen"（兼容旧客户端）
-      const incomingBrush = msg.brushType;
-      this.currentStrokeBrush =
-        incomingBrush === "airbrush" ||
-        incomingBrush === "crayon" ||
-        incomingBrush === "watercolor"
-          ? incomingBrush
-          : "pen";
+      this.currentStrokeBrush = msg.brushType ?? "pen";
     } else if (msg.action === "move") {
       // 'move' may carry a batch of points (RAF-throttled) or a single x/y.
-      const movePoints = msg.points ?? [{ x: msg.x, y: msg.y }];
-      this.currentStrokePoints.push(...movePoints);
+      if (!this.extendCurrentStroke(msg.points ?? [{ x: msg.x, y: msg.y }])) {
+        return;
+      }
     } else if (msg.action === "end") {
-      this.currentStrokePoints.push({ x: msg.x, y: msg.y });
-      const stroke: SerializedStroke = {
-        points: [...this.currentStrokePoints],
-        color: this.currentStrokeColor,
-        lineWidth: this.currentStrokeWidth,
+      // end 带整笔时以它为准：缓存在内存里，DO 休眠就没了，断线时 start 也可能发不出去。
+      // 旧客户端不带，只能用缓存。缓存丢过 start 时内容不完整（颜色和线宽 end 上有，点只剩后半截），
+      // 这时不告诉对端：它们累积的点是全的，别用残缺的覆盖掉。
+      const finished: SerializedStroke = msg.stroke ?? {
+        points: [...this.currentStrokePoints, { x: msg.x, y: msg.y }],
+        color: msg.color,
+        lineWidth: msg.lineWidth,
         // 默认 pen 不写字段（保持 wire 紧凑、和老 stroke 一致）
         ...(this.currentStrokeBrush !== "pen" ? { brushType: this.currentStrokeBrush } : {}),
       };
-      this.currentStrokePoints = [];
+      const complete = msg.stroke !== undefined || this.currentStrokeStarted;
+      this.resetCurrentStroke();
       // Persist only the new stroke (not the whole list) to stay under value limits.
-      await this.commitStroke(stroke);
+      if (!(await this.commitStroke(ws, finished))) {
+        return;
+      }
+      authoritative = complete ? finished : null;
     }
 
     // Forward to the other player — preserve points batch + brushType when present.
     // brushType 在每一帧都透传给对端，免得对端要缓存 start 时的笔型。
+    // end 带上存下的整笔：对端以它为准，中途加入或漏了 start 也能补全，各端数组不会错位。
     this.broadcast(
       {
         type: "draw",
@@ -889,23 +1015,13 @@ export class GameRoom implements DurableObject {
         lineWidth: msg.lineWidth,
         ...(this.currentStrokeBrush !== "pen" ? { brushType: this.currentStrokeBrush } : {}),
         ...(msg.points ? { points: msg.points } : {}),
+        ...(authoritative ? { stroke: authoritative } : {}),
       },
       ws,
     );
   }
 
-  private async onTextStroke(
-    ws: WebSocket,
-    msg: {
-      type: string;
-      text: string;
-      x: number;
-      y: number;
-      color: string;
-      fontSize: number;
-      colorRanges?: { start: number; end: number; color: string }[];
-    },
-  ) {
+  private async onTextStroke(ws: WebSocket, msg: TextStrokeMessage) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
@@ -914,37 +1030,7 @@ export class GameRoom implements DurableObject {
       return;
     }
 
-    const text = (msg.text || "").slice(0, MAX_TEXT_STROKE_LENGTH);
-    if (!text) {
-      return;
-    }
-
-    // 局部上色区间校验：逐项检查整数 / 范围内 / start<end，非法项丢弃；
-    // 数量截断防滥用。引用被截断文本之外的区间一并丢弃。
-    let colorRanges: { start: number; end: number; color: string }[] | undefined;
-    if (Array.isArray(msg.colorRanges)) {
-      const cleaned: { start: number; end: number; color: string }[] = [];
-      for (const r of msg.colorRanges.slice(0, MAX_TEXT_COLOR_RANGES)) {
-        if (
-          !r ||
-          typeof r !== "object" ||
-          !Number.isInteger(r.start) ||
-          !Number.isInteger(r.end) ||
-          typeof r.color !== "string" ||
-          r.color.length > 32 ||
-          r.start < 0 ||
-          r.end > text.length ||
-          r.start >= r.end
-        ) {
-          continue;
-        }
-        cleaned.push({ start: r.start, end: r.end, color: r.color });
-      }
-      if (cleaned.length > 0) {
-        colorRanges = cleaned;
-      }
-    }
-
+    const { text, colorRanges } = msg;
     const stroke: SerializedStroke = {
       points: [{ x: msg.x, y: msg.y }],
       color: msg.color,
@@ -955,7 +1041,9 @@ export class GameRoom implements DurableObject {
     if (colorRanges) {
       stroke.colorRanges = colorRanges;
     }
-    await this.commitStroke(stroke);
+    if (!(await this.commitStroke(ws, stroke))) {
+      return;
+    }
 
     this.broadcast(
       {
@@ -971,36 +1059,12 @@ export class GameRoom implements DurableObject {
     );
   }
 
-  private async onShape(
-    ws: WebSocket,
-    msg: {
-      type: string;
-      shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart";
-      filled: boolean;
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-      color: string;
-      lineWidth: number;
-    },
-  ) {
+  private async onShape(ws: WebSocket, msg: ShapeMessage) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
     }
     if (!this.canMutateCanvas()) {
-      return;
-    }
-    if (
-      msg.shape !== "rect" &&
-      msg.shape !== "ellipse" &&
-      msg.shape !== "arrow" &&
-      msg.shape !== "line" &&
-      msg.shape !== "triangle" &&
-      msg.shape !== "star" &&
-      msg.shape !== "heart"
-    ) {
       return;
     }
 
@@ -1014,7 +1078,9 @@ export class GameRoom implements DurableObject {
       shape: msg.shape,
       filled: msg.filled,
     };
-    await this.commitStroke(stroke);
+    if (!(await this.commitStroke(ws, stroke))) {
+      return;
+    }
 
     this.broadcast(
       {
@@ -1032,16 +1098,7 @@ export class GameRoom implements DurableObject {
     );
   }
 
-  private async onFill(
-    ws: WebSocket,
-    msg: {
-      type: string;
-      x: number;
-      y: number;
-      color: string;
-      tolerance: number;
-    },
-  ) {
+  private async onFill(ws: WebSocket, msg: FillMessage) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
@@ -1056,7 +1113,9 @@ export class GameRoom implements DurableObject {
       lineWidth: 0,
       fill: { tolerance: msg.tolerance },
     };
-    await this.commitStroke(stroke);
+    if (!(await this.commitStroke(ws, stroke))) {
+      return;
+    }
 
     this.broadcast(
       {
@@ -1070,18 +1129,7 @@ export class GameRoom implements DurableObject {
     );
   }
 
-  private async onSelection(
-    ws: WebSocket,
-    msg: {
-      type: string;
-      srcX: number;
-      srcY: number;
-      w: number;
-      h: number;
-      dstX: number;
-      dstY: number;
-    },
-  ) {
+  private async onSelection(ws: WebSocket, msg: SelectionMessage) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
@@ -1103,7 +1151,9 @@ export class GameRoom implements DurableObject {
         dstY: msg.dstY,
       },
     };
-    await this.commitStroke(stroke);
+    if (!(await this.commitStroke(ws, stroke))) {
+      return;
+    }
 
     this.broadcast(
       {
@@ -1123,7 +1173,7 @@ export class GameRoom implements DurableObject {
    * 选择删除：按索引删除若干笔画（含客户端算好的级联依赖填充）。
    * indices 约定降序排列，依次 splice 不会移位。
    */
-  private async onDeleteStrokes(ws: WebSocket, msg: { type: string; indices: number[] }) {
+  private async onDeleteStrokes(ws: WebSocket, raw: number[]) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
@@ -1131,15 +1181,11 @@ export class GameRoom implements DurableObject {
     if (!this.canMutateCanvas()) {
       return;
     }
-    const raw = msg.indices;
-    if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_DELETE_STROKES) {
-      return;
-    }
-    // 校验：整数、范围内、无重复。任何一项不合法则整条丢弃（保守失败，
+    // 校验：范围内、无重复。任何一项不合法则整条丢弃（保守失败，
     // 不做部分应用 —— 部分应用会造成两端 strokes 数组错位）。
     const seen = new Set<number>();
     for (const i of raw) {
-      if (!Number.isInteger(i) || i < 0 || i >= this.strokes.length || seen.has(i)) {
+      if (i < 0 || i >= this.strokes.length || seen.has(i)) {
         return;
       }
       seen.add(i);
@@ -1193,7 +1239,7 @@ export class GameRoom implements DurableObject {
       await this.state.storage.put("pendingPromotionId", null);
     }
     this.strokes = [];
-    this.currentStrokePoints = [];
+    this.resetCurrentStroke();
     await this.clearRedoStack();
     await this.clearStrokeStorage();
     // Exclude sender — drawer already cleared locally; on a slow link the echo
@@ -1291,8 +1337,7 @@ export class GameRoom implements DurableObject {
     }
 
     const trimmed = text.trim().slice(0, MAX_CHAT_LENGTH);
-    const correct =
-      this.answer !== null && normalizeForCompare(trimmed) === normalizeForCompare(this.answer);
+    const correct = this.answer !== null && answerMatches(trimmed, this.answer);
 
     this.chatHistory.push({
       kind: "guess",
@@ -1384,7 +1429,7 @@ export class GameRoom implements DurableObject {
     this.phase = "drawing";
     this.answer = null;
     this.strokes = [];
-    this.currentStrokePoints = [];
+    this.resetCurrentStroke();
 
     await this.saveState();
     await this.clearRedoStack();
@@ -1398,16 +1443,13 @@ export class GameRoom implements DurableObject {
     });
   }
 
-  private async onTransfer(ws: WebSocket, msg: { type: string; targetId?: string }) {
+  private async onTransfer(ws: WebSocket, requestedTargetId?: string) {
     const player = this.getPlayer(ws);
     if (!player || player.id !== this.drawerId) {
       return;
     }
 
-    let targetId: string | undefined =
-      typeof msg.targetId === "string" && msg.targetId.length > 0
-        ? msg.targetId
-        : undefined;
+    let targetId = requestedTargetId;
     if (!targetId) {
       // 兼容 2 人 / 旧客户端：转给非自己的第一个
       for (const { player: other } of this.getJoinedWebSockets()) {
@@ -1417,13 +1459,11 @@ export class GameRoom implements DurableObject {
         }
       }
     }
-    if (!targetId) {
-      return;
-    }
-
-    // 验证 targetId 是当前在线玩家且不是自己
+    // 验证 targetId 是当前在线玩家且不是自己。前端已禁用离线候选，走到这里说明对方
+    // 刚好掉线（列表还没更新），要告诉发送者，否则点了没反应。
     const targetOnline = this.getJoinedWebSockets().some(({ player: p }) => p.id === targetId);
-    if (!targetOnline) {
+    if (!targetId || !targetOnline) {
+      this.send(ws, { type: "error", message: "对方已离线，暂时无法转让" });
       return;
     }
     if (targetId === player.id) {
@@ -1453,7 +1493,7 @@ export class GameRoom implements DurableObject {
     this.phase = "drawing";
     this.answer = null;
     this.strokes = [];
-    this.currentStrokePoints = [];
+    this.resetCurrentStroke();
 
     await this.saveState();
     await this.clearRedoStack();
@@ -1505,13 +1545,19 @@ export class GameRoom implements DurableObject {
     // Clear attachment so this ws is no longer counted as a joined player
     ws.serializeAttachment(null);
 
-    // Use short grace if quickleave beacon was received (page unload — refresh/close/navigate)
-    const graceMs = player.quickLeave ? QUICK_LEAVE_GRACE_MS : RECONNECT_GRACE_MS;
+    // Use short grace if quickleave beacon was received (page unload — refresh/close/navigate).
+    // 标记要是新鲜的：刷新时 beacon 可能比新页面的 join 晚到，落在已接管的新连接上，
+    // 不能让这条连接之后的普通断线也只有短保留期。
+    const graceMs =
+      player.quickLeaveAt !== undefined && Date.now() - player.quickLeaveAt < QUICK_LEAVE_MARK_TTL_MS
+        ? QUICK_LEAVE_GRACE_MS
+        : RECONNECT_GRACE_MS;
 
     // Store in disconnectedPlayers for reconnection grace period
     this.disconnectedPlayers.set(player.id, {
       id: player.id,
       name: player.name,
+      ...(player.token ? { token: player.token } : {}),
       disconnectedAt: Date.now(),
       graceMs,
     });
@@ -1534,6 +1580,7 @@ export class GameRoom implements DurableObject {
     }
 
     this.joinOrder = this.joinOrder.filter((id) => id !== dp.id);
+    this.roster.delete(dp.id);
 
     const remaining = this.getJoinedWebSockets();
     // Also consider other disconnected players still in grace period
@@ -1555,20 +1602,15 @@ export class GameRoom implements DurableObject {
 
     if (dp.id === this.drawerId) {
       // drawer 离开：切下家 + 清画板 + 重置 phase（旧画作对应已清的旧 answer，无意义）
-      let newDrawer: string | null = null;
-      for (const id of this.joinOrder) {
-        if (this.isPlayerActive(id)) {
-          newDrawer = id;
-          break;
-        }
-      }
-      if (!newDrawer) {
-        newDrawer = allRemaining[0].id;
-      }
-      this.drawerId = newDrawer;
+      // 优先选在线的玩家，否则大家要白等对方的保留期；都不在线才退到保留期玩家。
+      const online = new Set(remaining.map((r) => r.player.id));
+      this.drawerId =
+        this.joinOrder.find((id) => online.has(id)) ??
+        this.joinOrder.find((id) => this.disconnectedPlayers.has(id)) ??
+        allRemaining[0].id;
 
       this.strokes = [];
-      this.currentStrokePoints = [];
+      this.resetCurrentStroke();
       await this.clearRedoStack();
       await this.clearStrokeStorage();
       this.answer = null;

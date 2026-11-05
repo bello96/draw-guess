@@ -14,7 +14,8 @@ interface Props {
   playerCount: number;
   onSendChat: (text: string) => void;
   onGuess: (text: string) => void;
-  onSetAnswer: (answer: string) => void;
+  /** 返回答案是否发出去了 */
+  onSetAnswer: (answer: string) => boolean;
 }
 
 const MODE_CONFIG: Record<
@@ -115,7 +116,10 @@ export default function ChatPanel({
         onSendChat(text);
         break;
       case "setAnswer":
-        onSetAnswer(text);
+        // 没发出去就把内容放回去，重试时不用重打
+        if (!onSetAnswer(text)) {
+          setInput(text);
+        }
         break;
       case "guess":
         onGuess(text);

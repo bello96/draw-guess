@@ -7,6 +7,7 @@ import type {
   SerializedStroke,
   TextColorRange,
 } from "../types/protocol";
+import { MAX_STROKE_PATH, MAX_STROKE_POINTS } from "../types/protocol";
 import type { FillMode, ToolMode } from "../components/Toolbar";
 import { lineSegments } from "../utils/textColor";
 
@@ -1229,6 +1230,22 @@ function renderStrokeToCtx(
   );
 }
 
+/**
+ * 存量数据里可能有畸形笔画（服务端校验上线前写入的）。一笔画不出来，
+ * 不能影响其余笔画，也不能打断 roomState 后面的处理。
+ */
+function renderStrokeSafely(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  stroke: SerializedStroke,
+): void {
+  try {
+    renderStrokeToCtx(ctx, canvas, stroke);
+  } catch (err) {
+    console.warn("跳过无法渲染的笔画", err);
+  }
+}
+
 /** Draw a live preview of an in-progress shape/arrow/line onto the visible context. */
 function drawShapePreview(
   ctx: CanvasRenderingContext2D,
@@ -1320,6 +1337,8 @@ export function useCanvas({
   const strokesRef = useRef<SerializedStroke[]>([]);
   const currentStrokeRef = useRef<{
     points: Point[];
+    // 累计路径长度（归一化坐标），分段用
+    path: number;
     color: string;
     lineWidth: number;
     brushType: BrushType;
@@ -1358,7 +1377,7 @@ export function useCanvas({
     if (!offCtx) {
       return;
     }
-    renderStrokeToCtx(offCtx, offs, stroke);
+    renderStrokeSafely(offCtx, offs, stroke);
   }, []);
 
   const syncVisibleFromOffscreen = useCallback(() => {
@@ -1387,9 +1406,38 @@ export function useCanvas({
     offCtx.fillStyle = "#ffffff";
     offCtx.fillRect(0, 0, offs.width, offs.height);
     for (const stroke of strokes) {
-      renderStrokeToCtx(offCtx, offs, stroke);
+      renderStrokeSafely(offCtx, offs, stroke);
     }
   }, []);
+
+  /**
+   * 丢弃进行中的笔画（本地的，或对端的半截）。
+   * keepLocal：自己正按着鼠标时保留，松手时 end 会带着整笔发出去，服务端以它为准。
+   */
+  const resetStrokeInProgress = useCallback(
+    (keepLocal = false) => {
+      if (keepLocal && isDrawingRef.current) {
+        return;
+      }
+      const hadStroke = currentStrokeRef.current !== null;
+      isDrawingRef.current = false;
+      currentStrokeRef.current = null;
+      pendingPointsRef.current = [];
+      if (hadStroke) {
+        syncVisibleFromOffscreen();
+      }
+    },
+    [syncVisibleFromOffscreen],
+  );
+
+  // 进行中的笔画不会再结束的情况：
+  // - 进入猜词 / 揭晓阶段：服务端不再接受画布操作，本地和对端的半截都作废
+  // - 失去画手身份：本地那一笔作废。isDrawingRef 留在 true 的话，之后再当画手时鼠标一动就接着画
+  useEffect(() => {
+    if (phase === "guessing" || phase === "revealed" || (!isDrawer && isDrawingRef.current)) {
+      resetStrokeInProgress();
+    }
+  }, [isDrawer, phase, resetStrokeInProgress]);
 
   // 手写字体（Excalifont / Xiaolai）按 unicode-range 子集异步加载：roomState
   // 回放或远端 textStroke 到达时字体可能尚未就绪，文字先以回退字体绘制。
@@ -1508,6 +1556,14 @@ export function useCanvas({
     rebuildOffscreen(strokesRef.current);
     syncVisibleFromOffscreen();
   }, [rebuildOffscreen, syncVisibleFromOffscreen]);
+
+  /**
+   * Drawer-side: the floating patch was discarded on purpose and the whitened src
+   * is now the intended result (deleted selection). Nothing is pending any more.
+   */
+  const releaseLocalSelection = useCallback(() => {
+    hasPendingSelectionRef.current = false;
+  }, []);
 
   /**
    * Apply a selection-move stroke from a remote S_Selection message. Runs the
@@ -1690,11 +1746,7 @@ export function useCanvas({
           if (!isDrawingRef.current || !lastPos || !currentStrokeRef.current) {
             return;
           }
-          // 关键：两个数组各自 push **独立的副本**而不是共享同一对象引用
-          // —— 与 onMouseMove 一致；避免未来谁误改其中一个连带影响另一个
-          currentStrokeRef.current.points.push({ x: lastPos.x, y: lastPos.y });
-          pendingPointsRef.current.push({ x: lastPos.x, y: lastPos.y });
-          scheduleFlush();
+          addPoint(lastPos.x, lastPos.y);
         }, SPRAY_INTERVAL_MS);
       };
       const stopSpray = () => {
@@ -1704,15 +1756,10 @@ export function useCanvas({
         }
       };
 
-      const onMouseDown = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
-          return;
-        }
-        isDrawingRef.current = true;
-        const { x, y } = normalize(e);
-        lastPos = { x, y };
+      const beginStroke = (x: number, y: number) => {
         currentStrokeRef.current = {
           points: [{ x, y }],
+          path: 0,
           color: effColor,
           lineWidth,
           brushType: effBrush,
@@ -1727,6 +1774,69 @@ export function useCanvas({
           lineWidth,
           ...(effBrush !== "pen" ? { brushType: effBrush } : {}),
         });
+      };
+
+      // 结束当前笔：先提交到本地，再把整笔随 end 发出去。服务端和对端都以这份为准，
+      // 所以中途断线丢掉的 start / move 不影响结果。
+      const finishStroke = (x: number, y: number) => {
+        if (rafIdRef.current !== null) {
+          cancelAnimationFrame(rafIdRef.current);
+          rafIdRef.current = null;
+        }
+        // end 之前必须发完，不受节流限制，否则对端看到的进行中笔画会少点
+        sendPendingMove();
+        const stash = currentStrokeRef.current;
+        if (!stash) {
+          return;
+        }
+        stash.points.push({ x, y });
+        const finalized: SerializedStroke = {
+          points: stash.points,
+          color: stash.color,
+          lineWidth: stash.lineWidth,
+          // 默认 pen 不写字段（保持与历史 stroke 一致）
+          ...(stash.brushType !== "pen" ? { brushType: stash.brushType } : {}),
+        };
+        strokesRef.current.push(finalized);
+        commitToOffscreen(finalized);
+        syncVisibleFromOffscreen();
+        currentStrokeRef.current = null;
+        send({ type: "draw", action: "end", x, y, color: effColor, lineWidth, stroke: finalized });
+        onLocalPenEnd?.();
+      };
+
+      // 关键：两个数组各自 push **独立的副本**而不是共享同一对象引用，
+      // 避免未来谁误改其中一个连带影响另一个
+      const addPoint = (x: number, y: number) => {
+        const stroke = currentStrokeRef.current;
+        if (!stroke) {
+          return;
+        }
+        const last = stroke.points[stroke.points.length - 1];
+        stroke.path += Math.hypot(x - last.x, y - last.y);
+        stroke.points.push({ x, y });
+        pendingPointsRef.current.push({ x, y });
+        // 超长的一笔自动分段，从同一点接着画，服务端不收超过上限的笔画。
+        // 点数留一个名额给 end 的终点；路径留 1/4 的余量，下一次移动或松手可能有一大段跳变。
+        if (
+          stroke.points.length >= MAX_STROKE_POINTS - 1 ||
+          stroke.path >= MAX_STROKE_PATH * 0.75
+        ) {
+          finishStroke(x, y);
+          beginStroke(x, y);
+          return;
+        }
+        scheduleFlush();
+      };
+
+      const onMouseDown = (e: MouseEvent) => {
+        if (phase === "guessing" || phase === "revealed") {
+          return;
+        }
+        isDrawingRef.current = true;
+        const { x, y } = normalize(e);
+        lastPos = { x, y };
+        beginStroke(x, y);
         startSpray();
       };
 
@@ -1739,9 +1849,7 @@ export function useCanvas({
         }
         const { x, y } = normalize(e);
         lastPos = { x, y };
-        currentStrokeRef.current?.points.push({ x, y });
-        pendingPointsRef.current.push({ x, y });
-        scheduleFlush();
+        addPoint(x, y);
       };
 
       const onMouseUp = (e: MouseEvent) => {
@@ -1754,29 +1862,7 @@ export function useCanvas({
         isDrawingRef.current = false;
         stopSpray();
         const { x, y } = normalize(e);
-        if (currentStrokeRef.current) {
-          currentStrokeRef.current.points.push({ x, y });
-          const stash = currentStrokeRef.current;
-          const finalized: SerializedStroke = {
-            points: stash.points,
-            color: stash.color,
-            lineWidth: stash.lineWidth,
-            // 默认 pen 不写字段（保持与历史 stroke 一致）
-            ...(stash.brushType !== "pen" ? { brushType: stash.brushType } : {}),
-          };
-          strokesRef.current.push(finalized);
-          commitToOffscreen(finalized);
-          syncVisibleFromOffscreen();
-          currentStrokeRef.current = null;
-        }
-        if (rafIdRef.current !== null) {
-          cancelAnimationFrame(rafIdRef.current);
-          rafIdRef.current = null;
-        }
-        // end 之前必须发完，不受节流限制，否则对端和服务端会少点
-        sendPendingMove();
-        send({ type: "draw", action: "end", x, y, color: effColor, lineWidth });
-        onLocalPenEnd?.();
+        finishStroke(x, y);
       };
 
       canvas.addEventListener("mousedown", onMouseDown);
@@ -2038,18 +2124,13 @@ export function useCanvas({
   // 不再增量 stroke 累积路径，而是每帧 sync offscreen + 单次重绘当前 in-progress stroke。
   const replayDraw = useCallback(
     (msg: S_Draw) => {
-      const canvas = canvasRef.current;
-      if (!canvas) {
-        return;
-      }
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        return;
-      }
-
+      // 这里不能因为画布没挂载就提前返回：roomState 刚到时 Canvas 还没渲染，紧跟着的 end
+      // 丢了的话这一笔就永远缺了。笔画和离屏都不依赖可见画布，挂载后会从离屏同步过去。
       const drawInProgressStroke = () => {
         const stroke = currentStrokeRef.current;
-        if (!stroke || stroke.points.length === 0) {
+        const canvas = canvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (!stroke || stroke.points.length === 0 || !canvas || !ctx) {
           return;
         }
         const pxPoints: Point[] = stroke.points.map((p) => ({
@@ -2072,6 +2153,7 @@ export function useCanvas({
       if (msg.action === "start") {
         currentStrokeRef.current = {
           points: [{ x: msg.x, y: msg.y }],
+          path: 0,
           color: msg.color,
           lineWidth: msg.lineWidth,
           brushType: incomingBrush,
@@ -2084,19 +2166,24 @@ export function useCanvas({
         syncVisibleFromOffscreen();
         drawInProgressStroke();
       } else if (msg.action === "end") {
-        if (currentStrokeRef.current) {
-          currentStrokeRef.current.points.push({ x: msg.x, y: msg.y });
-          const stash = currentStrokeRef.current;
-          const finalized: SerializedStroke = {
+        const stash = currentStrokeRef.current;
+        currentStrokeRef.current = null;
+        // 以服务端存下的整笔为准：中途加入、重连时漏了 start 或部分 move 都能补全。
+        // 旧服务端不带这个字段，退回本地累积的点。
+        let finalized = msg.stroke ?? null;
+        if (!finalized && stash) {
+          stash.points.push({ x: msg.x, y: msg.y });
+          finalized = {
             points: stash.points,
             color: stash.color,
             lineWidth: stash.lineWidth,
             ...(stash.brushType !== "pen" ? { brushType: stash.brushType } : {}),
           };
+        }
+        if (finalized) {
           strokesRef.current.push(finalized);
           commitToOffscreen(finalized);
           syncVisibleFromOffscreen();
-          currentStrokeRef.current = null;
         }
       }
     },
@@ -2129,6 +2216,11 @@ export function useCanvas({
       }
     }
     strokesRef.current = [];
+    // 画布清空后没有悬空的框选了。对端的半截笔画也作废（画手离开时会走到这里）。
+    hasPendingSelectionRef.current = false;
+    if (!isDrawingRef.current) {
+      currentStrokeRef.current = null;
+    }
   }, [canvasRef]);
 
   // Add a text stroke from remote (commit to offscreen + mirror to visible)
@@ -2205,6 +2297,8 @@ export function useCanvas({
     beginSelection,
     commitLocalSelection,
     cancelLocalSelection,
+    releaseLocalSelection,
+    resetStrokeInProgress,
     syncVisibleFromOffscreen,
     strokesRef,
   };
