@@ -205,7 +205,7 @@ npx wrangler pages deploy dist --project-name=draw-guess
 - **服务端 storage 写入节流**：`touchActivity` 高频路径（每条 draw）下 `lastActivityAt` 持久化 + `setAlarm` 节流到 30s 一次，写入量降 ~1800 倍；`onDisconnect` / `/quickleave` 路径不节流以保证 grace 准时
 - **客户端连接管理**：消息 listener 用 ref 模式注册一次永不卸载（避免 ws.onmessage 撞上 listener 卸载窗口丢消息）；首次加入 10s 兜底超时；重连期间主 UI 保留 + 顶部 banner
 - **协议版本号**：`join` 消息带 `v`，服务端拒绝不匹配并提示刷新
-- **Origin 白名单 + rate limit**：所有 API 和 WS upgrade 都校验 Origin；每 WS 1s/150 条消息上限
+- **Origin 白名单 + rate limit**：所有 API 和 WS upgrade 都校验 Origin；每 WS 令牌桶限流（持续 300 条/秒，允许突发 3000 条）
 - **中文答案归一化**：NFKC + lowercase + 去空格 + 去 Unicode 标点，全角半角 / "你好！" vs "你好" 都能对上
 
 详细实现见 [`CLAUDE.md`](./CLAUDE.md)。

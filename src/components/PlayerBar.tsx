@@ -67,6 +67,7 @@ function PlayerOverflow({ players, myId }: { players: PlayerInfo[]; myId: string
               <span>🤔</span>
               <span>{p.name}</span>
               {p.id === myId && <span className={tx("text-xs text-gray-400")}>(你)</span>}
+              {p.connected === false && <span className={tx("text-xs text-ink-muted")}>离线</span>}
             </div>
           ))}
         </div>
@@ -120,22 +121,30 @@ function TransferDropdown({
           {candidates.length === 0 && (
             <div className={tx("px-3 py-1.5 text-sm text-gray-400")}>无可转让玩家</div>
           )}
-          {candidates.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => {
-                setOpen(false);
-                onPick(p.id);
-              }}
-              className={tx(
-                "w-full px-3 py-1.5 text-sm text-left text-ink hover:bg-amber-50 flex items-center gap-1.5",
-              )}
-            >
-              <span>🤔</span>
-              <span>{p.name}</span>
-            </button>
-          ))}
+          {candidates.map((p) => {
+            // 服务端只接受转给在线玩家，离线候选禁用，否则点了没反应
+            const offline = p.connected === false;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                disabled={offline}
+                title={offline ? "该玩家已离线，暂时无法转让" : undefined}
+                onClick={() => {
+                  setOpen(false);
+                  onPick(p.id);
+                }}
+                className={tx(
+                  "w-full px-3 py-1.5 text-sm text-left flex items-center gap-1.5",
+                  offline ? "text-ink-muted cursor-not-allowed" : "text-ink hover:bg-amber-50",
+                )}
+              >
+                <span>🤔</span>
+                <span>{p.name}</span>
+                {offline && <span className={tx("text-xs")}>离线</span>}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -156,6 +165,8 @@ export default function PlayerBar({
 }: Props) {
   const isDrawer = myId === drawerId;
   const [copied, setCopied] = useState(false);
+  // 两人房里对方掉线时不能转让（服务端只接受在线目标），按钮禁用而不是点了没反应
+  const hasOnlineOther = players.some((p) => p.id !== myId && p.connected !== false);
 
   // Actions 区是否有按钮（继续出题 / 2 人转让 / 3+ 转让下拉）。
   // 仅在有按钮时才在按钮和「离开」之间显示分割线，避免出现裸 divider。
@@ -262,6 +273,9 @@ export default function PlayerBar({
                   <span>{p.id === drawerId ? "🎨" : "🤔"}</span>
                   <span>{p.name}</span>
                   {p.id === myId && <span className={tx("text-xs text-gray-400")}>(你)</span>}
+                  {p.connected === false && (
+                    <span className={tx("text-xs text-ink-muted")}>离线</span>
+                  )}
                 </div>
               ))}
               {overflow.length > 0 && <PlayerOverflow players={overflow} myId={myId} />}
@@ -291,9 +305,11 @@ export default function PlayerBar({
         {isDrawer && players.length === 2 && (
           <button
             onClick={() => onTransfer()}
+            disabled={!hasOnlineOther}
+            title={hasOnlineOther ? undefined : "对方已离线，暂时无法转让"}
             className={tx(
-              "px-3 py-1.5 text-sm bg-amber-50 text-amber-700",
-              "hover:bg-amber-100 rounded-full transition",
+              "px-3 py-1.5 text-sm bg-amber-50 text-amber-700 rounded-full transition",
+              hasOnlineOther ? "hover:bg-amber-100" : "opacity-50 cursor-not-allowed",
             )}
           >
             转让画笔

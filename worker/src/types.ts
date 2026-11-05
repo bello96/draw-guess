@@ -9,6 +9,8 @@ export interface PlayerInfo {
   id: string;
   name: string;
   isOwner: boolean;
+  // false = 断线中（重连保留期内，仍算在房间里）
+  connected?: boolean;
 }
 
 export type BrushType = "pen" | "airbrush" | "crayon" | "watercolor";

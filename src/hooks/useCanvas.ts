@@ -1630,13 +1630,18 @@ export function useCanvas({
         );
       };
 
-      const flushPendingMove = () => {
-        rafIdRef.current = null;
+      // 网络发送按时间节流：rAF 频率等于屏幕刷新率，高刷屏每帧发一条会撞服务端限流。
+      // 取 16ms 而不是 1000/60：60Hz 屏的帧间隔有抖动，16.67 会让大约一半的帧被跳过。
+      const MOVE_SEND_INTERVAL_MS = 16;
+      let lastMoveSentAt = 0;
+
+      const sendPendingMove = () => {
         const points = pendingPointsRef.current;
         if (points.length === 0) {
           return;
         }
         pendingPointsRef.current = [];
+        lastMoveSentAt = performance.now();
         const last = points[points.length - 1];
         send({
           type: "draw",
@@ -1647,7 +1652,20 @@ export function useCanvas({
           lineWidth,
           points,
         });
-        // 视觉重绘：每 RAF 帧一次（最高 60Hz），避免 mousemove 高频触发的浪费
+      };
+
+      const flushPendingMove = () => {
+        rafIdRef.current = null;
+        if (pendingPointsRef.current.length === 0) {
+          return;
+        }
+        if (performance.now() - lastMoveSentAt >= MOVE_SEND_INTERVAL_MS) {
+          sendPendingMove();
+        } else {
+          // 还没到发送时间：点留在队列里，下一帧再试，不会丢
+          scheduleFlush();
+        }
+        // 视觉重绘：每 RAF 帧一次，避免 mousemove 高频触发的浪费
         syncVisibleFromOffscreen();
         drawInProgressStroke();
       };
@@ -1755,7 +1773,8 @@ export function useCanvas({
           cancelAnimationFrame(rafIdRef.current);
           rafIdRef.current = null;
         }
-        flushPendingMove();
+        // end 之前必须发完，不受节流限制，否则对端和服务端会少点
+        sendPendingMove();
         send({ type: "draw", action: "end", x, y, color: effColor, lineWidth });
         onLocalPenEnd?.();
       };

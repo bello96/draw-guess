@@ -1,11 +1,16 @@
 // Pure functions used by GameRoom. No DO state access — safe to unit-test
 // without a Cloudflare runtime.
 
-import { STROKE_INDEX_PAD, STROKE_KEY_PREFIX } from "./constants";
+import { REDO_KEY_PREFIX, STROKE_INDEX_PAD, STROKE_KEY_PREFIX } from "./constants";
 
 /** Storage key for an individual stroke at `index`. Zero-padded for ordered list(). */
 export function strokeKey(index: number): string {
   return STROKE_KEY_PREFIX + String(index).padStart(STROKE_INDEX_PAD, "0");
+}
+
+/** Storage key for the undone stroke at stack position `index`. */
+export function redoKey(index: number): string {
+  return REDO_KEY_PREFIX + String(index).padStart(STROKE_INDEX_PAD, "0");
 }
 
 /**

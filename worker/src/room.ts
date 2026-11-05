@@ -13,12 +13,13 @@ import {
   MIN_MAX_PLAYERS,
   PROTOCOL_VERSION,
   QUICK_LEAVE_GRACE_MS,
-  RATE_LIMIT_MAX_MSGS,
-  RATE_LIMIT_WINDOW_MS,
+  RATE_LIMIT_BURST,
+  RATE_LIMIT_PER_SECOND,
   RECONNECT_GRACE_MS,
+  REDO_KEY_PREFIX,
   STROKE_KEY_PREFIX,
 } from "./constants";
-import { normalizeForCompare, strokeKey } from "./helpers";
+import { normalizeForCompare, redoKey, strokeKey } from "./helpers";
 import type {
   ChatHistoryEntry,
   DisconnectedPlayer,
@@ -38,8 +39,9 @@ export class GameRoom implements DurableObject {
   private phase: GamePhase = "waiting";
   private answer: string | null = null;
   private strokes: SerializedStroke[] = [];
-  // Undone strokes, LIFO. Any new stroke invalidates this list. Not persisted —
-  // redo only survives within one active DO session; hibernation resets it.
+  // Undone strokes, LIFO. Any new stroke invalidates this list. Persisted per
+  // entry under REDO_KEY_PREFIX: the DO hibernates after ~10s idle, which would
+  // otherwise make the drawer's redo silently diverge from everyone else.
   private redoStack: SerializedStroke[] = [];
   private chatHistory: ChatHistoryEntry[] = [];
   private roomCode = "";
@@ -51,7 +53,7 @@ export class GameRoom implements DurableObject {
   private lastActivityPersistedAt = 0;
   private maxPlayers = MIN_MAX_PLAYERS;
   private joinOrder: string[] = [];
-  // pendingPromotionId 不持久化；用于 3+ 人房 revealed 阶段的猜对者
+  // 3+ 人房 revealed 阶段的猜对者，自动晋升前要等几秒，期间 DO 可能休眠，所以要持久化
   private pendingPromotionId: string | null = null;
 
   // Transient state (not persisted, OK to lose on hibernation)
@@ -60,14 +62,22 @@ export class GameRoom implements DurableObject {
   private currentStrokeWidth = 3;
   // Pen 笔型缓存：start 时存下，move/end 透传到广播；end 写入持久化 stroke。
   private currentStrokeBrush: "pen" | "airbrush" | "crayon" | "watercolor" = "pen";
-  // Per-ws rolling window counter for rate limiting. WeakMap ensures the
-  // entry is GC'd when the ws is collected, and hibernation resets it naturally.
-  private wsMessageCounts = new WeakMap<WebSocket, { windowStart: number; count: number }>();
+  // Per-ws token bucket for rate limiting. WeakMap ensures the entry is GC'd when
+  // the ws is collected, and hibernation resets it naturally (back to a full bucket).
+  private wsRateBuckets = new WeakMap<WebSocket, { tokens: number; refilledAt: number }>();
 
   constructor(
     private state: DurableObjectState,
     private env: unknown,
-  ) {}
+  ) {
+    // Heartbeats are answered by the runtime without waking the DO, so an idle
+    // room doesn't reload its whole state every 25s. The request must match the
+    // client's JSON.stringify({ type: "ping" }) exactly; `case "ping"` below is
+    // only a fallback for messages that arrive in a different form.
+    this.state.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'),
+    );
+  }
 
   // ============ Restore state from storage after hibernation ============
 
@@ -88,6 +98,7 @@ export class GameRoom implements DurableObject {
       "lastActivityAt",
       "maxPlayers",
       "joinOrder",
+      "pendingPromotionId",
     ]);
 
     this.created = (data.get("created") as boolean) ?? false;
@@ -104,8 +115,10 @@ export class GameRoom implements DurableObject {
     });
     this.strokes = Array.from(strokeList.values());
 
-    // One-time cleanup: drop the legacy single-key "strokes" blob. Idempotent.
-    await this.state.storage.delete("strokes");
+    const redoList = await this.state.storage.list<SerializedStroke>({
+      prefix: REDO_KEY_PREFIX,
+    });
+    this.redoStack = Array.from(redoList.values());
 
     const dcRaw = data.get("disconnectedPlayers") as [string, DisconnectedPlayer][] | null;
     this.disconnectedPlayers = dcRaw
@@ -118,27 +131,81 @@ export class GameRoom implements DurableObject {
     if (this.joinOrder.length === 0 && this.drawerId) {
       this.joinOrder = [this.drawerId];
     }
+    this.pendingPromotionId = (data.get("pendingPromotionId") as string | null) ?? null;
   }
 
-  /** Rolling-window rate check. Returns false when over limit. */
+  /** Token-bucket rate check. Returns false when the bucket is exhausted. */
   private checkRateLimit(ws: WebSocket): boolean {
     const now = Date.now();
-    const info = this.wsMessageCounts.get(ws);
-    if (!info || now - info.windowStart >= RATE_LIMIT_WINDOW_MS) {
-      this.wsMessageCounts.set(ws, { windowStart: now, count: 1 });
-      return true;
+    const bucket = this.wsRateBuckets.get(ws) ?? { tokens: RATE_LIMIT_BURST, refilledAt: now };
+    const refill = ((now - bucket.refilledAt) / 1000) * RATE_LIMIT_PER_SECOND;
+    bucket.tokens = Math.min(RATE_LIMIT_BURST, bucket.tokens + refill) - 1;
+    bucket.refilledAt = now;
+    this.wsRateBuckets.set(ws, bucket);
+    return bucket.tokens >= 0;
+  }
+
+  /** Storage caps batch deletes at DELETE_BATCH_SIZE keys per call. */
+  private async deleteKeys(keys: string[]) {
+    for (let i = 0; i < keys.length; i += DELETE_BATCH_SIZE) {
+      await this.state.storage.delete(keys.slice(i, i + DELETE_BATCH_SIZE));
     }
-    info.count++;
-    return info.count <= RATE_LIMIT_MAX_MSGS;
   }
 
   /** Delete every per-stroke entry from storage. Safe at any point. */
   private async clearStrokeStorage() {
     const list = await this.state.storage.list({ prefix: STROKE_KEY_PREFIX });
-    const keys = Array.from(list.keys());
-    for (let i = 0; i < keys.length; i += DELETE_BATCH_SIZE) {
-      await this.state.storage.delete(keys.slice(i, i + DELETE_BATCH_SIZE));
+    await this.deleteKeys(Array.from(list.keys()));
+  }
+
+  /**
+   * Drop redo history, in memory and in storage. An empty stack costs no write,
+   * which is the common case: every finished stroke passes through here.
+   */
+  private async clearRedoStack() {
+    const count = this.redoStack.length;
+    if (count === 0) {
+      return;
     }
+    this.redoStack = [];
+    await this.deleteKeys(Array.from({ length: count }, (_, i) => redoKey(i)));
+  }
+
+  /**
+   * Append a finished stroke and invalidate redo history. Both writes are issued
+   * before the first await, so storage commits them as one atomic batch.
+   */
+  private async commitStroke(stroke: SerializedStroke) {
+    this.strokes.push(stroke);
+    await Promise.all([
+      this.state.storage.put(strokeKey(this.strokes.length - 1), stroke),
+      this.clearRedoStack(),
+    ]);
+  }
+
+  /**
+   * Destroy the room: memory, storage and alarm. /init can reuse the DO afterwards.
+   * The alarm goes first because at our compatibility date deleteAll() leaves it
+   * in place (delete_all_deletes_alarm only applies from 2026-02-24).
+   */
+  private async resetRoom() {
+    this.created = false;
+    this.phase = "waiting";
+    this.drawerId = null;
+    this.answer = null;
+    this.strokes = [];
+    this.redoStack = [];
+    this.chatHistory = [];
+    this.roomCode = "";
+    this.disconnectedPlayers.clear();
+    this.lastActivityAt = 0;
+    this.lastActivityPersistedAt = 0;
+    this.maxPlayers = MIN_MAX_PLAYERS;
+    this.joinOrder = [];
+    this.pendingPromotionId = null;
+    this.currentStrokePoints = [];
+    await this.state.storage.deleteAlarm();
+    await this.state.storage.deleteAll();
   }
 
   private async saveState() {
@@ -155,6 +222,7 @@ export class GameRoom implements DurableObject {
       lastActivityAt: this.lastActivityAt,
       maxPlayers: this.maxPlayers,
       joinOrder: this.joinOrder,
+      pendingPromotionId: this.pendingPromotionId,
     });
   }
 
@@ -183,8 +251,9 @@ export class GameRoom implements DurableObject {
       candidates.push(dp.disconnectedAt + dp.graceMs);
     }
 
-    // Inactivity timeout
-    if (this.lastActivityAt > 0 && this.getEffectivePlayerCount() > 0) {
+    // Inactivity timeout. Applies to every live room, including one nobody has
+    // joined yet: it would otherwise hold its room code forever.
+    if (this.created && this.lastActivityAt > 0) {
       candidates.push(this.lastActivityAt + INACTIVITY_TIMEOUT_MS);
     }
 
@@ -232,12 +301,14 @@ export class GameRoom implements DurableObject {
     );
     const result: PlayerInfo[] = [];
     for (const id of this.joinOrder) {
-      const player = joined.get(id);
+      // 保留期内的玩家仍在房间里：列出来并标记离线，否则先重连的人永远看不到后回来的人
+      const player = joined.get(id) ?? this.disconnectedPlayers.get(id);
       if (player) {
         result.push({
           id: player.id,
           name: player.name,
           isOwner: player.id === this.drawerId,
+          connected: joined.has(id),
         });
       }
     }
@@ -246,6 +317,27 @@ export class GameRoom implements DurableObject {
 
   private canMutateCanvas(): boolean {
     return this.phase === "drawing" || this.phase === "waiting";
+  }
+
+  /**
+   * waiting ⇄ drawing 的唯一判定。保留期内的玩家算在人数里，网络抖动不会结束这一局。
+   * 只改内存并返回 phase 是否变化，持久化和广播由调用方负责。
+   */
+  private recomputePhase(): boolean {
+    if (this.getEffectivePlayerCount() < 2) {
+      if (this.phase === "waiting") {
+        return false;
+      }
+      this.phase = "waiting";
+      this.answer = null;
+      this.pendingPromotionId = null;
+      return true;
+    }
+    if (this.phase === "waiting") {
+      this.phase = "drawing";
+      return true;
+    }
+    return false;
   }
 
   // ============ HTTP fetch handler ============
@@ -258,10 +350,18 @@ export class GameRoom implements DurableObject {
     // Returns 409 if already created, so the parent Worker can retry with a new code.
     if (url.pathname === "/init" && request.method === "POST") {
       if (this.created) {
-        return new Response(JSON.stringify({ error: "already created" }), {
-          status: 409,
-          headers: { "Content-Type": "application/json" },
-        });
+        // 没人、又已过闲置期的房间是漏掉的孤儿：早期 /init 不设 alarm，这种房间不会
+        // 自己醒来，只能在这里回收，否则房间号永久被占。
+        const leaked =
+          this.getEffectivePlayerCount() === 0 &&
+          Date.now() - this.lastActivityAt >= INACTIVITY_TIMEOUT_MS;
+        if (!leaked) {
+          return new Response(JSON.stringify({ error: "already created" }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        await this.resetRoom();
       }
       const code = url.searchParams.get("code") || "";
       const maxRaw = parseInt(url.searchParams.get("max") || "2", 10);
@@ -269,14 +369,20 @@ export class GameRoom implements DurableObject {
         Number.isFinite(maxRaw) && maxRaw >= MIN_MAX_PLAYERS && maxRaw <= MAX_MAX_PLAYERS
           ? maxRaw
           : MIN_MAX_PLAYERS;
+      const now = Date.now();
       this.created = true;
       this.roomCode = code;
       this.maxPlayers = maxPlayers;
+      this.lastActivityAt = now;
+      this.lastActivityPersistedAt = now;
       await this.state.storage.put({
         created: true,
         roomCode: code,
         maxPlayers,
+        lastActivityAt: now,
       });
+      // 建了房却没人加入也要能回收
+      this.scheduleNextAlarm();
       return new Response("OK");
     }
 
@@ -356,9 +462,10 @@ export class GameRoom implements DurableObject {
       return;
     }
 
-    // Update activity on any player message (except join and ping heartbeat).
-    // Ping would otherwise reset the inactivity timer and defeat auto-close.
-    if (msg.type !== "join" && msg.type !== "ping") {
+    // Update activity on any joined player's message (except join and ping
+    // heartbeat). Ping would otherwise reset the inactivity timer and defeat
+    // auto-close; so would a connection that never joined.
+    if (msg.type !== "join" && msg.type !== "ping" && this.getPlayer(ws)) {
       await this.touchActivity();
     }
 
@@ -510,11 +617,11 @@ export class GameRoom implements DurableObject {
 
     // --- 2. Check inactivity timeout ---
     if (
+      this.created &&
       this.lastActivityAt > 0 &&
-      now - this.lastActivityAt >= INACTIVITY_TIMEOUT_MS &&
-      this.getEffectivePlayerCount() > 0
+      now - this.lastActivityAt >= INACTIVITY_TIMEOUT_MS
     ) {
-      // Notify all connected players and destroy the room
+      // Notify all connected players (if any) and destroy the room
       this.broadcast({
         type: "roomClosed",
         reason: "房间超过10分钟无活动，已自动关闭",
@@ -530,21 +637,7 @@ export class GameRoom implements DurableObject {
         }
       }
 
-      // Reset room
-      this.created = false;
-      this.phase = "waiting";
-      this.drawerId = null;
-      this.answer = null;
-      this.strokes = [];
-      this.redoStack = [];
-      this.chatHistory = [];
-      this.disconnectedPlayers.clear();
-      this.lastActivityAt = 0;
-      this.joinOrder = [];
-      this.maxPlayers = MIN_MAX_PLAYERS;
-      this.pendingPromotionId = null;
-      await this.saveState();
-      await this.clearStrokeStorage();
+      await this.resetRoom();
       return;
     }
 
@@ -587,8 +680,6 @@ export class GameRoom implements DurableObject {
       return;
     }
 
-    await this.touchActivity();
-
     if (playerId) {
       // Check disconnectedPlayers first (normal reconnection after close was processed)
       const disconnected = this.disconnectedPlayers.get(playerId);
@@ -603,26 +694,7 @@ export class GameRoom implements DurableObject {
         };
 
         ws.serializeAttachment(player);
-        await this.saveState();
-
-        this.send(ws, {
-          type: "roomState",
-          roomCode: this.roomCode,
-          players: this.getPlayerInfoList(),
-          drawerId: this.drawerId,
-          phase: this.phase,
-          strokes: this.strokes,
-          chatHistory: this.chatHistory,
-          yourId: player.id,
-          maxPlayers: this.maxPlayers,
-          ...(this.pendingPromotionId ? { pendingPromotionId: this.pendingPromotionId } : {}),
-          ...(player.id === this.drawerId && this.answer
-            ? { answer: this.answer, answerLength: this.answer.length }
-            : this.answer
-              ? { answerLength: this.answer.length }
-              : {}),
-        });
-
+        await this.finishRejoin(ws, player);
         return;
       }
 
@@ -643,26 +715,7 @@ export class GameRoom implements DurableObject {
           };
 
           ws.serializeAttachment(player);
-          await this.saveState();
-
-          this.send(ws, {
-            type: "roomState",
-            roomCode: this.roomCode,
-            players: this.getPlayerInfoList(),
-            drawerId: this.drawerId,
-            phase: this.phase,
-            strokes: this.strokes,
-            chatHistory: this.chatHistory,
-            yourId: player.id,
-            maxPlayers: this.maxPlayers,
-            ...(this.pendingPromotionId ? { pendingPromotionId: this.pendingPromotionId } : {}),
-            ...(player.id === this.drawerId && this.answer
-              ? { answer: this.answer, answerLength: this.answer.length }
-              : this.answer
-                ? { answerLength: this.answer.length }
-                : {}),
-          });
-
+          await this.finishRejoin(ws, player);
           return;
         }
       }
@@ -679,6 +732,9 @@ export class GameRoom implements DurableObject {
       return;
     }
 
+    // 放在满员检查之后：被拒绝的 join 不算活动，否则不断尝试加入就能让闲置房间永不回收
+    await this.touchActivity();
+
     const isFirst = this.joinOrder.length === 0;
     const player: PlayerAttachment = {
       id: crypto.randomUUID(),
@@ -693,16 +749,54 @@ export class GameRoom implements DurableObject {
 
     if (isFirst) {
       this.drawerId = player.id;
-      this.phase = "waiting";
-    } else if (this.joinOrder.length === 2) {
-      // 第 2 人加入：进入 drawing 阶段
-      this.phase = "drawing";
     }
-    // 第 3 人及之后：phase 不变（已是 drawing/guessing/revealed 之一）
+    const phaseChanged = this.recomputePhase();
 
     await this.saveState();
 
     // Send full state to the joining player
+    this.sendRoomState(ws, player);
+
+    // Notify other players about the new join
+    this.broadcast(
+      {
+        type: "playerJoined",
+        player: {
+          id: player.id,
+          name: player.name,
+          isOwner: player.id === this.drawerId,
+          connected: true,
+        },
+      },
+      ws,
+    );
+
+    // Only when the phase really moved; the joining player has it via roomState.
+    if (phaseChanged) {
+      this.broadcast({ type: "phaseChange", phase: this.phase, drawerId: this.drawerId! }, ws);
+    }
+
+    this.scheduleNextAlarm();
+  }
+
+  /** Shared tail of both rejoin paths (back from grace, or taking over a live connection). */
+  private async finishRejoin(ws: WebSocket, player: PlayerAttachment) {
+    await this.touchActivity();
+
+    const phaseChanged = this.recomputePhase();
+
+    await this.saveState();
+
+    this.sendRoomState(ws, player);
+    this.broadcastPlayerList(ws);
+    if (phaseChanged) {
+      this.broadcast({ type: "phaseChange", phase: this.phase, drawerId: this.drawerId! }, ws);
+    }
+
+    this.scheduleNextAlarm();
+  }
+
+  private sendRoomState(ws: WebSocket, player: PlayerAttachment) {
     this.send(ws, {
       type: "roomState",
       roomCode: this.roomCode,
@@ -710,6 +804,7 @@ export class GameRoom implements DurableObject {
       drawerId: this.drawerId,
       phase: this.phase,
       strokes: this.strokes,
+      ...(this.redoStack.length > 0 ? { redoStack: this.redoStack } : {}),
       chatHistory: this.chatHistory,
       yourId: player.id,
       maxPlayers: this.maxPlayers,
@@ -720,27 +815,14 @@ export class GameRoom implements DurableObject {
           ? { answerLength: this.answer.length }
           : {}),
     });
+  }
 
-    // Notify other players about the new join
-    this.broadcast(
-      {
-        type: "playerJoined",
-        player: { id: player.id, name: player.name, isOwner: player.id === this.drawerId },
-      },
-      ws,
-    );
-
-    // If 2 players, notify first player about phase change
-    if (this.getJoinedCount() === 2) {
-      this.broadcast(
-        {
-          type: "phaseChange",
-          phase: "drawing",
-          drawerId: this.drawerId!,
-        },
-        ws, // Only send to the OTHER player; joining player already has it via roomState
-      );
-    }
+  /**
+   * Full roster, sent when someone drops or comes back. A new message type rather
+   * than playerJoined: that one is incremental, and old clients would add a duplicate.
+   */
+  private broadcastPlayerList(exclude?: WebSocket) {
+    this.broadcast({ type: "playerList", players: this.getPlayerInfoList() }, exclude);
   }
 
   private async onDraw(
@@ -790,11 +872,9 @@ export class GameRoom implements DurableObject {
         // 默认 pen 不写字段（保持 wire 紧凑、和老 stroke 一致）
         ...(this.currentStrokeBrush !== "pen" ? { brushType: this.currentStrokeBrush } : {}),
       };
-      this.strokes.push(stroke);
-      this.redoStack = []; // new stroke invalidates redo history
       this.currentStrokePoints = [];
       // Persist only the new stroke (not the whole list) to stay under value limits.
-      await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+      await this.commitStroke(stroke);
     }
 
     // Forward to the other player — preserve points batch + brushType when present.
@@ -875,9 +955,7 @@ export class GameRoom implements DurableObject {
     if (colorRanges) {
       stroke.colorRanges = colorRanges;
     }
-    this.strokes.push(stroke);
-    this.redoStack = []; // new stroke invalidates redo history
-    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+    await this.commitStroke(stroke);
 
     this.broadcast(
       {
@@ -936,9 +1014,7 @@ export class GameRoom implements DurableObject {
       shape: msg.shape,
       filled: msg.filled,
     };
-    this.strokes.push(stroke);
-    this.redoStack = []; // new stroke invalidates redo history
-    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+    await this.commitStroke(stroke);
 
     this.broadcast(
       {
@@ -980,9 +1056,7 @@ export class GameRoom implements DurableObject {
       lineWidth: 0,
       fill: { tolerance: msg.tolerance },
     };
-    this.strokes.push(stroke);
-    this.redoStack = [];
-    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+    await this.commitStroke(stroke);
 
     this.broadcast(
       {
@@ -1029,9 +1103,7 @@ export class GameRoom implements DurableObject {
         dstY: msg.dstY,
       },
     };
-    this.strokes.push(stroke);
-    this.redoStack = [];
-    await this.state.storage.put(strokeKey(this.strokes.length - 1), stroke);
+    await this.commitStroke(stroke);
 
     this.broadcast(
       {
@@ -1077,7 +1149,7 @@ export class GameRoom implements DurableObject {
     for (const i of indices) {
       this.strokes.splice(i, 1);
     }
-    this.redoStack = [];
+    await this.clearRedoStack();
 
     // 分片存储重排：删除让 minIdx 之后的条目整体左移 —— 重写受影响区间，
     // 再删除尾部残留的旧 key。put / delete 都按 DELETE_BATCH_SIZE 分批。
@@ -1100,9 +1172,7 @@ export class GameRoom implements DurableObject {
     for (let i = this.strokes.length; i < oldLength; i++) {
       staleKeys.push(strokeKey(i));
     }
-    for (let i = 0; i < staleKeys.length; i += DELETE_BATCH_SIZE) {
-      await this.state.storage.delete(staleKeys.slice(i, i + DELETE_BATCH_SIZE));
-    }
+    await this.deleteKeys(staleKeys);
 
     // Exclude sender — drawer 本地已删除，回传会二次 splice。
     this.broadcast({ type: "deleteStrokes", indices }, ws);
@@ -1117,12 +1187,19 @@ export class GameRoom implements DurableObject {
       return;
     }
 
-    this.pendingPromotionId = null; // 防御：清空画布时顺带清除挂起的晋升
+    // 防御：清空画布时顺带清除挂起的晋升
+    if (this.pendingPromotionId !== null) {
+      this.pendingPromotionId = null;
+      await this.state.storage.put("pendingPromotionId", null);
+    }
     this.strokes = [];
-    this.redoStack = [];
     this.currentStrokePoints = [];
+    await this.clearRedoStack();
     await this.clearStrokeStorage();
-    this.broadcast({ type: "clear" });
+    // Exclude sender — drawer already cleared locally; on a slow link the echo
+    // would also wipe whatever was drawn after the click. Only onClear may do this:
+    // onContinueDrawing / executeTransfer rely on the sender receiving their clear.
+    this.broadcast({ type: "clear" }, ws);
   }
 
   private async onUndo(ws: WebSocket) {
@@ -1139,7 +1216,11 @@ export class GameRoom implements DurableObject {
       const popped = this.strokes[poppedIndex];
       this.strokes.pop();
       this.redoStack.push(popped);
-      await this.state.storage.delete(strokeKey(poppedIndex));
+      // Both writes are issued before the first await: one atomic commit.
+      await Promise.all([
+        this.state.storage.delete(strokeKey(poppedIndex)),
+        this.state.storage.put(redoKey(this.redoStack.length - 1), popped),
+      ]);
       // Exclude sender — drawer already updated locally, a round-trip would pop twice.
       this.broadcast({ type: "undo" }, ws);
     }
@@ -1161,7 +1242,11 @@ export class GameRoom implements DurableObject {
       return;
     }
     this.strokes.push(redone);
-    await this.state.storage.put(strokeKey(this.strokes.length - 1), redone);
+    // Both writes are issued before the first await: one atomic commit.
+    await Promise.all([
+      this.state.storage.delete(redoKey(this.redoStack.length)),
+      this.state.storage.put(strokeKey(this.strokes.length - 1), redone),
+    ]);
     // Exclude sender — drawer already updated locally, a round-trip would push twice.
     this.broadcast({ type: "redo" }, ws);
   }
@@ -1233,7 +1318,8 @@ export class GameRoom implements DurableObject {
     if (correct) {
       this.phase = "revealed";
 
-      if (this.getJoinedCount() >= 3) {
+      // 算上保留期内的玩家：房间的玩法不该随某人短暂掉线而变（画手此刻可能正好离线）
+      if (this.getEffectivePlayerCount() >= 3) {
         this.pendingPromotionId = player.id;
       } else {
         this.pendingPromotionId = null;
@@ -1298,10 +1384,10 @@ export class GameRoom implements DurableObject {
     this.phase = "drawing";
     this.answer = null;
     this.strokes = [];
-    this.redoStack = [];
     this.currentStrokePoints = [];
 
     await this.saveState();
+    await this.clearRedoStack();
     await this.clearStrokeStorage();
 
     this.broadcast({ type: "clear" });
@@ -1367,10 +1453,10 @@ export class GameRoom implements DurableObject {
     this.phase = "drawing";
     this.answer = null;
     this.strokes = [];
-    this.redoStack = [];
     this.currentStrokePoints = [];
 
     await this.saveState();
+    await this.clearRedoStack();
     await this.clearStrokeStorage();
 
     this.broadcast({
@@ -1434,6 +1520,8 @@ export class GameRoom implements DurableObject {
 
     // Schedule alarm to clean up if they don't reconnect
     this.scheduleNextAlarm();
+
+    this.broadcastPlayerList();
   }
 
   /** Called when a disconnected player's grace period expires without reconnecting */
@@ -1453,95 +1541,71 @@ export class GameRoom implements DurableObject {
 
     const allRemaining = [...remaining.map((r) => r.player), ...otherDisconnected];
 
-    if (allRemaining.length > 0) {
-      // Notify connected players about the leave
-      this.broadcast({
-        type: "playerLeft",
-        playerId: dp.id,
-      });
+    if (allRemaining.length === 0) {
+      // Room is truly empty
+      await this.resetRoom();
+      return;
+    }
 
-      // 猜对者离线：保持 revealed 阶段，重发 phaseChange 但不含 pendingPromotionId，
-      // 让前端回到"继续出题/转让画笔"按钮
-      if (wasPendingPromotion && this.phase === "revealed") {
-        await this.saveState(); // 持久化 joinOrder 的变动
-        this.broadcast({
-          type: "phaseChange",
-          phase: "revealed",
-          drawerId: this.drawerId!,
-        });
-        return;
-      }
+    // Notify connected players about the leave
+    this.broadcast({
+      type: "playerLeft",
+      playerId: dp.id,
+    });
 
-      const wasDrawer = dp.id === this.drawerId;
-
-      if (wasDrawer) {
-        // drawer 离开：切下家 + 清画板 + 重置 phase（旧画作对应已清的旧 answer，无意义）
-        let newDrawer: string | null = null;
-        for (const id of this.joinOrder) {
-          if (this.isPlayerActive(id)) {
-            newDrawer = id;
-            break;
-          }
-        }
-        if (!newDrawer) {
-          newDrawer = allRemaining[0].id;
-        }
-        this.drawerId = newDrawer;
-
-        this.strokes = [];
-        this.redoStack = [];
-        this.currentStrokePoints = [];
-        await this.clearStrokeStorage();
-        this.answer = null;
-        this.pendingPromotionId = null;
-
-        // phase 看当前连接数（不含 grace）：≥2 立即 drawing，否则等人 waiting
-        const connectedCount = this.getJoinedWebSockets().length;
-        this.phase = connectedCount >= 2 ? "drawing" : "waiting";
-
-        await this.saveState();
-
-        this.broadcast({ type: "clear" });
-        this.broadcast({
-          type: "phaseChange",
-          phase: this.phase,
-          drawerId: this.drawerId!,
-        });
-      } else {
-        // 非 drawer 离开：phase / drawer / 画板尽量保持；仅当剩 drawer 自己时降级 waiting
-        const connectedCount = this.getJoinedWebSockets().length;
-        if (connectedCount < 2) {
-          this.phase = "waiting";
-          this.answer = null;
-          this.pendingPromotionId = null;
-          await this.saveState();
-          this.broadcast({
-            type: "phaseChange",
-            phase: "waiting",
-            drawerId: this.drawerId!,
-          });
-        } else {
-          // ≥2 人在线：游戏继续，phase / drawer / answer / 画板都不变
-          await this.saveState();
+    if (dp.id === this.drawerId) {
+      // drawer 离开：切下家 + 清画板 + 重置 phase（旧画作对应已清的旧 answer，无意义）
+      let newDrawer: string | null = null;
+      for (const id of this.joinOrder) {
+        if (this.isPlayerActive(id)) {
+          newDrawer = id;
+          break;
         }
       }
-    } else {
-      // Room is truly empty, reset everything
-      this.created = false;
-      this.phase = "waiting";
-      this.drawerId = null;
-      this.answer = null;
+      if (!newDrawer) {
+        newDrawer = allRemaining[0].id;
+      }
+      this.drawerId = newDrawer;
+
       this.strokes = [];
-      this.redoStack = [];
-      this.chatHistory = [];
-      this.maxPlayers = MIN_MAX_PLAYERS;
-      this.joinOrder = [];
-      this.pendingPromotionId = null;
-      // 与 inactivity 路径对齐：清空 idle 计时基准。否则下次 /init 复用此 DO
-      // 时，scheduleNextAlarm 可能基于旧值算出已过期的 inactivity 时间点。
-      this.lastActivityAt = 0;
-      await this.saveState();
+      this.currentStrokePoints = [];
+      await this.clearRedoStack();
       await this.clearStrokeStorage();
+      this.answer = null;
+      this.pendingPromotionId = null;
+
+      // 新一轮：够人就 drawing，只剩新 drawer 自己就回 waiting
+      this.phase = "drawing";
+      this.recomputePhase();
+
+      await this.saveState();
+
+      this.broadcast({ type: "clear" });
+      this.broadcast({
+        type: "phaseChange",
+        phase: this.phase,
+        drawerId: this.drawerId!,
+      });
+      return;
+    }
+
+    // 非 drawer 离开：phase / drawer / 答案 / 画板尽量保持；只剩 drawer 自己时才降级 waiting
+    const phaseChanged = this.recomputePhase();
+    await this.saveState();
+    if (phaseChanged) {
+      this.broadcast({
+        type: "phaseChange",
+        phase: this.phase,
+        drawerId: this.drawerId!,
+      });
+    } else if (wasPendingPromotion && this.phase === "revealed") {
+      // 猜对者走了：保持 revealed，重发 phaseChange 但不含 pendingPromotionId，
+      // 让前端回到"继续出题/转让画笔"按钮
+      this.broadcast({
+        type: "phaseChange",
+        phase: "revealed",
+        drawerId: this.drawerId!,
+      });
     }
   }
 

@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 import { tx } from "@twind/core";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { useWebSocket, TERMINAL_CLOSE_REASONS } from "../hooks/useWebSocket";
 import { useCanvas, findDependentFillIndices } from "../hooks/useCanvas";
 import Canvas from "../components/Canvas";
 import type { EditingSelection, EditingShape, EditingText } from "../components/Canvas";
@@ -93,6 +93,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   // WebSocket
   const {
     connected,
+    terminalReason,
     send,
     addListener,
     leave: wsLeave,
@@ -280,13 +281,25 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
 
   // joinError 统一退出 timer：1.5s 后回到首页。case "error" 和 join 超时
   // 都走这条路径，避免多处独立 setTimeout 难以追踪。
+  // 版本不符例外：要靠刷新拿新客户端。留在房间 URL、不清身份，刷新后才能带原 id 回来；
+  // 回首页会清掉 playerId，提示用户刷新也回不了房间了。
+  const needsRefresh = terminalReason === "version mismatch";
   useEffect(() => {
-    if (!joinError) {
+    if (!joinError || needsRefresh) {
       return;
     }
     const timer = window.setTimeout(() => onLeave(), 1500);
     return () => window.clearTimeout(timer);
-  }, [joinError, onLeave]);
+  }, [joinError, needsRefresh, onLeave]);
+
+  // 连接被服务端终止（不会再重连）：也走 joinError 退出路径。已有 joinError 时
+  // 不覆盖，error / roomClosed 消息总是先于 close 到达，文案更具体。
+  useEffect(() => {
+    if (!terminalReason) {
+      return;
+    }
+    setJoinError((prev) => prev || TERMINAL_CLOSE_REASONS.get(terminalReason) || "连接已断开");
+  }, [terminalReason]);
 
   // Handle incoming messages
   // 关键：用 ref 持有最新 handler，effect 依赖只留 addListener。
@@ -317,6 +330,9 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         }
         // Replay strokes (strokesRef is saved even if canvas isn't mounted yet)
         replayAll(msg.strokes);
+        // 重做栈以服务端为准：本地可能已过期；刷新后和新人的本地栈是空的，
+        // 而后续 redo 广播不带笔画内容，没有它就跟不上。
+        redoStackRef.current = msg.redoStack ?? [];
         syncHistoryFlags();
         setPicked(null);
         // Restore chat history
@@ -348,6 +364,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
           }
           return prev.filter((p) => p.id !== msg.playerId);
         });
+        break;
+
+      case "playerList":
+        setPlayers(msg.players);
         break;
 
       case "draw":
@@ -900,8 +920,13 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     return () => window.removeEventListener("mousedown", handleGlobalMouseDown, true);
   }, [editingSelection, commitEditingSelection]);
 
-  // 自动升级：猜对者本机 6.5s 后自动 claim drawer
+  // 自动升级：猜对者本机 6.5s 后自动 claim drawer。
+  // 依赖 connected：断线时 send 会被静默丢弃，重连后重新计时再发一次；
+  // 服务端只在挂起的晋升仍属于自己时才接受，重复发送无害。
   useEffect(() => {
+    if (!connected) {
+      return;
+    }
     if (phase !== "revealed") {
       return;
     }
@@ -920,7 +945,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     return () => {
       window.clearTimeout(timer);
     };
-  }, [phase, pendingPromotionId, myId, send]);
+  }, [connected, phase, pendingPromotionId, myId, send]);
 
   const handleSendChat = (text: string) => {
     send({ type: "chat", text });
@@ -947,7 +972,19 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             <>
               <div className={tx("text-4xl mb-4")}>😥</div>
               <div className={tx("text-red-600 font-medium")}>{joinError}</div>
-              <div className={tx("text-gray-400 text-sm mt-2")}>即将返回首页...</div>
+              {needsRefresh ? (
+                <button
+                  onClick={() => window.location.reload()}
+                  className={tx(
+                    "mt-4 px-6 py-2 bg-primary text-white font-semibold rounded-full",
+                    "hover:bg-primary-focus active:scale-95 transition-transform",
+                  )}
+                >
+                  刷新页面
+                </button>
+              ) : (
+                <div className={tx("text-gray-400 text-sm mt-2")}>即将返回首页...</div>
+              )}
             </>
           ) : (
             <>

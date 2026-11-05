@@ -72,6 +72,10 @@
 
 超时由 `alarm()` 统一处理；`scheduleNextAlarm()` 会取 `min(所有 disconnected grace 结束时刻, lastActivityAt + 10min)`。
 
+**保留期内的玩家仍算在房间里**：`getPlayerInfoList` 会列出他们（`connected: false`），人数判断一律用 `getEffectivePlayerCount`。有人断线或重连时广播全量 `playerList`（只更新列表，不产生提示）。不要改成重发 `playerJoined`：那是增量消息，旧客户端会重复加人。
+
+前端的“转让”只能选在线玩家：两人房对方离线时按钮禁用，3+ 人房离线候选禁用（服务端只接受在线目标）。
+
 ### 4. 玩家身份恢复
 - 前端在 `roomState` 到达后把 `yourId` 存到 `sessionStorage(draw-guess-playerId)`
 - 刷新后 `App.tsx:useEffect` 读取 sessionStorage，`useWebSocket` 携带 playerId 连接
@@ -90,6 +94,8 @@ guessing       ← 猜词方开始猜；画手可继续画
 revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换画手
 ```
 状态只在 `room.ts` 服务端变更，客户端通过 `phaseChange` 被动同步。
+
+`waiting ⇄ drawing` 只由 `recomputePhase()` 判定：按 `getEffectivePlayerCount`（含保留期玩家）算，≥2 人离开 waiting，<2 人回到 waiting 并清答案。phase 真的变了才广播 `phaseChange`，别按人数直接发。
 
 ### 6. 画板坐标归一化与分辨率
 - 所有 `{x, y}` 在线上协议和存储里都是 `[0, 1]` 归一化值。画布实际像素 = 归一化 × `canvas.width`
@@ -141,7 +147,8 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 
 双端维护对称 redoStack：
 - **客户端**：Room.tsx 的 `redoStackRef`（ref，非 state）+ `canUndo`/`canRedo` state（用于 Toolbar 按钮 disabled）
-- **服务端**：`room.ts` 的 `redoStack: SerializedStroke[]`（in-memory，**不持久化**）
+- **服务端**：`room.ts` 的 `redoStack: SerializedStroke[]`，分 key 持久化在 `redo:NNNNNNNNNN`（序号 = 栈位置），休眠后恢复
+- `roomState.redoStack` 下发服务端的栈：`redo` 广播不带笔画内容，重连者和新人要靠它才跟得上
 - `syncHistoryFlags()` 在每次改动 strokesRef/redoStackRef 后同步 state
 
 核心规则：
@@ -158,9 +165,9 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 
 1. **桌面端专用（有意为之）**：`index.html` 有 `min-width: 1200px`，`useCanvas.ts` 已删除 Touch 事件处理。若未来要支持移动端需独立布局，不要简单移除 min-width。
 
-2. ~~**WebSocket 无自动重连**~~ ✅ 已修复：`useWebSocket` 带指数退避重连（1s→30s），识别 5 种 terminal close reason（`left`/`room not found`/`room full`/`inactivity`/`reconnected`）不重连。重连时从 `sessionStorage` 读最新 `playerId`，走服务端 take-over / disconnectedPlayers 恢复分支。
+2. ~~**WebSocket 无自动重连**~~ ✅ 已修复：`useWebSocket` 带指数退避重连（1s→30s）。close reason 在 `TERMINAL_CLOSE_REASONS` 里就不重连（只看 reason，不看 code：限流是 1008），并通过 `terminalReason` 交给 Room 切错误屏。重连时优先读 `sessionStorage` 里最新的 `playerId`（mount 时的 prop 可能已过期），走服务端 take-over / disconnectedPlayers 恢复分支。
 
-3. ~~**房间号冲突**~~ ✅ 已修复：parent Worker 循环最多 5 次；`/init` 已创建时返回 **409**，调用方据此换码重试。新增 `/init` 时注意保持这个语义。
+3. ~~**房间号冲突**~~ ✅ 已修复：parent Worker 循环最多 5 次；`/init` 已创建时返回 **409**，调用方据此换码重试（没人且已过闲置期的孤儿房除外，直接复用）。新增 `/init` 时注意保持这个语义。
 
 4. **`saveState()` 是全字段写**：`strokes` 和 `chatHistory` 都在里面。频繁调用会放大写入。已经对 `onDraw` 做了"只在 end 时 put strokes"的优化，其他地方慎用。
 
@@ -257,23 +264,23 @@ cd worker && npx wrangler dev
 
 客户端各 input 的 `maxLength` 应与上述常量一致，改一边别忘另一边。
 
-**心跳（ping/pong）**：客户端 `useWebSocket` 每 25s 发 `{type:"ping"}`，服务端回 `{type:"pong"}` 并**跳过 `touchActivity`**——否则会把 10 分钟 idle 定时器重置，auto-close 永远不触发。pong 在 `useWebSocket.onmessage` 里就被吞掉，不经过 listener。
+**心跳（ping/pong）**：客户端 `useWebSocket` 每 25s 发 `{type:"ping"}`，由 constructor 里的 `setWebSocketAutoResponse` 在运行时直接回 `{type:"pong"}`：不唤醒 DO、不进 `webSocketMessage`，也不算活动（否则 10 分钟 idle 定时器会被重置，auto-close 永远不触发）。请求串必须和客户端 `JSON.stringify({ type: "ping" })` 逐字相同，改一边要同步另一边；`case "ping"` 只是回退。pong 在 `useWebSocket.onmessage` 里就被吞掉，不经过 listener。
 
 **答案归一化**：`worker/src/room.ts` 的 `normalizeForCompare()`，NFKC + lowercase + 去空格 + 去 `\p{P}` 标点（保留 emoji / 数字 / 字母 / CJK 字）。`this.answer` 存**原文**（画手面板展示用、`answerLength` 算用），compare 时两侧都跑归一化。不要图方便直接存归一化后的，会让画手看到 "答案：你好！" → "你好"。
 
-**draw 消息 RAF 批量**：`C_Draw.points?: {x,y}[]` 为可选批量字段。客户端 `onMouseMove` 把点塞进 `pendingPointsRef`，一帧一次 `requestAnimationFrame(flushPendingMove)` 合并发送；`onMouseUp` 前强制 flush 一次再发 `end`。服务端 `onDraw` 的 move 分支 `msg.points ?? [{x:msg.x,y:msg.y}]` 兼容单点。`replayDraw` 同样处理 `points` 数组。
+**draw 消息 RAF 批量**：`C_Draw.points?: {x,y}[]` 为可选批量字段。客户端 `onMouseMove` 把点塞进 `pendingPointsRef`，每帧 `requestAnimationFrame(flushPendingMove)` 检查一次，距上次发送满 16ms 才合并发送（没到时间点留在队列里）；`onMouseUp` 前不受节流限制，先发完再发 `end`。服务端 `onDraw` 的 move 分支 `msg.points ?? [{x:msg.x,y:msg.y}]` 兼容单点。`replayDraw` 同样处理 `points` 数组。
 
 **strokes 分片存储**：strokes 不再用单 key `"strokes"` 存，每条独立 key `stroke:0000000001` …，避免 128KB 单值上限。关键点：
-- 写入：`onDraw end` / `onTextStroke` 用 `strokeKey(this.strokes.length - 1)` put 单条
-- 撤销：`onUndo` delete 最后一个 key
-- 清空：所有"重置 strokes"的地方都必须调 `clearStrokeStorage()`（alarm / onClear / onContinueDrawing / executeTransfer / processActualLeave 空房间）
+- 写入：新笔画一律走 `commitStroke()`：put 单条 + 清 redo，同一批原子提交
+- 撤销 / 重做：`onUndo` / `onRedo` 在 `stroke:` 和 `redo:` 之间搬一条，同样不在两次写之间 await
+- 清空：重置 strokes 的地方调 `clearStrokeStorage()` + `clearRedoStack()`（onClear / onContinueDrawing / executeTransfer / drawer 离开）；销毁房间走 `resetRoom()`
 - `saveState()` **不再** put strokes 字段
-- `ensureLoaded()` 用 `list({prefix: "stroke:"})` 恢复，并顺手 `delete("strokes")` 清掉旧版遗留的 legacy blob
-- batch delete 上限 128 key/次，`clearStrokeStorage` 内部已分批
+- `ensureLoaded()` 用 `list({prefix})` 恢复 `stroke:` 和 `redo:`
+- batch delete 上限 128 key/次，`clearStrokeStorage` / `clearRedoStack` 内部已分批；`clearRedoStack` 空栈时不写存储
 
 **Origin 白名单**：`worker/src/index.ts` 的 `isAllowedOrigin()` 是**所有** API 路由 + WebSocket upgrade 的入口闸门。接受 production 域名 + 任意 `localhost` / `127.0.0.1` 端口。**缺失 Origin header 一律 403**（不把无头请求当可信）。新增后端接口时记得它也会被闸门拦——如果故意要开放，在 if 前面开白。`corsHeaders(origin)` 始终回 echo 来的 origin，不再用 `*`。
 
-**Rate limit**：`checkRateLimit(ws)` 在 `webSocketMessage` 最顶部调用，rolling 1s window / 150 msg/ws。正常流量峰值 ~60/s（RAF 节流后的 draw）。超限则 send error + `ws.close(1008, "rate limited")`。前端 `TERMINAL_CLOSE_REASONS` 已把 `"rate limited"` 列入不重连清单——别去掉，否则会 ping-pong。计数器是 WeakMap，hibernation 时自然丢失（可接受，相当于窗口 reset）。
+**Rate limit**：`checkRateLimit(ws)` 在 `webSocketMessage` 最顶部调用，每连接一个令牌桶：持续 300 条/秒，突发上限 3000 条。正常流量峰值 ~60/s：`useCanvas` 的 `flushPendingMove` 按时间把 draw 节流到 ≤60Hz（rAF 频率等于屏幕刷新率，只靠 rAF 在高刷屏上会超限），点累积到下次发送不丢，视觉重绘仍每帧一次。持续速率留余量是因为旧 JS 每帧发一条，开着的标签页可能在线数小时。**不要改回固定窗口**：服务端按到达时间计数，TCP 卡几秒后积压的 draw 会一次到达，而被限流是终止态，正常画手会被踢出房间。桶耗尽则 send error + `ws.close(1008, "rate limited")`。前端 `TERMINAL_CLOSE_REASONS` 已把 `"rate limited"` 列入不重连清单——别去掉，否则会 ping-pong。桶在 WeakMap 里，hibernation 时自然丢失（可接受，相当于重新装满）。
 
 **Toast 错误提示**：`src/components/Toast.tsx` 是通用组件（error / info / success），右上角滑入、3s 自动消失、点击关闭。Room.tsx 里 `error` 消息改用 Toast，不再塞到聊天历史。同一时刻只有一个 toast；新 toast 会覆盖旧 toast（靠 `key={toast.id}` 强制 remount 动画）。
 
@@ -338,9 +345,9 @@ cd worker && npx wrangler dev
 
 ## 九、⚠️ 追加坑点（本版功能相关）
 
-1. **undo/redo broadcast 必须 `exclude sender`**（`this.broadcast({...}, ws)`）。否则 drawer 本地 pop 一次 + 收到自己的广播又 pop 一次 → **双步 bug**。其他消息（draw/textStroke/shape）都是 exclude 的，之前漏掉了 undo/redo。
+1. **undo/redo broadcast 必须 `exclude sender`**（`this.broadcast({...}, ws)`）。否则 drawer 本地 pop 一次 + 收到自己的广播又 pop 一次 → **双步 bug**。其他消息（draw/textStroke/shape）都是 exclude 的，之前漏掉了 undo/redo。`onClear` 同样要排除：弱网下回声会擦掉点清除之后画的新笔画。但 `onContinueDrawing` / `executeTransfer` 的 clear **不能**排除，发送者靠它清画布。
 
-2. **服务端 redoStack 不持久化**：Hibernate 后丢失。极端场景：drawer undo 后 idle 超过 DO hibernate 时间再点 redo，服务端 redoStack 空 → 不广播 → 对端画面不同步 drawer 本地状态，造成 diverge。当前接受此 trade-off（触发条件苛刻）；真要解决就把 redoStack 加入 `saveState()`。
+2. ~~**服务端 redoStack 不持久化**~~ ✅ 已修复：DO 空闲约 10 秒就休眠，内存全丢，所以 redoStack 和 `pendingPromotionId` 都已持久化。新增“跨越几秒的状态”时别只放内存。redoStack 不要放进 `saveState()`（全字段写，单值有上限），分 key 存。
 
 3. **画板 aspect ratio 联动**：`Canvas.tsx` 的 `RATIO_W/H = 5/3` 与 `useCanvas.ts` 的 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT = 1600:960` 必须**比例一致**，否则离屏 drawImage 缩放会让图形变形。改画板比例时两处必须同步；`REF_WIDTH = 800` 是逻辑参考（不影响比例）但如果要改也要联动调整。
 
@@ -403,7 +410,7 @@ cd worker && npx wrangler dev
 **修法**（`tool === "pen"` 块）：
 - `onMouseDown`：仅记录起点 + send `start`，不动 ctx
 - `onMouseMove`：push 点到 `currentStrokeRef.points` + `pendingPointsRef`，scheduleFlush
-- `flushPendingMove`（RAF 帧）：先 send 网络批量 move，然后 `syncVisibleFromOffscreen()`（committed strokes）+ `drawInProgressStroke()`（当前 stroke 一次性 beginPath + 所有 lineTo + stroke）。**每帧重画 = 每个像素只涂一次**
+- `flushPendingMove`（RAF 帧）：距上次发送满 16ms 才 send 网络批量 move（否则点留在队列，下一帧再试），然后 `syncVisibleFromOffscreen()`（committed strokes）+ `drawInProgressStroke()`（当前 stroke 一次性 beginPath + 所有 lineTo + stroke）。**每帧重画 = 每个像素只涂一次**
 - `onMouseUp`：commitToOffscreen + syncVisibleFromOffscreen + send end
 - `replayDraw`（peer 端）同样改成「sync offscreen + 重绘 in-progress」
 
@@ -472,7 +479,18 @@ ref 模式：每次 render 重新赋值 `messageHandlerRef.current = (msg) => { 
 - 重连场景（`hasJoinedOnceRef.current === true`）：跳过此超时，给慢网络足够时间
 
 ### joinError 统一退出 effect
-任何路径 setJoinError 后，统一由一个 effect 在 1.5s 后调用 `onLeave`，cleanup 时取消 timer。`case "error"` / `case "roomClosed"` / join 超时三处都走这条路径。**不要在 case 内部各自 setTimeout**——会导致 timer 散落难追踪、且 onLeave 可能被多次调用。
+任何路径 setJoinError 后，统一由一个 effect 在 1.5s 后调用 `onLeave`，cleanup 时取消 timer。`case "error"` / `case "roomClosed"` / join 超时 / 连接被服务端终止（`terminalReason`）都走这条路径。**不要在 case 内部各自 setTimeout**——会导致 timer 散落难追踪、且 onLeave 可能被多次调用。
+
+### 连接被服务端终止
+`useWebSocket` 判定 close reason 属于终止态后不再重连，把 reason 放进 `terminalReason`。Room 用 effect 映射成 `setJoinError`（文案在 `TERMINAL_CLOSE_REASONS` 里，已有 joinError 时不覆盖）。**不要静默 return**：否则 `connected` 永远是 false，界面一直显示“正在重连”。
+
+例外是 `version mismatch`：不自动回首页，留在房间 URL 并显示“刷新页面”按钮。回首页会清掉 `playerId`，用户按提示刷新也回不了房间，协议 bump 的流程就断了。
+
+### connected 从 roomState 算起
+`connected` 和 `send` 都要等本连接的 `roomState` 到达才放开，socket 打开不算。服务端按 join、后续消息的顺序处理，发回来的 roomState 不含后续消息的效果，随后 roomState 又会覆盖本地状态，所以这个窗口内发出的操作会让两端分叉。窗口内的操作和断线期间一样被丢弃，两端都以服务端为准。**不要改回 onopen 就放开**，`clear` 不回发发送者之后这个窗口的后果更重。
+
+### 自动晋升可重试
+猜对者 6.5s 后发 `claimDrawer` 的 effect 依赖 `connected`：断线时 `send` 被静默丢弃，重连后重新计时再发一次。服务端只在挂起的晋升仍属于该玩家时才接受，重复发送无害。
 
 ### 重连不阻断 UI
 渲染条件 `if (!myId || joinError)` 切错误屏（首次未加入 / 加入失败 / 房间被关）。已加入后 ws 断开（`!connected`）保留主 UI，顶部加黄色 banner「网络异常，正在重连…」。画板和聊天上下文不消失。
@@ -485,7 +503,7 @@ ref 模式：每次 render 重新赋值 `messageHandlerRef.current = (msg) => { 
 ## 十八、服务端 storage 写入节流
 
 ### touchActivity 节流（关键性能优化）
-`touchActivity` 在每条非 `join`/`ping` 消息上调用，原本每次都 `storage.put("lastActivityAt")` + `setAlarm`。画手 60Hz 画画时**每秒 60 次 storage 写**，1000 房间满载 = 6 万次/秒 = Cloudflare DO 计费黑洞。
+`touchActivity` 在已 join 玩家的每条非 `join`/`ping` 消息上调用，`onJoin` 在通过满员检查后也调一次，原本每次都 `storage.put("lastActivityAt")` + `setAlarm`。画手 60Hz 画画时**每秒 60 次 storage 写**，1000 房间满载 = 6 万次/秒 = Cloudflare DO 计费黑洞。
 
 现在改成节流：内存值 `this.lastActivityAt` 每次都更新（保证 inactivity 检查准确），但 `storage.put` + `scheduleNextAlarm` **仅当距离上次持久化超过 `ACTIVITY_PERSIST_MIN_INTERVAL_MS` (30s) 才执行**。新字段 `lastActivityPersistedAt` 仅内存维护，**不持久化**——DO 重启后回到 0，第一次 touchActivity 立即触发持久化（`now - 0 >> 30000`），状态自动同步回一致。
 
@@ -495,8 +513,13 @@ ref 模式：每次 render 重新赋值 `messageHandlerRef.current = (msg) => { 
 - **`onDisconnect` / `/quickleave` 路径直接调 `scheduleNextAlarm`，不走节流** —— grace 期（30s 或 5s）的 alarm 时间需要精准。
 - 节流跳过 alarm 重设可能让 alarm 比真实理想触发时间略早 30s，但 alarm 末尾的 `scheduleNextAlarm` 会重新基于内存里最新 `lastActivityAt` 推到下一次合适时间，最终销毁时刻仍准确。
 
-### 房间销毁时重置 lastActivityAt
-`processActualLeave` 末尾「空房间」分支显式 `this.lastActivityAt = 0`（与 inactivity 路径对齐）。否则下次 `/init` 复用此 DO 时，scheduleNextAlarm 可能基于旧值算出已过期的 inactivity 时间点。`saveState` 已覆盖此字段，单加一行赋值即可。
+### 房间销毁与闲置回收
+销毁房间统一走 `resetRoom()`：重置内存 + `deleteAlarm()` + `deleteAll()`。alarm 要显式先删：当前兼容日期早于 2026-02-24，`deleteAll` 不删 alarm。销毁后不要再调 `saveState`，否则会把 key 写回去。
+
+闲置回收的约定：
+- `/init` 就记 `lastActivityAt` 并设 alarm，从未有人加入的房间到期也会被回收
+- 只有已 join 的连接发的消息才算活动，未 join 的连接和被拒绝的 join 都不能续命
+- `/init` 遇到“没人且已过闲置期”的房间（早期版本漏掉的孤儿）直接复用，不返回 409；其他情况仍是 409
 
 
 ## 十九、视觉改造任务（Apple 风格 UI）

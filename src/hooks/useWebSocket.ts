@@ -5,21 +5,25 @@ import { apiUrl, wsUrl } from "../api";
 
 const PLAYER_ID_KEY = "draw-guess-playerId";
 
-// Server-initiated close reasons where reconnecting is pointless (or harmful).
-const TERMINAL_CLOSE_REASONS = new Set([
-  "left", // local user clicked leave
-  "room not found",
-  "room full",
-  "inactivity", // server auto-closed after idle timeout
-  "reconnected", // server take-over from another tab/device
-  "rate limited", // server rate-limited us; reconnecting would just get kicked again
-  "version mismatch", // client and server protocol versions differ — refresh needed
+// Server-initiated close reasons where reconnecting is pointless (or harmful),
+// with the message shown to the user.
+export const TERMINAL_CLOSE_REASONS = new Map([
+  ["left", "你已离开房间"], // local user clicked leave
+  ["room not found", "房间不存在或已解散"],
+  ["room full", "房间已满"],
+  ["inactivity", "房间超过10分钟无活动，已自动关闭"], // server auto-closed after idle timeout
+  ["reconnected", "你已在其他标签页或设备进入此房间"], // server take-over from another tab/device
+  ["rate limited", "消息频率过高，连接已断开"], // reconnecting would just get kicked again
+  ["version mismatch", "客户端版本过旧，请刷新页面"], // client and server protocol versions differ
 ]);
 
 export function useWebSocket(roomCode: string, playerName: string, playerId?: string) {
   const wsRef = useRef<WebSocket | null>(null);
+  // 本连接的 roomState 已到达。socket 打开不算：见 send 的注释。
+  const joinedRef = useRef(false);
   const [connected, setConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState<ServerMessage | null>(null);
+  // 服务端明确不让重连时的 close reason。UI 据此切错误屏，否则会一直显示“正在重连”。
+  const [terminalReason, setTerminalReason] = useState<string | null>(null);
   const listenersRef = useRef<Set<(msg: ServerMessage) => void>>(new Set());
   const isUnloadingRef = useRef(false);
   const hasLeftRef = useRef(false);
@@ -27,6 +31,7 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
   useEffect(() => {
     isUnloadingRef.current = false;
     hasLeftRef.current = false;
+    setTerminalReason(null);
     let shouldReconnect = true;
     let reconnectAttempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -49,8 +54,6 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
       wsRef.current = ws;
 
       ws.onopen = () => {
-        setConnected(true);
-        reconnectAttempts = 0;
         const joinMsg: Record<string, unknown> = {
           type: "join",
           playerName,
@@ -58,7 +61,7 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
         };
         // Prefer freshest playerId from sessionStorage — the prop is only the
         // value at mount time; after the first roomState we always have one.
-        const latestPlayerId = playerId || sessionStorage.getItem(PLAYER_ID_KEY) || undefined;
+        const latestPlayerId = sessionStorage.getItem(PLAYER_ID_KEY) || playerId;
         if (latestPlayerId) {
           joinMsg.playerId = latestPlayerId;
         }
@@ -80,13 +83,18 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
         if (msg.type === "pong") {
           return;
         }
-        setLastMessage(msg);
+        if (msg.type === "roomState") {
+          joinedRef.current = true;
+          reconnectAttempts = 0;
+          setConnected(true);
+        }
         for (const listener of listenersRef.current) {
           listener(msg);
         }
       };
 
       ws.onclose = (event) => {
+        joinedRef.current = false;
         setConnected(false);
         wsRef.current = null;
         stopPing();
@@ -94,7 +102,9 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
         if (!shouldReconnect || hasLeftRef.current || isUnloadingRef.current) {
           return;
         }
-        if (event.code === 1000 && TERMINAL_CLOSE_REASONS.has(event.reason)) {
+        // 只看 reason：限流的 close code 是 1008，不是 1000。
+        if (TERMINAL_CLOSE_REASONS.has(event.reason)) {
+          setTerminalReason(event.reason);
           return;
         }
 
@@ -155,8 +165,11 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
     };
   }, [roomCode, playerName, playerId]);
 
+  // roomState 到达之前不发：服务端按 join、这条消息的顺序处理，发回来的 roomState
+  // 却不含这条消息的效果，随后 roomState 会覆盖本地状态，两边就分叉了。丢弃则两边
+  // 都以服务端状态为准，和断线期间的操作一样。
   const send = useCallback((msg: ClientMessage) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (joinedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(msg));
     }
   }, []);
@@ -175,5 +188,5 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
     }
   }, []);
 
-  return { connected, lastMessage, send, addListener, leave };
+  return { connected, terminalReason, send, addListener, leave };
 }

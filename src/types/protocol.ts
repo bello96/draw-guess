@@ -32,6 +32,8 @@ export interface PlayerInfo {
   id: string;
   name: string;
   isOwner: boolean;
+  // false = 断线中（重连保留期内，仍算在房间里）。缺省视为在线（兼容旧服务端）。
+  connected?: boolean;
 }
 
 /**
@@ -240,6 +242,8 @@ export interface S_RoomState {
   answerLength?: number;
   answer?: string; // Only sent to the drawer
   strokes: SerializedStroke[];
+  // 服务端的重做栈（LIFO，栈顶在末尾）。S_Redo 不带笔画内容，重连者和新人要靠它才跟得上。
+  redoStack?: SerializedStroke[];
   chatHistory?: ChatHistoryEntry[];
   yourId: string;
   maxPlayers?: number;
@@ -254,6 +258,15 @@ export interface S_PlayerJoined {
 export interface S_PlayerLeft {
   type: "playerLeft";
   playerId: string;
+}
+
+/**
+ * 全量玩家列表：有人断线或重连时广播，不产生“加入 / 离开”提示。
+ * 不复用 playerJoined：那是增量消息，旧客户端收到会重复加人。
+ */
+export interface S_PlayerList {
+  type: "playerList";
+  players: PlayerInfo[];
 }
 
 export interface S_Draw {
@@ -375,6 +388,7 @@ export type ServerMessage =
   | S_RoomState
   | S_PlayerJoined
   | S_PlayerLeft
+  | S_PlayerList
   | S_Draw
   | S_Clear
   | S_Undo

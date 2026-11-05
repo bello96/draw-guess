@@ -28,6 +28,9 @@ export const MAX_TEXT_COLOR_RANGES = 100;
 // so lexicographic list() order matches insertion order.
 
 export const STROKE_KEY_PREFIX = "stroke:";
+// Undone strokes live under their own prefix; the key's index is the position
+// in the LIFO stack, so the same padding keeps list() in stack order.
+export const REDO_KEY_PREFIX = "redo:";
 export const STROKE_INDEX_PAD = 10;
 // DO storage batch delete is capped at 128 keys per call.
 export const DELETE_BATCH_SIZE = 128;
@@ -35,12 +38,20 @@ export const DELETE_BATCH_SIZE = 128;
 export const MAX_DELETE_STROKES = 128;
 
 // ---------- Rate limit ----------
-// Rolling window, per WebSocket connection. Legitimate traffic ceiling is
-// ~60/s (RAF-throttled draw) + ping/chat. Exceeding this signals a bug or
-// abuse; we close with 1008.
+// Token bucket, per WebSocket connection. Exhausting it signals a bug or abuse;
+// we close with 1008, which the client treats as terminal.
+//
+// Sustained rate: current clients send at most ~60 draw messages/s (time-throttled
+// in useCanvas) plus chat. The rate stays well above that because older bundles
+// send one draw per animation frame, so theirs equals the display's refresh rate,
+// and such tabs can stay open for hours after a deploy.
+//
+// Burst: this counts by arrival time, and a stalled TCP connection delivers
+// everything queued at once, so a legitimate drawer can arrive far above the
+// sustained rate. The capacity covers about 50s of stall at 60 messages/s.
 
-export const RATE_LIMIT_WINDOW_MS = 1000;
-export const RATE_LIMIT_MAX_MSGS = 150;
+export const RATE_LIMIT_PER_SECOND = 300;
+export const RATE_LIMIT_BURST = 3000;
 
 // ---------- Wire protocol version ----------
 // Must stay in sync with `PROTOCOL_VERSION` in `src/types/protocol.ts`.
