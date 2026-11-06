@@ -318,12 +318,17 @@ G.R3_selection_reconnect = async ({ br, proxy }) => {
 };
 const rebuildsOnFontLoad = async (p) => {
   // 字体加载完成时要重建画布。悬空标记没复位的话会被跳过：在可见画布上涂一块，看会不会被盖掉。
+  // 重建前先合并 100ms（requestTextRefresh），所以按条件等，不能固定等 100ms：慢机器上计时器晚几毫秒就成了“没重建”。
+  // 真被跳过的话 2 秒内也不会恢复
   const before = await p.eval("T.ink()");
   await p.eval(`(()=>{const x=T.cv().getContext('2d');x.fillStyle='#000';x.fillRect(0,0,120,120);})()`);
   const dirty = await p.eval("T.ink()");
   await p.eval(`document.fonts.dispatchEvent(new Event('loadingdone'))`);
-  await sleep(100);
-  const after = await p.eval("T.ink()");
+  let after = dirty;
+  for (const end = Date.now() + 2000; after !== before && Date.now() < end; ) {
+    await sleep(50);
+    after = await p.eval("T.ink()");
+  }
   return { before, dirty, after, rebuilt: dirty > before && after === before };
 };
 G.R4_pending_flag = async ({ br }) => {
@@ -400,7 +405,14 @@ G.R6c_answer_lock_released = async ({ br, proxy }) => {
   await sleep(150);
   proxy.blackholeExisting();
   await p1.eval(`T.chat('苹果')`);
-  await sleep(6000); // 超过本地锁定的上限
+  // 等本地锁定解除（5 秒的计时器）再画。按条件等：慢机器上计时器会晚，固定等 6 秒的话，
+  // 降速时计时器晚了 1 秒，笔画落在解除前 15ms，被当成锁着丢掉了。一直不解除的话 10 秒后照样失败
+  for (const end = Date.now() + 10000; Date.now() < end; ) {
+    await sleep(100);
+    if (await p1.eval(`T.btn('清除').disabled === false`)) {
+      break;
+    }
+  }
   await p1.eval(`T.stroke([[0.2,0.2],[0.6,0.6]])`);
   await sleep(200);
   ok("锁定解除后能画", (await p1.eval("T.ink()")) > 0, await p1.eval("T.ink()"));

@@ -820,6 +820,7 @@ node tests/regression/run.cjs browser batch3   # 只跑一个脚本；单个脚�
 - 页面工具在 `harness.cjs` 的 `T` 里：`T.typeInto(选择器, 值)` 等元素出现再填（CI 机器慢，别用固定等待）、`T.mode(提交按钮文字)` 切输入模式、`T.confirmClear()` 两下确认清除
 - 绝对耗时的阈值要给 CI 留余量：共享机器没有 GPU，整条重画要慢十倍左右。L3 的主线程占用在 CI 上超过阈值，所以只在本机断言（`GITHUB_ACTIONS` 时只记录），和机器快慢无关的那部分（同一个任务里到达的 60 条 move 只重绘一次）另外断言；其余耗时断言目前在 CI 上都有余量
 - CI 的 ubuntu 机器上中文量出来比本机窄得多（30px 的“你好”不到 52px，看样子没装中文字体）。断言别靠中文文本的像素宽度：文字编辑框的文本区最窄 60px，窄了就一直卡在下限，字号变了也看不出来。要看字号就直接读 font-size
+- 等合并、节流、定时器之后才出现的结果要按条件轮询（满足就走，超时才算失败），别固定等和计时器一样长的时间：字体重建先合并 100ms，测试固定等 100ms，CI 上计时器晚几毫秒就挂。本机复现 CI 的慢可以用 CDP 的 `Emulation.setCPUThrottlingRate` 给页面降速
 - `proxy.blackholeExisting()` 只拉黑 WebSocket 连接。浏览器的 keep-alive 连接池是所有页面共用的，空闲的 HTTP 连接一起拉黑的话，后面的测试建房会复用到它，一直挂到 Worker 关掉空闲连接（约 15 秒）才换连接重试
 - 本机 VC++ 运行库过旧时 workerd 会崩，设 `MINIFLARE_WORKERD_PATH` 指向带新版 DLL 的副本。浏览器路径用 `BROWSER_PATH` 指定
 - 改 Worker 时别同时跑浏览器测试：`wrangler dev` 会热更新，正在跑的结果作废
