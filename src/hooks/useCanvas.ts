@@ -19,6 +19,7 @@ import {
 import { floodFill } from "../utils/floodFill";
 import { isIncrementalBrush, renderBrushSegments, renderBrushStroke } from "../utils/brushes";
 import { StrokeReplay, type ReplaySurface } from "../utils/strokeReplay";
+import { withClickDot } from "../utils/strokePoints";
 
 type Point = { x: number; y: number };
 
@@ -864,6 +865,16 @@ function renderStrokeSafely(
   }
 }
 
+/** 只认左键按下。macOS 的 Ctrl+点击是右键菜单（button 也是 0），菜单会吞掉 mouseup，也不算。 */
+function isPrimaryPress(e: MouseEvent): boolean {
+  return e.button === 0 && !e.ctrlKey;
+}
+
+/** 左键还按着。拖动中收到左键没按着的事件，说明已经在别处松开了（mouseup 没落到画布上）。 */
+function leftButtonHeld(e: MouseEvent): boolean {
+  return (e.buttons & 1) !== 0;
+}
+
 /** Draw a live preview of an in-progress shape/arrow/line onto the visible context. */
 function drawShapePreview(
   ctx: CanvasRenderingContext2D,
@@ -1422,6 +1433,34 @@ export function useCanvas({
     [appendStroke, syncVisibleFromOffscreen],
   );
 
+  /**
+   * 这一下油漆桶会不会改动画面。种子点已经是填充色（或落在画布外）时 floodFill 什么都不做，
+   * 这样的填充不该进撤销栈，也不用发出去。判断条件和 drawFillOnContext、floodFill 的提前返回一致。
+   */
+  const fillWouldChange = useCallback(
+    (normX: number, normY: number, fillColor: string): boolean => {
+      flushReplay();
+      const off = offscreenRef.current;
+      const ctx = off?.getContext("2d");
+      if (!off || !ctx) {
+        return true;
+      }
+      const sx = Math.floor(normX * off.width);
+      const sy = Math.floor(normY * off.height);
+      if (sx < 0 || sy < 0 || sx >= off.width || sy >= off.height) {
+        return false;
+      }
+      const [r, g, b] = ctx.getImageData(sx, sy, 1, 1).data;
+      const [fr, fg, fb] = hexToRgba(fillColor);
+      return r !== fr || g !== fg || b !== fb;
+    },
+    [flushReplay],
+  );
+
+  // 猜词、揭晓阶段不能改画布。下面的 effect 只依赖这个布尔值，不依赖具体阶段：waiting ⇄ drawing
+  // （等人时第二个人进来、对方离开）不重跑，进行中的笔画、拖到一半的形状和框选、按住的喷枪都不受影响。
+  const locked = phase === "guessing" || phase === "revealed";
+
   // Canvas pointer events — routed by tool
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1557,7 +1596,8 @@ export function useCanvas({
         }
         stash.points.push({ x, y });
         const finalized: SerializedStroke = {
-          points: stash.points,
+          // 原地单击补一个 1px 外的点，单击就是一个点（见 withClickDot）
+          points: withClickDot(stash.points, 1 / canvas.width, MAX_STROKE_POINTS),
           color: stash.color,
           lineWidth: stash.lineWidth,
           // 默认 pen 不写字段（保持与历史 stroke 一致）
@@ -1594,8 +1634,23 @@ export function useCanvas({
         scheduleFlush();
       };
 
+      const endStroke = (x: number, y: number) => {
+        isDrawingRef.current = false;
+        stopSpray();
+        finishStroke(x, y);
+      };
+      // 左键已经在别处松开了（比如按住时切到别的窗口再松开，mouseup 没落到画布上）：
+      // 在松开前的位置结束这一笔，后面的移动不能再落笔
+      const endStrokeAtLastPoint = () => {
+        const pts = currentStrokeRef.current?.points;
+        const last = pts && pts.length > 0 ? pts[pts.length - 1] : lastPos;
+        if (last) {
+          endStroke(last.x, last.y);
+        }
+      };
+
       const onMouseDown = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked || !isPrimaryPress(e)) {
           return;
         }
         isDrawingRef.current = true;
@@ -1606,10 +1661,11 @@ export function useCanvas({
       };
 
       const onMouseMove = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked || !isDrawingRef.current) {
           return;
         }
-        if (!isDrawingRef.current) {
+        if (!leftButtonHeld(e)) {
+          endStrokeAtLastPoint();
           return;
         }
         const { x, y } = normalize(e);
@@ -1617,29 +1673,47 @@ export function useCanvas({
         addPoint(x, y);
       };
 
+      // 只认左键松开：左键拖动中按下又松开右键，这一笔不能结束
       const onMouseUp = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked || !isDrawingRef.current || e.button !== 0) {
           return;
         }
-        if (!isDrawingRef.current) {
-          return;
-        }
-        isDrawingRef.current = false;
-        stopSpray();
         const { x, y } = normalize(e);
-        finishStroke(x, y);
+        endStroke(x, y);
+      };
+
+      // 离开画布 = 在边界处结束。左键已经松开了的话（光标回来时直接落在工具栏上）在松开前的位置结束
+      const onMouseLeave = (e: MouseEvent) => {
+        if (locked || !isDrawingRef.current) {
+          return;
+        }
+        if (!leftButtonHeld(e)) {
+          endStrokeAtLastPoint();
+          return;
+        }
+        const { x, y } = normalize(e);
+        endStroke(x, y);
+      };
+
+      // 按住时切到别的窗口：之后收不到 mouseup，不在这里结束的话喷枪会一直喷到人回来
+      const onBlur = () => {
+        if (!locked && isDrawingRef.current) {
+          endStrokeAtLastPoint();
+        }
       };
 
       canvas.addEventListener("mousedown", onMouseDown);
       canvas.addEventListener("mousemove", onMouseMove);
       canvas.addEventListener("mouseup", onMouseUp);
-      canvas.addEventListener("mouseleave", onMouseUp);
+      canvas.addEventListener("mouseleave", onMouseLeave);
+      window.addEventListener("blur", onBlur);
 
       return () => {
         canvas.removeEventListener("mousedown", onMouseDown);
         canvas.removeEventListener("mousemove", onMouseMove);
         canvas.removeEventListener("mouseup", onMouseUp);
-        canvas.removeEventListener("mouseleave", onMouseUp);
+        canvas.removeEventListener("mouseleave", onMouseLeave);
+        window.removeEventListener("blur", onBlur);
         if (rafIdRef.current !== null) {
           cancelAnimationFrame(rafIdRef.current);
           rafIdRef.current = null;
@@ -1654,11 +1728,15 @@ export function useCanvas({
     if (tool === "bucket") {
       const FILL_TOLERANCE = 32;
       const onClick = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked) {
           return;
         }
         const normX = e.offsetX / canvas.width;
         const normY = e.offsetY / canvas.height;
+        // 点在已经是这个颜色的地方：画面不会变，不进撤销栈，也不用发
+        if (!fillWouldChange(normX, normY, color)) {
+          return;
+        }
         addFill(normX, normY, color, FILL_TOLERANCE);
         send({ type: "fill", x: normX, y: normY, color, tolerance: FILL_TOLERANCE });
         onLocalPenEnd?.();
@@ -1675,6 +1753,8 @@ export function useCanvas({
       const MIN_SIZE_PX = 20;
       const CLICK_EPS_PX = 4;
       let startPx: Point | null = null;
+      // 拖拽时左键还按着的最后位置：mouseup 没落在画布上时在这里结束
+      let lastPx: Point | null = null;
       let lastHover: number | null = null;
       const reportHover = (idx: number | null) => {
         if (idx !== lastHover) {
@@ -1685,15 +1765,16 @@ export function useCanvas({
         canvas.style.cursor = idx !== null ? "pointer" : "";
       };
       const onDown = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked || !isPrimaryPress(e)) {
           return;
         }
         startPx = { x: e.offsetX, y: e.offsetY };
+        lastPx = startPx;
         // 拖拽期间不显示 hover 提示
         reportHover(null);
       };
       const onMove = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked) {
           return;
         }
         if (!startPx) {
@@ -1702,6 +1783,12 @@ export function useCanvas({
           reportHover(hits.length > 0 ? hits[0] : null);
           return;
         }
+        // 左键已经在别处松开了：在松开前的位置结束拖拽
+        if (!leftButtonHeld(e)) {
+          finishMarquee(lastPx ?? startPx);
+          return;
+        }
+        lastPx = { x: e.offsetX, y: e.offsetY };
         syncVisibleFromOffscreen();
         ctx.strokeStyle = "#818cf8";
         ctx.lineWidth = 1;
@@ -1709,23 +1796,33 @@ export function useCanvas({
         ctx.strokeRect(startPx.x, startPx.y, e.offsetX - startPx.x, e.offsetY - startPx.y);
         ctx.setLineDash([]);
       };
+      // 只认左键松开
       const onUp = (e: MouseEvent) => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked || !startPx || e.button !== 0) {
           return;
         }
+        finishMarquee({ x: e.offsetX, y: e.offsetY });
+      };
+      // 按住时切到别的窗口：在当时的位置结束拖拽
+      const onSelBlur = () => {
+        if (!locked && startPx) {
+          finishMarquee(lastPx ?? startPx);
+        }
+      };
+      const finishMarquee = (end: Point) => {
         if (!startPx) {
           return;
         }
         const start = startPx;
         startPx = null;
-        const bx = Math.min(start.x, e.offsetX);
-        const by = Math.min(start.y, e.offsetY);
-        const bw = Math.abs(e.offsetX - start.x);
-        const bh = Math.abs(e.offsetY - start.y);
+        const bx = Math.min(start.x, end.x);
+        const by = Math.min(start.y, end.y);
+        const bw = Math.abs(end.x - start.x);
+        const bh = Math.abs(end.y - start.y);
         if (Math.max(bw, bh) < CLICK_EPS_PX) {
           // 单击：上报光标下全部命中（最上层在前），上游负责选中 / 下钻 / 取消
           syncVisibleFromOffscreen();
-          onStrokePicked?.(findStrokesAtPoint(strokesRef.current, canvas, e.offsetX, e.offsetY));
+          onStrokePicked?.(findStrokesAtPoint(strokesRef.current, canvas, end.x, end.y));
           return;
         }
         if (bw < MIN_SIZE_PX || bh < MIN_SIZE_PX) {
@@ -1749,7 +1846,7 @@ export function useCanvas({
         }
       };
       const onLeave = () => {
-        if (phase === "guessing" || phase === "revealed") {
+        if (locked) {
           return;
         }
         reportHover(null);
@@ -1763,13 +1860,19 @@ export function useCanvas({
       canvas.addEventListener("mousemove", onMove);
       canvas.addEventListener("mouseup", onUp);
       canvas.addEventListener("mouseleave", onLeave);
+      window.addEventListener("blur", onSelBlur);
       return () => {
         canvas.removeEventListener("mousedown", onDown);
         canvas.removeEventListener("mousemove", onMove);
         canvas.removeEventListener("mouseup", onUp);
         canvas.removeEventListener("mouseleave", onLeave);
+        window.removeEventListener("blur", onSelBlur);
         onStrokeHovered?.(null);
         canvas.style.cursor = "";
+        // 拖到一半被拆掉（比如进入猜词阶段）：虚线预览画在可见画布上，要擦掉
+        if (startPx) {
+          syncVisibleFromOffscreen();
+        }
       };
     }
 
@@ -1780,12 +1883,15 @@ export function useCanvas({
     const filled = fillMode === "fill";
     const shapeKind: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart" = tool;
     let shapeStart: Point | null = null;
+    // 拖拽时左键还按着的最后位置：mouseup 没落在画布上时在这里结束
+    let shapeLast: Point | null = null;
 
     const onShapeDown = (e: MouseEvent) => {
-      if (phase === "guessing" || phase === "revealed") {
+      if (locked || !isPrimaryPress(e)) {
         return;
       }
       shapeStart = normalize(e);
+      shapeLast = shapeStart;
     };
 
     // 把鼠标坐标钳到画布范围内：mouseleave 时 offsetX/Y 会超出边界，
@@ -1796,28 +1902,49 @@ export function useCanvas({
     });
 
     const onShapeMove = (e: MouseEvent) => {
-      if (phase === "guessing" || phase === "revealed") {
+      if (locked || !shapeStart) {
         return;
       }
-      if (!shapeStart) {
+      // 左键已经在别处松开了：在松开前的位置结束，形状不再跟着鼠标走
+      if (!leftButtonHeld(e)) {
+        finishShape(shapeLast ?? shapeStart);
         return;
       }
       const current = clampToCanvas(e);
+      shapeLast = current;
       syncVisibleFromOffscreen();
       drawShapePreview(ctx, canvas, shapeStart, current, color, lineWidth, shapeKind, filled);
     };
 
-    // mouseup 与 mouseleave 都走这里——参考 pen 的做法：鼠标离开边界 =
-    // 在边界处提交形状（坐标已被 clampToCanvas 钳到画布内），而不是清空预览。
+    // 只认左键松开
     const onShapeUp = (e: MouseEvent) => {
-      if (phase === "guessing" || phase === "revealed") {
+      if (locked || !shapeStart || e.button !== 0) {
         return;
       }
+      finishShape(clampToCanvas(e));
+    };
+
+    // 参考 pen 的做法：鼠标离开边界 = 在边界处提交形状（坐标已被 clampToCanvas 钳到画布内），
+    // 而不是清空预览。左键已经在别处松开了的话停在松开前的位置，不跳到边上。
+    const onShapeLeave = (e: MouseEvent) => {
+      if (locked || !shapeStart) {
+        return;
+      }
+      finishShape(leftButtonHeld(e) ? clampToCanvas(e) : (shapeLast ?? shapeStart));
+    };
+
+    // 按住时切到别的窗口：在当时的位置结束
+    const onShapeBlur = () => {
+      if (!locked && shapeStart) {
+        finishShape(shapeLast ?? shapeStart);
+      }
+    };
+
+    const finishShape = (end: Point) => {
       if (!shapeStart) {
         return;
       }
       const start = shapeStart;
-      const end = clampToCanvas(e);
       shapeStart = null;
       // Wipe the preview — editing overlay replaces it.
       syncVisibleFromOffscreen();
@@ -1845,13 +1972,15 @@ export function useCanvas({
     canvas.addEventListener("mousedown", onShapeDown);
     canvas.addEventListener("mousemove", onShapeMove);
     canvas.addEventListener("mouseup", onShapeUp);
-    canvas.addEventListener("mouseleave", onShapeUp);
+    canvas.addEventListener("mouseleave", onShapeLeave);
+    window.addEventListener("blur", onShapeBlur);
 
     return () => {
       canvas.removeEventListener("mousedown", onShapeDown);
       canvas.removeEventListener("mousemove", onShapeMove);
       canvas.removeEventListener("mouseup", onShapeUp);
-      canvas.removeEventListener("mouseleave", onShapeUp);
+      canvas.removeEventListener("mouseleave", onShapeLeave);
+      window.removeEventListener("blur", onShapeBlur);
       if (shapeStart !== null) {
         syncVisibleFromOffscreen();
       }
@@ -1874,8 +2003,9 @@ export function useCanvas({
     onStrokePicked,
     onStrokeHovered,
     addFill,
+    fillWouldChange,
     beginSelection,
-    phase,
+    locked,
   ]);
 
   // Replay a remote draw event (pen).

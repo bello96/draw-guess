@@ -36,7 +36,7 @@ async function createInBrowser(br, name = "画手甲", max = 2) {
   await p1.goto(ORIGIN + "/");
   await p1.eval(`T.clickBtn('创建房间')`);
   await sleep(100);
-  await p1.eval(`T.setInput(document.querySelector('input[type=text]'), ${JSON.stringify(name)})`);
+  await p1.eval(`T.typeInto('input[type=text]', ${JSON.stringify(name)})`);
   if (max !== 2) {
     await p1.eval(`T.clickBtn('${max}人')`);
     await sleep(50);
@@ -59,14 +59,14 @@ async function pagesInRoom(br, max = 2) {
   }
   return { p1, p2, code };
 }
+// 画手在绘画阶段、猜词方在猜词阶段，输入框默认就是答案 / 猜词模式；旧版默认聊天，要切一下
+const leaveChatMode = (p) => p.eval(`(async()=>{ if (T.submitIs('发送')) { T.clickBtn('切换输入模式'); await T.raf(2); } })()`);
 const setAnswer = async (p, a) => {
-  await p.eval(`T.clickBtn('切换输入模式')`);
-  await sleep(120);
+  await leaveChatMode(p);
   await p.eval(`T.chat(${JSON.stringify(a)})`);
 };
 const guess = async (p, a) => {
-  await p.eval(`T.clickBtn('切换输入模式')`);
-  await sleep(120);
+  await leaveChatMode(p);
   await p.eval(`T.chat(${JSON.stringify(a)})`);
 };
 const offline = (p, on) => p.send("Network.emulateNetworkConditions", { offline: on, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
@@ -176,14 +176,20 @@ G.W1_reconnect_window = async ({ br, proxy }) => {
   await p1.eval(`T.stroke([[0.1,0.1],[0.5,0.5]])`);
   await sleep(300);
   const before = await p1.eval("__ws.created");
-  proxy.delay = 400;
+  // 每个方向延迟 1.2 秒：连接打开到 roomState 到达有 2 秒多的窗口，够在里面点完清除的两下
+  proxy.delay = 1200;
   proxy.killAll();
   // 等新 socket 打开（握手要经过延迟），在 roomState 到达前点清除
-  const opened = await p1.eval(`new Promise((res)=>{const t0=Date.now();const i=setInterval(()=>{const w=__ws.instances.at(-1);if((__ws.created>${before}&&w.readyState===1)||Date.now()-t0>8000){clearInterval(i);res(__ws.created>${before}&&w.readyState===1);}},5);})`);
+  const opened = await p1.eval(`new Promise((res)=>{const t0=Date.now();const i=setInterval(()=>{const w=__ws.instances.at(-1);if((__ws.created>${before}&&w.readyState===1)||Date.now()-t0>15000){clearInterval(i);res(__ws.created>${before}&&w.readyState===1);}},5);})`);
   ok("等到了新连接打开", opened);
-  const inWindow = await p1.eval(`(()=>{const banner=T.text().includes('正在重连');T.clickBtn('清除');return banner;})()`);
-  ok("roomState 到达前一直显示重连横幅", inWindow);
-  await sleep(2500);
+  // 清除要点两下（旧版点一下就清，第二下找不到按钮，跳过）
+  const r = await p1.eval(
+    `(async()=>{const banner0=T.text().includes('正在重连');T.btn('清除').click();await new Promise((s)=>setTimeout(s,700));const b=T.btn('确认清除');if(b)b.click();await T.raf(2);return {banner:banner0&&T.text().includes('正在重连'),ink:T.ink()};})()`,
+  );
+  ok("roomState 到达前一直显示重连横幅", r.banner, r);
+  // 断言真的清了：什么都没点的话，后面的“两端一致”也会成立，测不出 send 提前放行
+  ok("窗口里清除生效了（本地画布空了）", r.ink === 0, r);
+  await sleep(4000);
   proxy.delay = 0;
   await sleep(600);
   const [i1, i2] = [await p1.eval("T.ink()"), await p2.eval("T.ink()")];
@@ -416,8 +422,14 @@ G.M1_clear_race = async ({ br, proxy }) => {
   await p1.eval(`T.stroke([[0.1,0.1],[0.3,0.3]])`);
   await sleep(300);
   proxy.delay = 300;
-  await p1.eval(`(async()=>{T.clickBtn('清除'); await T.stroke([[0.6,0.2],[0.7,0.5],[0.8,0.3]]);})()`);
+  // 清除要点两下：第一下先点好，确认的那一下和紧接着的一笔放在一起（旧版点一下就清，第二下找不到按钮，跳过）
+  const clears0 = await p1.eval(`__ws.sent.filter((s)=>s.startsWith('{"type":"clear"')).length`);
+  await p1.eval(`T.btn('清除').click()`);
+  await sleep(700);
+  await p1.eval(`(async()=>{const b=T.btn('确认清除');if(b)T.click(b); await T.stroke([[0.6,0.2],[0.7,0.5],[0.8,0.3]]);})()`);
   await sleep(2000);
+  // 断言真的发了 clear：没发的话后面几条也都成立，测不到 clear 的回声擦掉新笔画这个竞态
+  ok("发出了 clear", (await p1.eval(`__ws.sent.filter((s)=>s.startsWith('{"type":"clear"')).length`)) === clears0 + 1);
   const [i1, i2] = [await p1.eval("T.ink()"), await p2.eval("T.ink()")];
   ok("画手的新笔画没被擦掉", i1 > 0, { i1, i2 });
   ok("两端一致", Math.abs(i1 - i2) < Math.max(i1, 1) * 0.05, { i1, i2 });

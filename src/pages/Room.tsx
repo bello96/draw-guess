@@ -17,6 +17,7 @@ import type {
   ChatMessage,
   ChatHistoryEntry,
   ServerMessage,
+  ClientMessage,
   BrushType,
   SerializedStroke,
 } from "../types/protocol";
@@ -32,6 +33,13 @@ interface Props {
 let msgIdCounter = 0;
 function nextMsgId() {
   return `msg-${++msgIdCounter}`;
+}
+
+// 聊天区最多留这么多条。房间开得久了消息只增不减，列表会越来越长；服务端历史是 200 条，这里多留一些。
+const MAX_MESSAGES = 300;
+function appendMessage(prev: ChatMessage[], msg: ChatMessage): ChatMessage[] {
+  const next = [...prev, msg];
+  return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
 }
 
 // 设答案后本地锁定画布的最长时间，正常一个 RTT 就解除了。
@@ -253,17 +261,16 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   }, [picked, phase, strokesRef, replayAll, send, syncHistoryFlags]);
 
   const addSystemMessage = useCallback((text: string) => {
-    setMessages((prev) => [
-      ...prev,
-      {
+    setMessages((prev) =>
+      appendMessage(prev, {
         id: nextMsgId(),
         playerId: "system",
         playerName: "系统",
         text,
         timestamp: Date.now(),
         kind: "system",
-      },
-    ]);
+      }),
+    );
   }, []);
 
   // 是否曾经成功加入过房间。区分「首次加入」和「断线重连」两种状态：
@@ -513,9 +520,8 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
         break;
 
       case "guessResult":
-        setMessages((prev) => [
-          ...prev,
-          {
+        setMessages((prev) =>
+          appendMessage(prev, {
             id: nextMsgId(),
             playerId: msg.playerId,
             playerName: msg.playerName,
@@ -523,25 +529,24 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
             timestamp: Date.now(),
             kind: "guess",
             correct: msg.correct,
-          },
-        ]);
+          }),
+        );
         if (msg.correct) {
           setConfettiKey((k) => k + 1);
         }
         break;
 
       case "chat":
-        setMessages((prev) => [
-          ...prev,
-          {
+        setMessages((prev) =>
+          appendMessage(prev, {
             id: nextMsgId(),
             playerId: msg.playerId,
             playerName: msg.playerName,
             text: msg.text,
             timestamp: msg.timestamp,
             kind: "chat",
-          },
-        ]);
+          }),
+        );
         break;
 
       case "transferDone":
@@ -1028,18 +1033,21 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     };
   }, [connected, phase, pendingPromotionId, myId, send]);
 
-  const handleSendChat = (text: string) => {
-    send({ type: "chat", text });
+  // 聊天、猜词、设答案都返回是否发出去了。没发出去时提示一下，ChatPanel 保留输入内容，用户可以直接重试。
+  const sendOrWarn = (msg: ClientMessage, what: string): boolean => {
+    if (send(msg)) {
+      return true;
+    }
+    setToast({ message: `网络异常，${what}没有发出去，请稍后再试`, type: "error", id: Date.now() });
+    return false;
   };
 
-  const handleGuess = (text: string) => {
-    send({ type: "guess", text });
-  };
+  const handleSendChat = (text: string) => sendOrWarn({ type: "chat", text }, "消息");
 
-  // 返回答案是否发出去了。没发出去时 ChatPanel 保留输入内容，用户可以直接重试。
+  const handleGuess = (text: string) => sendOrWarn({ type: "guess", text }, "猜测");
+
   const handleSetAnswer = (answer: string): boolean => {
-    if (!send({ type: "setAnswer", answer })) {
-      setToast({ message: "网络异常，答案没有发出去，请稍后再试", type: "error", id: Date.now() });
+    if (!sendOrWarn({ type: "setAnswer", answer }, "答案")) {
       return false;
     }
     setAnswerText(answer);

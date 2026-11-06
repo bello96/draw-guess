@@ -53,7 +53,7 @@ async function createInBrowser(br, name = "画手甲", max = 2) {
   await p1.goto(ORIGIN + "/");
   await p1.eval(`T.clickBtn('创建房间')`);
   await sleep(100);
-  await p1.eval(`T.setInput(document.querySelector('input[type=text]'), ${JSON.stringify(name)})`);
+  await p1.eval(`T.typeInto('input[type=text]', ${JSON.stringify(name)})`);
   if (max !== 2) {
     await p1.eval(`T.clickBtn('${max}人')`);
     await sleep(50);
@@ -211,7 +211,7 @@ G.R3_mixed_exact = async ({ br }) => {
   await step("椭圆", `T.clickBtn('椭圆'); await T.raf(2); await T.drag([0.1,0.5],[0.3,0.8]); await T.raf(2); T.commit(); await T.raf(2);`);
   await step("箭头", `T.clickBtn('箭头'); await T.raf(2); await T.drag([0.4,0.6],[0.6,0.8]); await T.raf(2); T.commit(); await T.raf(2);`);
   await step("五角星", `T.clickBtn('五角星'); await T.raf(2); await T.drag([0.7,0.5],[0.9,0.8]); await T.raf(2); T.commit(); await T.raf(2);`);
-  await step("框选移动", `T.clickBtn('选择 / 框选'); await T.raf(2); await T.drag([0.05,0.05],[0.37,0.35]); await T.raf(3); const o=document.querySelector('[data-selection-overlay]'); if(!o) throw new Error('no overlay'); const r=o.getBoundingClientRect(); T.fire(o,'mousedown',r.left+20,r.top+20); await T.raf(2); window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+60,clientY:r.top+260,bubbles:true})); await T.raf(2); window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); await T.raf(2); T.commit(); await T.raf(2);`);
+  await step("框选移动", `T.clickBtn('选择 / 框选'); await T.raf(2); await T.drag([0.05,0.05],[0.37,0.35]); await T.raf(3); const o=document.querySelector('[data-selection-overlay]'); if(!o) throw new Error('no overlay'); const r=o.getBoundingClientRect(); T.fire(o,'mousedown',r.left+20,r.top+20); await T.raf(2); window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+60,clientY:r.top+260,bubbles:true,buttons:1})); await T.raf(2); window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); await T.raf(2); T.commit(); await T.raf(2);`);
   await step("撤销框选", `T.clickBtn('撤销'); await T.raf(2);`);
   await step("重做框选", `T.clickBtn('重做'); await T.raf(2);`);
   await step("点选删除五角星", `T.clickBtn('选择 / 框选'); await T.raf(2); const c=T.cv(); const [x,y]=T.pt(0.8,0.503); T.fire(c,'mousemove',x,y,{buttons:0}); await T.raf(2); T.fire(c,'mousedown',x,y); T.fire(c,'mouseup',x,y); await T.raf(4); const b=[...document.querySelectorAll('button')].find(b=>b.title==='删除该元素'); if(b){T.click(b);} await T.raf(3);`);
@@ -350,7 +350,7 @@ G.R7_selection_right_after_reconnect = async ({ br, proxy }) => {
   await until(() => p1.eval(`T.text().includes('正在重连')`), 3000, 20);
   await reconnected(p1);
   // 刚连上就拖框选并移动
-  await p1.eval(`(async()=>{T.clickBtn('选择 / 框选');await T.raf(1);await T.drag([0.02,0.05],[0.5,0.7]);await T.raf(2);const o=document.querySelector('[data-selection-overlay]');if(!o)throw new Error('no overlay');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+30,clientY:r.top+120,bubbles:true}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);T.commit();await T.raf(2);})()`);
+  await p1.eval(`(async()=>{T.clickBtn('选择 / 框选');await T.raf(1);await T.drag([0.02,0.05],[0.5,0.7]);await T.raf(2);const o=document.querySelector('[data-selection-overlay]');if(!o)throw new Error('no overlay');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+30,clientY:r.top+120,bubbles:true,buttons:1}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);T.commit();await T.raf(2);})()`);
   await reconnected(viewer);
   await sleep(300);
   await p1.eval(`(()=>{CanvasRenderingContext2D.prototype.getImageData=window.__gid;})()`).catch(() => {});
@@ -481,11 +481,29 @@ G.L3_flood = async ({ br }) => {
       }
     });
     console.log(`      ${brush}: ${ms} ms/s, 画布调用 ${await p.eval("__drawCalls")}`);
-    ok(`${brush}：300 条/秒下主线程占用低于 500 ms/s`, ms < 500, ms);
+    // 绝对耗时只在本机断言：CI 的共享机器没有 GPU，整条重画要慢十倍左右（本机 70~100 ms/s，CI 774 / 857）。
+    // 机器快慢无关的那部分由下面“一口气到达”的重绘次数盯着。蜡笔是增量渲染，每条线段按不按帧合并都只画一次，
+    // 合并与否看不出差别，它的负载由 L2 盯着。
+    if (process.env.GITHUB_ACTIONS) {
+      console.log(`      （CI 上只记录主线程占用，不断言）`);
+    } else {
+      ok(`${brush}：300 条/秒下主线程占用低于 500 ms/s`, ms < 500, ms);
+    }
     if (brush !== "crayon") {
       // 2.5 秒最多约 150 帧，每帧 drawImage + stroke（水彩两次 stroke）
       const calls = await p.eval("__drawCalls");
       ok(`${brush}：一帧最多重绘一次`, calls < 600, calls);
+      // 慢机器上每次重绘本身就超过一帧，按消息重绘和按帧重绘的调用数会趋同，上面那条就抓不住了。
+      // 在同一个任务里塞给页面 60 条 move（不经过服务端，到达时间不受机器快慢影响）：
+      // 按帧合并只重绘一次（两三个画布调用），按消息重绘是 60 次。
+      await p.eval("window.__drawCalls = 0");
+      await p.eval(
+        `(()=>{const ws=__ws.instances.at(-1);for(let i=0;i<60;i++){ws.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'draw',action:'move',x:0.5,y:0.5,color:'#3366cc',lineWidth:8,points:[{x:0.2+i*0.005,y:0.5}]})}));}})()`,
+      );
+      await sleep(300);
+      const burst = await p.eval("__drawCalls");
+      // 下限也要有：一次都没重绘（比如消息没进到这一笔）也不能算过
+      ok(`${brush}：同一个任务里到达的 60 条 move 只重绘一次`, burst >= 2 && burst <= 6, burst);
     }
     d.kill();
     await closeAll(br, p);

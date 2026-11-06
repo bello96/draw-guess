@@ -54,7 +54,7 @@ function loadReviewGroups({ ok, closeAll, sameOff, createInBrowser, paintGrid })
     await sleep(300);
     await p1.eval(`(async()=>{T.clickBtn('矩形');await T.raf(2);const b=[...document.querySelectorAll('button')].find(b=>b.title==='填充');b&&T.click(b);await T.raf(2);await T.drag([0.1,0.1],[0.3,0.4]);await T.raf(2);T.commit();await T.raf(2);})()`);
     await sleep(300);
-    await p1.eval(`(async()=>{T.clickBtn('选择 / 框选');await T.raf(2);await T.drag([0.05,0.05],[0.35,0.45]);await T.raf(3);const o=document.querySelector('[data-selection-overlay]');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+260,clientY:r.top+60,bubbles:true}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);})()`);
+    await p1.eval(`(async()=>{T.clickBtn('选择 / 框选');await T.raf(2);await T.drag([0.05,0.05],[0.35,0.45]);await T.raf(3);const o=document.querySelector('[data-selection-overlay]');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+260,clientY:r.top+60,bubbles:true,buttons:1}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);})()`);
     ok("框选悬浮且移动了", await p1.eval(`!!document.querySelector('[data-selection-overlay]')`));
     // roomState 处理完的同一个任务里点画布外面：React 还没来得及卸掉旧的监听
     await interceptMessages(
@@ -165,7 +165,7 @@ function loadReviewGroups({ ok, closeAll, sameOff, createInBrowser, paintGrid })
     await p1.goto(ORIGIN + "/");
     await p1.eval(`T.clickBtn('创建房间')`);
     await sleep(100);
-    await p1.eval(`T.setInput(document.querySelector('input[type=text]'), '画手甲')`);
+    await p1.eval(`T.typeInto('input[type=text]', '画手甲')`);
     await p1.eval(`T.clickBtn('确认创建')`);
     await p1.waitText("房间号", 6000);
     await sleep(200);

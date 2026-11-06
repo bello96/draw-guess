@@ -36,7 +36,7 @@ async function createInBrowser(br, name = "画手甲", max = 2) {
   await p1.goto(ORIGIN + "/");
   await p1.eval(`T.clickBtn('创建房间')`);
   await sleep(100);
-  await p1.eval(`T.setInput(document.querySelector('input[type=text]'), ${JSON.stringify(name)})`);
+  await p1.eval(`T.typeInto('input[type=text]', ${JSON.stringify(name)})`);
   if (max !== 2) {
     await p1.eval(`T.clickBtn('${max}人')`);
     await sleep(50);
@@ -54,9 +54,10 @@ async function pagesInRoom(br, max = 2) {
   await sleep(300);
   return { p1, p2, code };
 }
+// 画手在绘画阶段、猜词方在猜词阶段，输入框默认就是答案 / 猜词模式；旧版默认聊天，要切一下
+const leaveChatMode = (p) => p.eval(`(async()=>{ if (T.submitIs('发送')) { T.clickBtn('切换输入模式'); await T.raf(2); } })()`);
 const toggleAnd = async (p, a) => {
-  await p.eval(`T.clickBtn('切换输入模式')`);
-  await sleep(120);
+  await leaveChatMode(p);
   await p.eval(`T.chat(${JSON.stringify(a)})`);
 };
 const offline = (p, on) => p.send("Network.emulateNetworkConditions", { offline: on, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
@@ -329,9 +330,11 @@ G.R4_pending_flag = async ({ br }) => {
     await drawFilledRect(p1);
     await sleep(200);
     await floatSelection(p1);
-    // 键盘触发按钮（只有 click，没有 mousedown）
-    await p1.eval(`T.btn('清除').click()`);
+    // 键盘触发按钮（只有 click，没有 mousedown）。清除要点两下确认
+    await p1.eval(`T.confirmClear()`);
     await sleep(300);
+    // 确认真的清了：没清的话下面那条测的就不是“清除之后”
+    ok("清除生效了", (await p1.eval("T.ink()")) === 0, await p1.eval("T.ink()"));
     const r = await rebuildsOnFontLoad(p1);
     ok("清除后：字体重建没被跳过", r.rebuilt, r);
     await closeAll(br, p1, p2);
@@ -367,7 +370,7 @@ G.R6_answer_race = async ({ br, proxy }) => {
 G.R6b_answer_offline = async ({ br, proxy }) => {
   console.log("\n=== R6b 断线时回车设答案：不进入假猜词态，提示没发出去，答案不会误发到公开聊天");
   const { p1, p2 } = await pagesInRoom(br);
-  await p1.eval(`T.clickBtn('切换输入模式')`);
+  await leaveChatMode(p1);
   await sleep(150);
   proxy.refuse = true;
   proxy.killAll();
@@ -377,7 +380,7 @@ G.R6b_answer_offline = async ({ br, proxy }) => {
   ok("提示答案没发出去", await p1.waitText("没有发出去", 1500), await p1.eval("T.text().slice(0,200)"));
   ok("阶段还是绘画中", await p1.eval(`T.text().includes('绘画中')`));
   ok("输入框里的答案还在", (await p1.eval(`document.querySelector('input[type=text]').value`)) === "苹果");
-  ok("还在答案模式（按钮是 确认）", await p1.eval(`!!T.btn('确认')`));
+  ok("还在答案模式（按钮是 确认）", await p1.eval(`T.submitIs('确认')`));
   proxy.refuse = false;
   ok("p1 重连成功", await reconnected(p1, 12000));
   ok("p2 重连成功", await reconnected(p2, 12000));
@@ -390,7 +393,7 @@ G.R6b_answer_offline = async ({ br, proxy }) => {
 G.R6c_answer_lock_released = async ({ br, proxy }) => {
   console.log("\n=== R6c 设答案的消息在半开连接上丢了：锁定会解除，能继续画，不卡住");
   const { p1, p2 } = await pagesInRoom(br);
-  await p1.eval(`T.clickBtn('切换输入模式')`);
+  await leaveChatMode(p1);
   await sleep(150);
   proxy.blackholeExisting();
   await p1.eval(`T.chat('苹果')`);
@@ -412,7 +415,8 @@ G.R10_toolbar_disabled = async ({ br }) => {
   const before = await p2.eval("T.ink()");
   ok("猜词方有墨", before > 0, before);
   ok("猜词方的清除按钮是 disabled", await p2.eval(`T.btn('清除').disabled === true`));
-  await p2.eval(`T.btn('清除').click()`);
+  // 清除要点两下才算数，两下都点
+  ok("猜词方的清除进不了确认态", !(await p2.eval(`T.confirmClear()`)));
   await p2.eval(`T.btn('撤销').click()`);
   await sleep(200);
   ok("猜词方本地没被清空", (await p2.eval("T.ink()")) === before, await p2.eval("T.ink()"));
@@ -420,7 +424,7 @@ G.R10_toolbar_disabled = async ({ br }) => {
   await p2.waitText("猜词中", 3000);
   await sleep(200);
   ok("猜词阶段画手的清除按钮是 disabled", await p1.eval(`T.btn('清除').disabled === true`));
-  await p1.eval(`T.btn('清除').click()`);
+  ok("猜词阶段画手的清除进不了确认态", !(await p1.eval(`T.confirmClear()`)));
   await p1.eval(`T.btn('撤销').click()`);
   await sleep(200);
   const d = await compare(p1, p2);
@@ -436,7 +440,7 @@ G.R11_undo_floating = async ({ br }) => {
   await sleep(300);
   await floatSelection(p1);
   // 拖到别处：不移动的话，即使来源像素被画回来也看不出重影
-  await p1.eval(`(async()=>{const o=document.querySelector('[data-selection-overlay]');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+20,clientY:r.top+300,bubbles:true}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);})()`);
+  await p1.eval(`(async()=>{const o=document.querySelector('[data-selection-overlay]');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+20,clientY:r.top+300,bubbles:true,buttons:1}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);})()`);
   await p1.eval(`T.btn('撤销').click()`);
   await sleep(400);
   await p1.eval(`T.commit()`);
@@ -736,7 +740,7 @@ G.H1_home_429 = async ({ br }) => {
   await p.eval(`window.fetch=async()=>new Response(JSON.stringify({error:'创建房间太频繁，请稍后再试'}),{status:429,headers:{'Content-Type':'application/json'}})`);
   await p.eval(`T.clickBtn('创建房间')`);
   await sleep(100);
-  await p.eval(`T.setInput(document.querySelector('input[type=text]'), '甲')`);
+  await p.eval(`T.typeInto('input[type=text]', '甲')`);
   await p.eval(`T.clickBtn('确认创建')`);
   ok("显示错误", await p.waitText("太频繁", 2000), await p.eval("T.text().slice(0,120)"));
   ok("URL 还在首页", (await p.eval("location.pathname")) === "/", await p.eval("location.pathname"));

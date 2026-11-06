@@ -176,7 +176,7 @@ function loadGroups({ ok, closeAll, sameOff, paintGrid, scratch, buildDir }) {
     await p1.goto(ORIGIN + "/");
     await p1.eval(`T.clickBtn('创建房间')`);
     await sleep(100);
-    await p1.eval(`T.setInput(document.querySelector('input[type=text]'), '画手甲')`);
+    await p1.eval(`T.typeInto('input[type=text]', '画手甲')`);
     await p1.eval(`T.clickBtn('3人')`);
     await sleep(50);
     await p1.eval(`T.clickBtn('确认创建')`);
@@ -193,7 +193,7 @@ function loadGroups({ ok, closeAll, sameOff, paintGrid, scratch, buildDir }) {
     // 等字体到（样式表 3.5 秒，加上字体加载）
     await sleep(4500);
     ok("字体到了之后框选还悬浮着", await hasOverlay(p1));
-    await p1.eval(`(async()=>{const o=document.querySelector('[data-selection-overlay]');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+50,clientY:r.top+220,bubbles:true}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);T.commit();await T.raf(2);})()`);
+    await p1.eval(`(async()=>{const o=document.querySelector('[data-selection-overlay]');const r=o.getBoundingClientRect();T.fire(o,'mousedown',r.left+20,r.top+20);await T.raf(2);window.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+50,clientY:r.top+220,bubbles:true,buttons:1}));await T.raf(2);window.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));await T.raf(2);T.commit();await T.raf(2);})()`);
     const r = await sameOff([p1, p2]);
     ok("提交后两端一致", r.same, r.hashes);
     const p3 = await br.newPage();
@@ -262,7 +262,7 @@ function loadGroups({ ok, closeAll, sameOff, paintGrid, scratch, buildDir }) {
     ok("首屏不等房间页 chunk", fcp > 0 && fcp < 1000, fcp);
     await p.eval(`T.clickBtn('创建房间')`);
     await sleep(100);
-    await p.eval(`T.setInput(document.querySelector('input[type=text]'), '画手')`);
+    await p.eval(`T.typeInto('input[type=text]', '画手')`);
     await p.eval(`T.clickBtn('确认创建')`);
     const splash = await until(() => p.eval(`T.text().includes('连接中')`), 1500, 50);
     ok("先显示加载状态，不是白屏", splash);
@@ -289,7 +289,7 @@ function loadGroups({ ok, closeAll, sameOff, paintGrid, scratch, buildDir }) {
     await sleep(500);
     await p.eval(`T.clickBtn('创建房间')`);
     await sleep(100);
-    await p.eval(`T.setInput(document.querySelector('input[type=text]'), '画手')`);
+    await p.eval(`T.typeInto('input[type=text]', '画手')`);
     // 模拟：刷新之后服务端已经是新版本
     let navigated = 0;
     p.handlers["Page.frameNavigated"] = () => {
@@ -326,7 +326,7 @@ function loadGroups({ ok, closeAll, sameOff, paintGrid, scratch, buildDir }) {
     navigated = 0;
     await p.eval(`T.clickBtn('创建房间')`);
     await sleep(100);
-    await p.eval(`T.setInput(document.querySelector('input[type=text]'), '画手')`);
+    await p.eval(`T.typeInto('input[type=text]', '画手')`);
     await p.eval(`T.clickBtn('确认创建')`);
     await until(async () => navigated > 0, 5000, 50);
     await sleep(800);
@@ -432,7 +432,7 @@ function loadGroups({ ok, closeAll, sameOff, paintGrid, scratch, buildDir }) {
     ok("Twind 样式生效", color === "rgb(0, 102, 204)", color);
     await p1.eval(`T.clickBtn('创建房间')`);
     await sleep(100);
-    await p1.eval(`T.setInput(document.querySelector('input[type=text]'), '画手')`);
+    await p1.eval(`T.typeInto('input[type=text]', '画手')`);
     await p1.eval(`T.clickBtn('确认创建')`);
     ok("能建房进房", await p1.waitText("房间号", 6000));
     await sleep(300);

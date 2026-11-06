@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { tx } from "@twind/core";
 
 export type ToastType = "error" | "info" | "success";
@@ -23,10 +23,13 @@ const TYPE_ICONS: Record<ToastType, string> = {
 };
 
 export default function Toast({ message, type = "info", onClose, duration = 3000 }: Props) {
+  // 调用方一般传内联函数，每次重渲染都是新的。计时器不能跟着它重启，否则有消息不停进来时提示永远不消失。
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
-    const t = setTimeout(onClose, duration);
+    const t = setTimeout(() => onCloseRef.current(), duration);
     return () => clearTimeout(t);
-  }, [onClose, duration]);
+  }, [duration]);
 
   return (
     <div

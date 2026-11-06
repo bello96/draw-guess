@@ -112,6 +112,10 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 ```
 状态只在 `room.ts` 服务端变更，客户端通过 `phaseChange` 被动同步。唯一的本地动作是 Room.tsx 的 `answerPending`：答案发出去到 phaseChange 回来的这一小段时间锁住画布（服务端一处理 setAnswer 就丢弃之后的画布操作）。**不要改成本地直接切 phase**：万一答案没送到，ChatPanel 已经切回聊天模式，用户重打答案回车就发到公开聊天了。
 
+**输入框默认模式**（`ChatPanel` 的 `preferredMode`）：画手在绘画阶段默认答案模式，猜词方在猜词阶段默认猜词模式，其余是聊天。默认聊天的话，直接打出来的答案会明文发给所有人（服务端另有兜底，见第七章“聊天里的答案”）。阶段或角色变化时切过去，同一阶段里手动切走的保持不变。输入框里有字时：当前模式还能用就**先不切，这条发出去（输入框空了）再切**，否则正在打的聊天一回车就成了答案或猜测，切不过去的话又会整个阶段停在聊天；当前模式不能用了（打的是答案或猜测，比如对方离开回到 waiting）就**把字丢掉**，退回聊天还留着的话一回车答案就公开了。切模式时把焦点给输入框，但不抢别的输入框（画手可能正在画布上打字），也不滚动页面（`preventScroll`：窗口比 body 的 1200px 窄时会横向滚，画布在鼠标底下挪位）。测试里用 `T.mode('确认' | '猜测' | '发送')` 切到指定模式。
+
+聊天、猜词、设答案三个回调都返回是否发出去了：没发出去时 Room 弹 Toast，ChatPanel 把内容放回输入框。回车先看输入法是否在组词（`isImeComposing`：`isComposing` 或 keyCode 229，Safari 的 compositionend 先于 keydown），昵称弹窗同理。聊天区最多留 300 条（`MAX_MESSAGES`，服务端历史是 200 条）。
+
 `waiting ⇄ drawing` 只由 `recomputePhase()` 判定：按 `getEffectivePlayerCount`（含保留期玩家）算，≥2 人离开 waiting，<2 人回到 waiting 并清答案。phase 真的变了才广播 `phaseChange`，别按人数直接发。
 
 ### 6. 画板坐标归一化与分辨率
@@ -143,6 +147,13 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 
 再次点同一工具按钮 toggle 关闭 popover。popover 的 `ToolPopover`（Toolbar.tsx 内）会用 `useLayoutEffect` 测量 popover 宽度，**clamp 到视窗边缘**，同时三角反向偏移以持续指向被点击的按钮。
 
+**清除要点两下**（`ClearButton`）：清除不能撤销。第一下按钮变成「确认清除？」，3 秒内再点才清；刚变过来 600ms 内的点击不算（系统双击间隔默认 500ms），按住回车的自动重复（`e.repeat`）也不算。判断用 ref，连点时第二下比重渲染先到。测试里用 `T.confirmClear()`（返回确认那一下有没有点到）。
+
+**画布只认左键**（useCanvas 的 `isPrimaryPress` / `leftButtonHeld`。Canvas.tsx 的编辑框拖动、缩放只靠 move 里的 `leftButtonHeld`：右键拖动第一下移动就停，开始拖动时的按键判断看不出效果，就没加）：
+- 按下要 `button === 0` 且没按 Ctrl（macOS 的 Ctrl+点击是右键菜单，菜单会吞掉 mouseup）；只认左键的 mouseup，左键拖动中松开右键不结束
+- 拖动中收到左键没按着的事件（`buttons & 1` 为 0：在画布外、别的窗口或右键菜单里松开了，没收到 mouseup），在最后一个按着的位置结束，不能接着画。mouseleave 也看这个：左键还按着就在边界处结束，已经松开了就停在松开前的位置
+- 窗口失焦（`blur`，按住时切到别的窗口）直接结束，否则喷枪会一直喷到人回来
+
 ### 8. 编辑态（失焦即 commit）
 
 文字 / 矩形 / 椭圆 / 直线 / 箭头 / 框选 **画完后不立即 commit**，而是进入编辑态（dashed overlay），支持：
@@ -158,7 +169,7 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 - 三类编辑态分别用 `data-text-overlay` / `data-shape-overlay` / `data-selection-overlay` 标记 DOM
 - Room.tsx 全局 `mousedown` 监听，editingShape / editingSelection 用 **capture 阶段**（先于 canvas 的 mousedown commit 旧 overlay，再让新 drag 开始）
 - arrow / line 的 `points` 是 `[start, end]`，**方向保留**；rect/ellipse 的 `points` 是 `[bbox 的两角]`，**顺序不重要**（消费方 min/max）
-- arrow / line 编辑 overlay 用 SVG（`overflow: visible` 处理退化 bbox），rect/ellipse 用 DOM `div` + border/background
+- arrow / line 编辑 overlay 用 SVG（`overflow: visible` 处理退化 bbox）。实心的 rect/ellipse 用 DOM `div` + background（正好填满 bbox）；线框的 rect/ellipse 和三角形、五角星、爱心一样用 SVG 描边：以路径为中心、里外各占半个线宽，和画布的 stroke 一样。以前用 CSS 边框，边框整个画在盒子里面，提交时形状会“跳”半个线宽，形状比线宽还细时盒子还会被边框撑大
 
 ### 9. 撤销 / 重做
 
@@ -180,7 +191,7 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 
 > 这些点是过去踩过或代码里已隐含约束，改动相关区域请特别小心。
 
-1. **桌面端专用（有意为之）**：`index.html` 有 `min-width: 1200px`，`useCanvas.ts` 已删除 Touch 事件处理。若未来要支持移动端需独立布局，不要简单移除 min-width。
+1. **桌面端专用（有意为之）**：`index.html` 有 `min-width: 1200px`，`useCanvas.ts` 已删除 Touch 事件处理。若未来要支持移动端需独立布局，不要简单移除 min-width。只有触屏的设备（`any-pointer: coarse` 且没有 `fine`）打开时先显示 `TouchNotice`（请用电脑打开，可以选择继续），同一标签页继续过一次就不再拦。提示挡着的时候不预加载房间页；读写 sessionStorage 都包了 try（Safari 阻止所有 Cookie 时会抛 SecurityError，首屏就要读它）。
 
 2. ~~**WebSocket 无自动重连**~~ ✅ 已修复：`useWebSocket` 带指数退避重连（1s→8s，带抖动；上限要小于 30 秒保留期，否则网络恢复了也赶不上；收到 `online` 事件立刻重连）。close reason 在 `TERMINAL_CLOSE_REASONS` 里就不重连（只看 reason，不看 code：限流是 1008），并通过 `terminalReason` 交给 Room 切错误屏。重连时优先读 `sessionStorage` 里最新的 `playerId`（mount 时的 prop 可能已过期），走服务端 take-over / disconnectedPlayers 恢复分支。
 
@@ -292,6 +303,8 @@ cd worker && npx wrangler dev
 
 **答案归一化**：`worker/src/helpers.ts` 的 `answerMatches()`，比较时两侧跑 `normalizeForCompare()`：NFKC + lowercase + 去空格 + 去 `\p{P}` 标点（保留 emoji / 数字 / 字母 / CJK 字）。答案只有标点时归一化后是空串，任何只含标点的猜测都会相等，所以这种情况保留标点比较。`this.answer` 存**原文**（画手面板展示用、`answerLength` 算用）。不要图方便直接存归一化后的，会让画手看到 "答案：你好！" → "你好"。
 
+**聊天里的答案**：猜词阶段猜词方发的聊天和答案一致（`answerMatches`）时，`onChat` 按猜测处理（走 `onGuess`），不当聊天广播，否则答案明文发给了所有人（输入框停在聊天模式，或者旧版页面默认聊天）。只是包含答案的、画手发的、其他阶段的聊天照常。
+
 **draw 消息 RAF 批量**：`C_Draw.points?: {x,y}[]` 为可选批量字段。客户端 `onMouseMove` 把点塞进 `pendingPointsRef`，每帧 `requestAnimationFrame(flushPendingMove)` 检查一次，距上次发送满 16ms 才合并发送（没到时间点留在队列里）；`onMouseUp` 前不受节流限制，先发完再发 `end`。服务端 `onDraw` 的 move 分支 `msg.points ?? [{x:msg.x,y:msg.y}]` 兼容单点。`replayDraw` 同样处理 `points` 数组。
 
 **`end` 带整笔**：`draw end` 的 `stroke` 字段是这一笔的完整内容，服务端以它为准存盘，广播的 `end` 也带上存下的笔画，对端以它为准。start / move 只用于显示进行中的笔画，丢了不影响结果：DO 休眠会丢内存里的缓存，断线时 start 发不出去，中途加入的人也没有 start。`replayDraw` 处理 `end` 时不依赖可见画布：roomState 刚到时 Canvas 还没挂载，这时到的 `end` 不能丢。
@@ -324,7 +337,7 @@ cd worker && npx wrangler dev
 
 **没有 HTTP 查询房间状态的接口**：info 接口已删（前端不用，还能用来枚举房间），非升级请求到 DO 返回 426。房间号用 `crypto.getRandomValues` 生成，仍是 6 位数字（前端路由和输入校验都按这个格式）。
 
-**Toast 错误提示**：`src/components/Toast.tsx` 是通用组件（error / info / success），右上角滑入、3s 自动消失、点击关闭。Room.tsx 里 `error` 消息改用 Toast，不再塞到聊天历史。同一时刻只有一个 toast；新 toast 会覆盖旧 toast（靠 `key={toast.id}` 强制 remount 动画）。
+**Toast 错误提示**：`src/components/Toast.tsx` 是通用组件（error / info / success），右上角滑入、3s 自动消失、点击关闭。Room.tsx 里 `error` 消息改用 Toast，不再塞到聊天历史。同一时刻只有一个 toast；新 toast 会覆盖旧 toast（靠 `key={toast.id}` 强制 remount 动画）。计时器只跟 `duration` 走，`onClose` 放在 ref 里：调用方传的是内联函数，跟着它重启的话，有消息不停进来时提示永远不消失。
 
 **文字工具点击空白 commit**：Room.tsx 里有 `useEffect` 监听全局 `mousedown`，editingText 存在时：
 - `target.closest("[data-text-overlay]")` → 忽略（内部 UI 交互）
@@ -413,6 +426,8 @@ cd worker && npx wrangler dev
 - 右下角 8×8 彩虹三角（`linear-gradient(135deg, ...) + clip-path: polygon(100% 0, 100% 100%, 0 100%)`）—— 标识这是自定义入口
 - 高亮 ring：仅当 panel 关闭、customColor 非 null、且 `value.toLowerCase() === customColor.toLowerCase()` 时显示
 
+**色相单独存**：`CustomColorPanel` 自己存 hsva。黑、白、灰没有色相，从 hex 反推永远是 0，以前从它们起手拖色相条没反应。draft 从外面变了（hex 输入、吸色）才按它重算，换成黑白灰时保留当前色相。
+
 **屏幕吸色**：浏览器原生 `window.EyeDropper` API（Chrome 95+ / Edge 95+）。Firefox / Safari 不支持时按钮自动隐藏（`"EyeDropper" in window` 检测）。返回 `{ sRGBHex: "#rrggbb" }`，写入 draft 不再走 alpha 合成。
 
 **Twind 抑制告警**：`@uiw/react-color` 给内部 div 加的 `w-color-*` 类（`w-color-saturation` / `w-color-hue` / `w-color-alpha-*` 等）以 `w-` 开头，会被 Twind runtime 当 width 工具类解析失败 → `[TWIND_INVALID_CLASS]`。在 `src/main.tsx` 的 `install` 配置里加了 `ignorelist: [/^w-color-/]`。
@@ -437,6 +452,8 @@ cd worker && npx wrangler dev
 
 **桶不带 alpha**：fill 只用 `(fr, fg, fb)`，paint 时 `data[idx+3] = 255`。透明度反直觉（多次填充会叠加），永远不应用。
 
+**空操作不提交**：种子点已经是填充色（或落在画布外）时画面不会变，本地点击直接返回，不进撤销栈也不发（`fillWouldChange`，条件和 `drawFillOnContext` / `floodFill` 的提前返回一致，先 `flushReplay` 保证离屏是完整的）。
+
 **⚠️ visited 位图（关键修复，不可回退）**：scanlineFill 内部用 `Uint8Array(w * h)` 记录已 paint 的像素，`matches()` 优先检查 visited 返回 false。**这是必要的**：fill 色与 target 色在容差内但不**完全相等**时（吸管吸到画布反走样像素的经典场景），painted 像素的 RGB 仍落在 matches 容差里，**没有 visited 会反复 push 进 stack 导致死循环 (Array.push 抛 `RangeError: Invalid array length`) + 浏览器卡死崩溃**。matches/paint 的入参是像素索引 `px`（不是字节偏移 `idx`），内部 `idx = px * 4`。
 
 **offscreen `willReadFrequently: true`**：offscreen canvas 创建时一定要用 `getContext("2d", { willReadFrequently: true })` —— bucket 每次 fill 都要 `getImageData` 整张 readback，不设此 flag 浏览器走 GPU readback 慢路径并发 console warning（`Multiple readback operations using getImageData are faster with willReadFrequently...`）。flag 一旦 context 创建就固定，所有后续 `offs.getContext("2d")` 返回同一个 context 忽略 flag，所以仅需在初始化处设置一次。
@@ -459,6 +476,10 @@ cd worker && npx wrangler dev
 **喷枪、蜡笔例外**：它们的成本和路径长度成正比，整条重画一笔长了就卡（4000 点时观战端主线程占用 700~900 ms/s）。这两种笔的散点只取决于线段的绝对序号和坐标，所以只补新线段，结果和整条重画逐像素相同（`renderBrushSegments`）。上一帧的像素留在可见画布上，可见画布被整张覆盖（`showOffscreen`）时 `liveStrokeRef` 清空，下一帧从头补画。水彩有模糊和透明度，不能增量。
 
 **对端按帧合并**：`replayDraw` 收到 `move` 只累积点，`requestAnimationFrame` 里才画，消息来得再快一帧也只重绘一次。`end` 取消挂起的帧。
+
+**原地单击**：所有点重合的笔画，画笔、水彩、蜡笔都画不出东西（Chromium 不给零长度线段画圆头，蜡笔只沿线段铺颗粒），却会进撤销栈。`finishStroke` 这时往旁边补一个相距 1px 的点（`withClickDot`，点数到上限就不补），单击就是一个点。这是改笔画数据，不是改渲染，旧版页面画出来也一样。
+
+**画布事件的 effect 只依赖 `locked`**（猜词、揭晓阶段），不依赖具体的 `phase`：waiting ⇄ drawing（等人时第二个人进来、对方离开）不重跑，进行中的笔画、拖到一半的形状和框选、按住的喷枪都不受影响。以前依赖 `phase`，重跑时闭包里的拖动状态被重置，松手什么都没有，喷枪也停了。进入猜词、失去画手身份时前面的 effect 会把进行中的笔画作废；拖到一半的框选被拆掉时清理函数会擦掉虚线预览。
 
 ---
 
@@ -796,6 +817,8 @@ node tests/regression/run.cjs browser batch3   # 只跑一个脚本；单个脚�
 ```
 
 - 回归脚本都是断言式，退出码 = 失败条数。产物在 `tests/regression/.tmp`（已忽略）
+- 页面工具在 `harness.cjs` 的 `T` 里：`T.typeInto(选择器, 值)` 等元素出现再填（CI 机器慢，别用固定等待）、`T.mode(提交按钮文字)` 切输入模式、`T.confirmClear()` 两下确认清除
+- 绝对耗时的阈值要给 CI 留余量：共享机器没有 GPU，整条重画要慢十倍左右。L3 的主线程占用在 CI 上超过阈值，所以只在本机断言（`GITHUB_ACTIONS` 时只记录），和机器快慢无关的那部分（同一个任务里到达的 60 条 move 只重绘一次）另外断言；其余耗时断言目前在 CI 上都有余量
 - 本机 VC++ 运行库过旧时 workerd 会崩，设 `MINIFLARE_WORKERD_PATH` 指向带新版 DLL 的副本。浏览器路径用 `BROWSER_PATH` 指定
 - 改 Worker 时别同时跑浏览器测试：`wrangler dev` 会热更新，正在跑的结果作废
 - 测试只访问本机，不要对线上建房或连 WebSocket

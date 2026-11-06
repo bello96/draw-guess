@@ -181,6 +181,31 @@ const INIT = `(() => {
     },
     enter(el) { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); },
     chat(text) { const i = document.querySelector('input[type=text]'); this.setInput(i, text); this.enter(i); },
+    // 等元素出现再填：慢机器上（CI）页面渲染可能晚于固定的等待时间
+    async typeInto(sel, v, ms = 10000) {
+      const end = Date.now() + ms;
+      let el = document.querySelector(sel);
+      while (!el && Date.now() < end) { await new Promise((r) => setTimeout(r, 50)); el = document.querySelector(sel); }
+      if (!el) throw new Error('等不到 ' + sel + '，页面：' + location.pathname + ' ' + document.body.innerText.slice(0, 120).replace(/\\s+/g, ' '));
+      this.setInput(el, v);
+    },
+    // 聊天区输入框旁边的提交按钮：发送（聊天）/ 确认（答案）/ 猜测（猜词）
+    submitIs(label) { const i = document.querySelector('input[type=text]'); const b = i && i.parentElement.querySelector('button'); return !!b && b.innerText.trim() === label; },
+    // 切到指定的输入模式，已经是就不动
+    async mode(label) {
+      for (let n = 0; n < 3 && !this.submitIs(label); n++) { this.clickBtn('切换输入模式'); await this.raf(2); }
+      if (!this.submitIs(label)) throw new Error('切不到输入模式 ' + label);
+    },
+    // 清除要点两下（第二下是确认）。按钮只用 click，不带 mousedown，和键盘触发一样。
+    // 返回第二下有没有点到（按钮禁用时进不了确认态，返回 false）。
+    async confirmClear() {
+      this.btn('清除').click();
+      await new Promise((r) => setTimeout(r, 700));
+      const b = this.btn('确认清除');
+      if (b) b.click();
+      await this.raf(2);
+      return !!b;
+    },
     sig(N = 64, M = 38) {
       const c = this.cv(); const t = document.createElement('canvas'); t.width = N; t.height = M;
       const x = t.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, N, M); x.imageSmoothingQuality = 'high'; x.drawImage(c, 0, 0, N, M);
@@ -442,9 +467,11 @@ async function createRoom(max = 2) {
 // 浏览器内进入房间（昵称弹窗路径）
 async function joinViaUrl(page, code, base = ORIGIN, name) {
   await page.goto(`${base}/${code}`);
-  await page.waitText("进入房间", 5000);
+  if (!(await page.waitText("进入房间", 15000))) {
+    throw new Error(`昵称弹窗没出来：${await page.eval("location.pathname + ' ' + document.body.innerText.slice(0, 120)")}`);
+  }
   if (name) {
-    await page.eval(`T.setInput(document.querySelector('input[type=text]'), ${JSON.stringify(name)})`);
+    await page.eval(`T.typeInto('input[type=text]', ${JSON.stringify(name)})`);
   }
   await page.eval(`T.clickBtn('进入房间')`);
   await page.eval(`new Promise((res) => { const t0 = Date.now(); const i = setInterval(() => { if (document.querySelector('canvas') || Date.now() - t0 > 8000) { clearInterval(i); res(); } }, 50); })`);

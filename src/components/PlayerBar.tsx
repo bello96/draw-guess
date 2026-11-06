@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { tx } from "@twind/core";
 import type { PlayerInfo, GamePhase } from "../types/protocol";
+import { copyText } from "../utils/clipboard";
 
 function IconDropdown() {
   return (
@@ -164,7 +165,16 @@ export default function PlayerBar({
   onLeave,
 }: Props) {
   const isDrawer = myId === drawerId;
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    },
+    [],
+  );
   // 两人房里对方掉线时不能转让（服务端只接受在线目标），按钮禁用而不是点了没反应
   const hasOnlineOther = players.some((p) => p.id !== myId && p.connected !== false);
 
@@ -179,12 +189,14 @@ export default function PlayerBar({
     isDrawer && players.length >= 3 && (phase !== "revealed" || !pendingPromotionId);
   const hasAnyActionButton = hasContinueButton || has2pTransferButton || has3pTransferDropdown;
 
-  const handleCopyLink = () => {
-    const url = `${window.location.origin}/${roomCode}`;
-    navigator.clipboard.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+  const roomUrl = `${window.location.origin}/${roomCode}`;
+  const handleCopyLink = async () => {
+    const ok = await copyText(roomUrl);
+    setCopyState(ok ? "copied" : "failed");
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+    copyTimerRef.current = window.setTimeout(() => setCopyState("idle"), 2000);
   };
 
   return (
@@ -205,13 +217,18 @@ export default function PlayerBar({
               onClick={handleCopyLink}
               className={tx(
                 "px-2 py-0.5 text-xs rounded-full transition whitespace-nowrap",
-                copied
-                  ? "bg-green-100 text-green-700"
-                  : "bg-canvas-parchment text-primary hover:bg-canvas-parchment",
+                copyState === "copied" && "bg-green-100 text-green-700",
+                copyState === "failed" && "bg-red-50 text-red-600",
+                copyState === "idle" &&
+                  "bg-canvas-parchment text-primary hover:bg-canvas-parchment",
               )}
-              title="复制房间链接分享给好友"
+              title={
+                copyState === "failed"
+                  ? `复制失败，请手动复制：${roomUrl}`
+                  : "复制房间链接分享给好友"
+              }
             >
-              {copied ? "已复制" : "分享房间"}
+              {copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败" : "分享房间"}
             </button>
           )}
         </div>

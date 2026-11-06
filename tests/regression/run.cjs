@@ -6,8 +6,8 @@ const worker = require("./worker-ctl.cjs");
 
 const SUITES = {
   // protocol-crash 会杀掉并重启 8787，放在最后
-  protocol: ["protocol-batch1.cjs", "protocol-batch2.cjs", "protocol-batch3.cjs", "protocol-crash.cjs"],
-  browser: ["browser-batch3.cjs", "browser-batch2.cjs", "browser-batch1.cjs"],
+  protocol: ["protocol-batch1.cjs", "protocol-batch2.cjs", "protocol-batch3.cjs", "protocol-batch4.cjs", "protocol-crash.cjs"],
+  browser: ["browser-batch4.cjs", "browser-batch3.cjs", "browser-batch2.cjs", "browser-batch1.cjs"],
 };
 
 (async () => {

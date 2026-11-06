@@ -1,7 +1,9 @@
 import { lazy, Suspense, useState, useEffect, useCallback } from "react";
 import { tx } from "@twind/core";
 import Home from "./pages/Home";
+import TouchNotice, { shouldShowTouchNotice } from "./components/TouchNotice";
 import { PLAYER_ID_KEY, PLAYER_TOKEN_KEY } from "./hooks/useWebSocket";
+import { isImeComposing } from "./utils/keyboard";
 import bgUrl from "./assets/bg.webp";
 
 const CHUNK_RELOAD_KEY = "draw-guess-chunk-reload";
@@ -45,13 +47,19 @@ export default function App() {
   const [playerName, setPlayerName] = useState("");
   const [playerId, setPlayerId] = useState<string | undefined>(undefined);
 
+  const [touchNotice, setTouchNotice] = useState(shouldShowTouchNotice);
+
   // URL-based join flow
   const [urlJoinCode, setUrlJoinCode] = useState("");
   const [showNicknameModal, setShowNicknameModal] = useState(false);
   const [modalName, setModalName] = useState("");
 
-  // 空闲时提前下载房间页：进房间不用等，开着首页时发版也不会碰到旧 chunk 失效
+  // 空闲时提前下载房间页：进房间不用等，开着首页时发版也不会碰到旧 chunk 失效。
+  // 触屏提示挡着的时候先不下（手机上多半不会继续），选了继续再下
   useEffect(() => {
+    if (touchNotice) {
+      return;
+    }
     const preload = () => {
       void loadRoom().catch(() => {
         // 真正进房间时会再试，失败处理在上面
@@ -63,7 +71,7 @@ export default function App() {
     }
     const timer = window.setTimeout(preload, 1500);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [touchNotice]);
 
   // Check URL on mount for room code
   useEffect(() => {
@@ -115,6 +123,11 @@ export default function App() {
     setUrlJoinCode("");
   }, [modalName, urlJoinCode, enterRoom]);
 
+  // 触屏设备先提示用电脑打开，用户选了继续再往下走
+  if (touchNotice) {
+    return <TouchNotice onContinue={() => setTouchNotice(false)} />;
+  }
+
   // In room
   if (roomCode) {
     return (
@@ -152,7 +165,11 @@ export default function App() {
             type="text"
             value={modalName}
             onChange={(e) => setModalName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleNicknameConfirm()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !isImeComposing(e)) {
+                handleNicknameConfirm();
+              }
+            }}
             placeholder="输入昵称..."
             maxLength={10}
             autoFocus

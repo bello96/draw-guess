@@ -1413,6 +1413,18 @@ export class GameRoom implements DurableObject {
     const timestamp = Date.now();
     const trimmed = text.trim().slice(0, MAX_CHAT_LENGTH);
 
+    // 猜词阶段猜词方在聊天里直接打出了答案（输入框停在聊天模式、旧版页面默认是聊天）：
+    // 按猜测处理，不当聊天广播，否则答案明文发给了所有人。只拦和答案一致的，别的照常是聊天。
+    if (
+      this.phase === "guessing" &&
+      player.id !== this.drawerId &&
+      this.answer !== null &&
+      answerMatches(trimmed, this.answer)
+    ) {
+      await this.onGuess(ws, text);
+      return;
+    }
+
     this.chatHistory.push({
       kind: "chat",
       playerId: player.id,

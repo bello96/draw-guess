@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { tx } from "@twind/core";
 import type { ChatMessage, GamePhase } from "../types/protocol";
+import { isImeComposing } from "../utils/keyboard";
 
 type InputMode = "chat" | "setAnswer" | "guess";
 
@@ -12,10 +13,22 @@ interface Props {
   answerLength: number | null;
   answerText: string | null;
   playerCount: number;
-  onSendChat: (text: string) => void;
-  onGuess: (text: string) => void;
-  /** 返回答案是否发出去了 */
+  // 下面三个都返回是否发出去了。没发出去时输入框保留内容，用户可以直接重试。
+  onSendChat: (text: string) => boolean;
+  onGuess: (text: string) => boolean;
   onSetAnswer: (answer: string) => boolean;
+}
+
+// 这个角色在这个阶段最常用的模式：画手在绘画阶段设答案，猜词方在猜词阶段猜。
+// 默认是聊天的话，直接打出来的答案会明文发给所有人。
+function preferredMode(phase: GamePhase, isDrawer: boolean): InputMode {
+  if (isDrawer && phase === "drawing") {
+    return "setAnswer";
+  }
+  if (!isDrawer && phase === "guessing") {
+    return "guess";
+  }
+  return "chat";
 }
 
 const MODE_CONFIG: Record<
@@ -72,29 +85,56 @@ export default function ChatPanel({
   onSetAnswer,
 }: Props) {
   const [input, setInput] = useState("");
-  const [mode, setMode] = useState<InputMode>("chat");
+  const [mode, setMode] = useState<InputMode>(() => preferredMode(phase, isDrawer));
+  // 阶段变了但输入框里还有字：先不切，等这些字发出去（输入框空了）再切到这里记的模式
+  const pendingModeRef = useRef<InputMode | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Compute available modes based on game state
-  const availableModes: InputMode[] = ["chat"];
-  if (isDrawer && phase === "drawing") {
-    availableModes.push("setAnswer");
-  }
-  if (!isDrawer && phase === "guessing") {
-    availableModes.push("guess");
-  }
+  // 能用的模式：聊天，加上这个阶段的专用模式（画手设答案、猜词方猜）
+  const preferred = preferredMode(phase, isDrawer);
+  const availableModes: InputMode[] = preferred === "chat" ? ["chat"] : ["chat", preferred];
 
-  // Auto-switch to chat if current mode is no longer available
+  // 阶段或角色变了，切到这个阶段最常用的模式；同一阶段里手动切走的模式保持不变。输入框里有字时：
+  // - 当前模式还能用：先不切，这条发出去再切。否则正在打的聊天一回车就成了答案或猜测
+  // - 当前模式不能用了（打的是答案或猜测）：字丢掉。退回聊天还留着的话，一回车答案就明文发给了所有人
   useEffect(() => {
-    if (!availableModes.includes(mode)) {
-      setMode("chat");
+    if (!input.trim()) {
+      pendingModeRef.current = null;
+      setMode(preferred);
+      return;
     }
+    if (availableModes.includes(mode)) {
+      pendingModeRef.current = mode === preferred ? null : preferred;
+      return;
+    }
+    pendingModeRef.current = null;
+    setInput("");
+    setMode(preferred);
   }, [phase, isDrawer]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-focus input when mode changes
+  // 输入框空了，补上前面推迟的切换
   useEffect(() => {
-    inputRef.current?.focus();
+    const pending = pendingModeRef.current;
+    if (pending !== null && !input.trim()) {
+      pendingModeRef.current = null;
+      if (availableModes.includes(pending)) {
+        setMode(pending);
+      }
+    }
+  }, [input]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 模式变了把焦点给输入框，但不抢别的输入框（比如画手正在画布上打字时第二个人进来、切到答案模式）。
+  // 不滚动页面：body 最小宽度 1200px，窗口窄时输入框在视口外，滚过去会让画布在鼠标底下挪位
+  useEffect(() => {
+    const active = document.activeElement as HTMLElement | null;
+    const editingElsewhere =
+      !!active &&
+      active !== inputRef.current &&
+      (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable);
+    if (!editingElsewhere) {
+      inputRef.current?.focus({ preventScroll: true });
+    }
   }, [mode]);
 
   // Auto-scroll to bottom
@@ -111,25 +151,19 @@ export default function ChatPanel({
     const text = input.trim();
     setInput("");
 
-    switch (mode) {
-      case "chat":
-        onSendChat(text);
-        break;
-      case "setAnswer":
-        // 没发出去就把内容放回去，重试时不用重打
-        if (!onSetAnswer(text)) {
-          setInput(text);
-        }
-        break;
-      case "guess":
-        onGuess(text);
-        break;
+    // 没发出去就把内容放回去，重试时不用重打
+    const sent =
+      mode === "chat" ? onSendChat(text) : mode === "setAnswer" ? onSetAnswer(text) : onGuess(text);
+    if (!sent) {
+      setInput(text);
     }
   };
 
   const cycleMode = () => {
     const idx = availableModes.indexOf(mode);
     const next = availableModes[(idx + 1) % availableModes.length];
+    // 用户自己选了模式，推迟的自动切换作废
+    pendingModeRef.current = null;
     setMode(next);
     setInput("");
   };
@@ -215,7 +249,11 @@ export default function ChatPanel({
               "focus:border-transparent outline-none",
               "transition-colors",
             )}
-            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !isImeComposing(e)) {
+                handleSubmit();
+              }
+            }}
           />
           <button
             onClick={handleSubmit}

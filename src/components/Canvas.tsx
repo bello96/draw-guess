@@ -91,6 +91,10 @@ function measureTextWidth(text: string, fontSize: number): number {
   return Math.max(60, maxWidth + 8);
 }
 
+// 编辑框拖动、缩放中收到左键没按着的移动就结束：已经在别处松开了（右键菜单、切到别的窗口吞掉了 mouseup）。
+// 右键、中键拖动也在第一下移动时就停下，所以开始拖动时不用另外判断是哪个键
+const leftButtonHeld = (e: MouseEvent) => (e.buttons & 1) !== 0;
+
 const SHAPE_OVERLAY_PADDING = 8;
 const HANDLE_SIZE = 10;
 const HANDLE_COLOR = "#818cf8";
@@ -568,8 +572,16 @@ export default function Canvas({
     if (!isDragging) {
       return;
     }
+    const handleUp = () => {
+      dragRef.current = null;
+      setIsDragging(false);
+    };
     const handleMove = (e: MouseEvent) => {
       if (!dragRef.current) {
+        return;
+      }
+      if (!leftButtonHeld(e)) {
+        handleUp();
         return;
       }
       const dx = e.clientX - dragRef.current.startX;
@@ -586,10 +598,6 @@ export default function Canvas({
           normalizedY: newY / rect.height,
         });
       }
-    };
-    const handleUp = () => {
-      dragRef.current = null;
-      setIsDragging(false);
     };
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
@@ -621,9 +629,17 @@ export default function Canvas({
     if (!isResizing) {
       return;
     }
+    const handleUp = () => {
+      resizeRef.current = null;
+      setIsResizing(false);
+    };
     const handleMove = (e: MouseEvent) => {
       const ref = resizeRef.current;
       if (!ref) {
+        return;
+      }
+      if (!leftButtonHeld(e)) {
+        handleUp();
         return;
       }
       const dx = e.clientX - ref.startX;
@@ -648,10 +664,6 @@ export default function Canvas({
       const scale = Math.max(0.3, 1 + delta / 200);
       const newFontSize = Math.round(Math.max(12, Math.min(72, ref.initialFontSize * scale)));
       onEditingTextUpdate?.({ fontSize: newFontSize });
-    };
-    const handleUp = () => {
-      resizeRef.current = null;
-      setIsResizing(false);
     };
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
@@ -747,9 +759,17 @@ export default function Canvas({
     if (!shapeInteractionKind) {
       return;
     }
+    const handleUp = () => {
+      shapeInteractionRef.current = null;
+      setShapeInteractionKind(null);
+    };
     const handleMove = (e: MouseEvent) => {
       const ref = shapeInteractionRef.current;
       if (!ref) {
+        return;
+      }
+      if (!leftButtonHeld(e)) {
+        handleUp();
         return;
       }
       const canvas = canvasRef.current;
@@ -836,10 +856,6 @@ export default function Canvas({
         });
       }
     };
-    const handleUp = () => {
-      shapeInteractionRef.current = null;
-      setShapeInteractionKind(null);
-    };
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
     return () => {
@@ -871,9 +887,17 @@ export default function Canvas({
     if (!isSelDragging) {
       return;
     }
+    const handleUp = () => {
+      selDragRef.current = null;
+      setIsSelDragging(false);
+    };
     const handleMove = (e: MouseEvent) => {
       const ref = selDragRef.current;
       if (!ref) {
+        return;
+      }
+      if (!leftButtonHeld(e)) {
+        handleUp();
         return;
       }
       const dx = e.clientX - ref.startClientX;
@@ -881,10 +905,6 @@ export default function Canvas({
       onEditingSelectionUpdate?.({
         dragOffsetPx: { dx: ref.origDragOffsetPx.dx + dx, dy: ref.origDragOffsetPx.dy + dy },
       });
-    };
-    const handleUp = () => {
-      selDragRef.current = null;
-      setIsSelDragging(false);
     };
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
@@ -1219,10 +1239,12 @@ export default function Canvas({
                 }}
               />
 
-              {/* Shape preview — rect/ellipse 用 CSS（border/background），三角形 / 五角星 / 爱心
-               *  路径形状用 SVG <path>，复用 useCanvas 里同一份 svgPath* 几何（保证 overlay
-               *  和最终 commit 到 canvas 上的形状像素级一致）。 */}
-              {editingShape.shape === "rect" || editingShape.shape === "ellipse" ? (
+              {/* Shape preview — 实心矩形、椭圆用 CSS 背景（填满 bbox，和画布一样）。线框和三角形 /
+               *  五角星 / 爱心用 SVG：描边以路径为中心、里外各占半个线宽，和画布的 stroke 一样，
+               *  形状比线宽还细时也对得上（CSS 边框整个画在盒子里面，盒子还会被边框撑大）。
+               *  路径复用 useCanvas 里同一份 svgPath* 几何（保证 overlay 和最终 commit 的形状像素级一致）。 */}
+              {(editingShape.shape === "rect" || editingShape.shape === "ellipse") &&
+              editingShape.filled ? (
                 <div
                   style={{
                     position: "absolute",
@@ -1230,14 +1252,9 @@ export default function Canvas({
                     top: SHAPE_OVERLAY_PADDING,
                     width: shapeBox.bw,
                     height: shapeBox.bh,
-                    boxSizing: "border-box",
+                    backgroundColor: editingShape.color,
                     pointerEvents: "none",
                     ...(editingShape.shape === "ellipse" ? { borderRadius: "50%" } : {}),
-                    ...(editingShape.filled
-                      ? { backgroundColor: editingShape.color }
-                      : {
-                          border: `${shapeBox.scaledLW}px solid ${editingShape.color}`,
-                        }),
                   }}
                 />
               ) : (
@@ -1254,20 +1271,43 @@ export default function Canvas({
                   viewBox={`0 0 ${Math.max(shapeBox.bw, 1)} ${Math.max(shapeBox.bh, 1)}`}
                   preserveAspectRatio="none"
                 >
-                  <path
-                    d={
-                      editingShape.shape === "triangle"
-                        ? svgPathTriangle(shapeBox.bw, shapeBox.bh)
-                        : editingShape.shape === "star"
-                          ? svgPathStar(shapeBox.bw, shapeBox.bh)
-                          : svgPathHeart(shapeBox.bw, shapeBox.bh)
-                    }
-                    fill={editingShape.filled ? editingShape.color : "none"}
-                    stroke={editingShape.filled ? "none" : editingShape.color}
-                    strokeWidth={shapeBox.scaledLW}
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                  />
+                  {editingShape.shape === "rect" ? (
+                    <rect
+                      x={0}
+                      y={0}
+                      width={shapeBox.bw}
+                      height={shapeBox.bh}
+                      fill="none"
+                      stroke={editingShape.color}
+                      strokeWidth={shapeBox.scaledLW}
+                      strokeLinejoin="round"
+                    />
+                  ) : editingShape.shape === "ellipse" ? (
+                    <ellipse
+                      cx={shapeBox.bw / 2}
+                      cy={shapeBox.bh / 2}
+                      rx={shapeBox.bw / 2}
+                      ry={shapeBox.bh / 2}
+                      fill="none"
+                      stroke={editingShape.color}
+                      strokeWidth={shapeBox.scaledLW}
+                    />
+                  ) : (
+                    <path
+                      d={
+                        editingShape.shape === "triangle"
+                          ? svgPathTriangle(shapeBox.bw, shapeBox.bh)
+                          : editingShape.shape === "star"
+                            ? svgPathStar(shapeBox.bw, shapeBox.bh)
+                            : svgPathHeart(shapeBox.bw, shapeBox.bh)
+                      }
+                      fill={editingShape.filled ? editingShape.color : "none"}
+                      stroke={editingShape.filled ? "none" : editingShape.color}
+                      strokeWidth={shapeBox.scaledLW}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  )}
                 </svg>
               )}
 

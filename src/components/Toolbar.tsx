@@ -237,8 +237,25 @@ function CustomColorPanel({
     }
   };
 
-  // hex → hsva for the @uiw/react-color components（只取前 7 位，忽略历史 8 位输入）
-  const hsva = hexToHsva(draft.length >= 7 ? draft.slice(0, 7) : "#000000");
+  // 色相单独存：黑、白、灰没有色相，从 hex 反推永远是 0，从它们起手拖色相条就没反应。
+  // draft 从外面变了（hex 输入、吸色）才按它重算；是这里刚改出来的就保留色相。
+  // hex 只取前 7 位，忽略历史 8 位输入。
+  const draftHex = draft.length >= 7 ? draft.slice(0, 7) : "#000000";
+  const [hsva, setHsva] = useState(() => hexToHsva(draftHex));
+  useEffect(() => {
+    setHsva((cur) => {
+      if (hsvaToHex(cur).toLowerCase() === draftHex.toLowerCase()) {
+        return cur;
+      }
+      const next = hexToHsva(draftHex);
+      // 换成了黑白灰：色相条停在原处
+      return next.s === 0 || next.v === 0 ? { ...next, h: cur.h } : next;
+    });
+  }, [draftHex]);
+  const changeHsva = (next: typeof hsva) => {
+    setHsva(next);
+    onDraftChange(hsvaToHex(next));
+  };
 
   return (
     <div
@@ -253,17 +270,13 @@ function CustomColorPanel({
       <div className={tx("flex gap-1.5")}>
         <Saturation
           hsva={hsva}
-          onChange={(newColor) => {
-            onDraftChange(hsvaToHex(newColor));
-          }}
+          onChange={(newColor) => changeHsva({ ...hsva, s: newColor.s, v: newColor.v })}
           style={{ width: 240, height: 140, borderRadius: 4 }}
         />
         <Hue
           hue={hsva.h}
           direction="vertical"
-          onChange={(newHue) => {
-            onDraftChange(hsvaToHex({ ...hsva, h: newHue.h }));
-          }}
+          onChange={(newHue) => changeHsva({ ...hsva, h: newHue.h })}
           style={{ width: 14, height: 140, borderRadius: 4 }}
         />
       </div>
@@ -685,6 +698,76 @@ function BrushPicker({ value, onChange }: { value: BrushType; onChange: (b: Brus
   );
 }
 
+// ---------- Clear (two-step) ----------
+
+// 清除不能撤销，所以要点两下：第一下按钮变成「确认清除？」，3 秒内再点一下才真的清。
+// 刚变过来 600ms 内的点击不算确认：系统的双击间隔默认 500ms，双击、手抖连点不会直接清空。
+// 按住回车的自动重复也不算（见下面的 onKeyDown）。
+const CLEAR_CONFIRM_WINDOW_MS = 3000;
+const CLEAR_CONFIRM_MIN_DELAY_MS = 600;
+
+function ClearButton({ disabled, onClear }: { disabled: boolean; onClear: () => void }) {
+  const [armed, setArmed] = useState(false);
+  // 判断用 ref：连点时第二下比重渲染先到，读 state 会读到旧值
+  const armedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!armed) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      armedAtRef.current = null;
+      setArmed(false);
+    }, CLEAR_CONFIRM_WINDOW_MS);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+
+  // 不能画了（转让出去、进入猜词阶段）就撤掉确认态
+  useEffect(() => {
+    if (disabled) {
+      armedAtRef.current = null;
+      setArmed(false);
+    }
+  }, [disabled]);
+
+  const handleClick = () => {
+    const armedAt = armedAtRef.current;
+    if (armedAt === null) {
+      armedAtRef.current = performance.now();
+      setArmed(true);
+      return;
+    }
+    if (performance.now() - armedAt < CLEAR_CONFIRM_MIN_DELAY_MS) {
+      return;
+    }
+    armedAtRef.current = null;
+    setArmed(false);
+    onClear();
+  };
+
+  return (
+    <button
+      onClick={handleClick}
+      // 焦点在按钮上按住回车，系统的自动重复会一直触发 click：重复的那几下不算
+      onKeyDown={(e) => {
+        if (e.repeat) {
+          e.preventDefault();
+        }
+      }}
+      disabled={disabled}
+      title={armed ? "确认清除" : "清除"}
+      className={tx(
+        "h-9 rounded-full flex items-center justify-center transition active:scale-95",
+        armed
+          ? "px-3 text-sm whitespace-nowrap bg-red-50 text-red-600"
+          : "w-9 text-red-500 hover:bg-red-50",
+      )}
+    >
+      {armed ? "确认清除？" : <IconClear />}
+    </button>
+  );
+}
+
 // ---------- Popover (clamped to viewport) ----------
 
 /**
@@ -990,17 +1073,7 @@ export default function Toolbar({
 
       {/* Clear — standalone group, separated by its own divider */}
       <div className={tx("flex items-center")}>
-        <button
-          onClick={onClear}
-          disabled={disabled}
-          title="清除"
-          className={tx(
-            "w-9 h-9 rounded-full flex items-center justify-center transition",
-            "text-red-500 hover:bg-red-50",
-          )}
-        >
-          <IconClear />
-        </button>
+        <ClearButton disabled={disabled} onClear={onClear} />
       </div>
     </div>
   );
