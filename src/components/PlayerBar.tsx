@@ -188,7 +188,11 @@ export default function PlayerBar({
   };
 
   return (
-    <div className={tx("flex items-center justify-between p-3 bg-white rounded-lg border border-hairline")}>
+    <div
+      className={tx(
+        "flex items-center justify-between p-3 bg-white rounded-lg border border-hairline",
+      )}
+    >
       {/* Room info */}
       <div className={tx("flex items-center gap-4 flex-shrink-0")}>
         <div className={tx("flex items-center gap-2 whitespace-nowrap")}>
@@ -266,7 +270,9 @@ export default function PlayerBar({
                   key={p.id}
                   className={tx(
                     "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm",
-                    p.id === drawerId ? "bg-canvas-parchment text-primary-focus" : "bg-gray-50 text-ink",
+                    p.id === drawerId
+                      ? "bg-canvas-parchment text-primary-focus"
+                      : "bg-gray-50 text-ink",
                     p.id === myId && "font-semibold",
                   )}
                 >

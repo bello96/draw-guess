@@ -26,7 +26,7 @@ import {
   WRITE_RATE_LIMIT_BURST,
   WRITE_RATE_LIMIT_PER_SECOND,
 } from "./constants";
-import { answerMatches, pathLength, redoKey, strokeCost, strokeKey } from "./helpers";
+import { answerMatches, logFailure, pathLength, redoKey, strokeCost, strokeKey } from "./helpers";
 import type {
   BrushType,
   ChatHistoryEntry,
@@ -177,7 +177,10 @@ export class GameRoom implements DurableObject {
       if (player) {
         // 这个字段上线前就在线的玩家：名册里没有，趁现在补上
         if (!this.roster.has(id)) {
-          this.roster.set(id, { name: player.name, ...(player.token ? { token: player.token } : {}) });
+          this.roster.set(id, {
+            name: player.name,
+            ...(player.token ? { token: player.token } : {}),
+          });
           changed = true;
         }
         continue;
@@ -204,7 +207,12 @@ export class GameRoom implements DurableObject {
   }
 
   /** Token-bucket rate check. Returns false when the bucket is exhausted. */
-  private takeToken(buckets: RateBuckets, ws: WebSocket, perSecond: number, burst: number): boolean {
+  private takeToken(
+    buckets: RateBuckets,
+    ws: WebSocket,
+    perSecond: number,
+    burst: number,
+  ): boolean {
     const now = Date.now();
     const bucket = buckets.get(ws) ?? { tokens: burst, refilledAt: now };
     const refill = ((now - bucket.refilledAt) / 1000) * perSecond;
@@ -295,9 +303,8 @@ export class GameRoom implements DurableObject {
   }
 
   /**
-   * Destroy the room: memory, storage and alarm. /init can reuse the DO afterwards.
-   * The alarm goes first because at our compatibility date deleteAll() leaves it
-   * in place (delete_all_deletes_alarm only applies from 2026-02-24).
+   * Destroy the room: memory, storage and alarm (deleteAll() removes the alarm too
+   * since compatibility date 2026-02-24). /init can reuse the DO afterwards.
    */
   private async resetRoom() {
     this.created = false;
@@ -320,7 +327,6 @@ export class GameRoom implements DurableObject {
     for (const { ws } of this.getUnjoinedWebSockets()) {
       this.closeUnjoined(ws, 1000, "room not found");
     }
-    await this.state.storage.deleteAlarm();
     await this.state.storage.deleteAll();
   }
 
@@ -446,9 +452,7 @@ export class GameRoom implements DurableObject {
   }
 
   private getPlayerInfoList(): PlayerInfo[] {
-    const joined = new Map(
-      this.getJoinedWebSockets().map(({ player }) => [player.id, player]),
-    );
+    const joined = new Map(this.getJoinedWebSockets().map(({ player }) => [player.id, player]));
     const result: PlayerInfo[] = [];
     for (const id of this.joinOrder) {
       // 保留期内的玩家仍在房间里：列出来并标记离线，否则先重连的人永远看不到后回来的人
@@ -492,7 +496,11 @@ export class GameRoom implements DurableObject {
 
   // ============ HTTP fetch handler ============
 
-  async fetch(request: Request): Promise<Response> {
+  fetch(request: Request): Promise<Response> {
+    return logFailure("GameRoom.fetch", () => this.handleFetch(request));
+  }
+
+  private async handleFetch(request: Request): Promise<Response> {
     await this.ensureLoaded();
     const url = new URL(request.url);
 
@@ -595,7 +603,11 @@ export class GameRoom implements DurableObject {
 
   // ============ Hibernatable WebSocket API handlers ============
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    return logFailure("webSocketMessage", () => this.handleMessage(ws, message));
+  }
+
+  private async handleMessage(ws: WebSocket, message: string | ArrayBuffer) {
     await this.ensureLoaded();
 
     // 服务端已经关掉这条连接（接管、拒绝、超时）：close 帧还在路上时到达的消息一律不算数，
@@ -694,24 +706,31 @@ export class GameRoom implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket, code: number, reason: string) {
-    // 回一个 close 帧完成握手。当前兼容日期下运行时不会自动回（web_socket_auto_reply_to_close
-    // 从 2026-04-07 才默认开启），不回的话对端要等 10 秒才算关闭。1005 / 1006 不能写进 close 帧。
-    try {
-      ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
-    } catch {
-      /* already closed */
-    }
-    await this.ensureLoaded();
-    await this.onDisconnect(ws);
+  webSocketClose(ws: WebSocket, code: number, reason: string) {
+    return logFailure("webSocketClose", async () => {
+      // 回一个 close 帧完成握手，不回的话对端要等 10 秒才算关闭。1005 / 1006 不能写进 close 帧。
+      try {
+        ws.close(code === 1005 || code === 1006 ? 1000 : code, reason);
+      } catch {
+        /* already closed */
+      }
+      await this.ensureLoaded();
+      await this.onDisconnect(ws);
+    });
   }
 
-  async webSocketError(ws: WebSocket) {
-    await this.ensureLoaded();
-    await this.onDisconnect(ws);
+  webSocketError(ws: WebSocket) {
+    return logFailure("webSocketError", async () => {
+      await this.ensureLoaded();
+      await this.onDisconnect(ws);
+    });
   }
 
-  async alarm() {
+  alarm() {
+    return logFailure("alarm", () => this.handleAlarm());
+  }
+
+  private async handleAlarm() {
     await this.ensureLoaded();
 
     const now = Date.now();
@@ -828,9 +847,7 @@ export class GameRoom implements DurableObject {
     const isFirst = this.joinOrder.length === 0;
     const player: PlayerAttachment = {
       id: crypto.randomUUID(),
-      name: (
-        playerName || `玩家${this.joinOrder.length + 1}`
-      ).slice(0, MAX_NAME_LENGTH),
+      name: (playerName || `玩家${this.joinOrder.length + 1}`).slice(0, MAX_NAME_LENGTH),
       ...(msg.playerToken ? { token: msg.playerToken } : {}),
     };
 
@@ -873,7 +890,10 @@ export class GameRoom implements DurableObject {
 
   /** 更新名册。只改内存，调用方负责 saveState。 */
   private rememberPlayer(player: PlayerAttachment) {
-    this.roster.set(player.id, { name: player.name, ...(player.token ? { token: player.token } : {}) });
+    this.roster.set(player.id, {
+      name: player.name,
+      ...(player.token ? { token: player.token } : {}),
+    });
   }
 
   /** 拒绝加入：先发错误消息（前端靠它显示原因），再带着客户端认识的 reason 关闭。 */
@@ -1376,9 +1396,7 @@ export class GameRoom implements DurableObject {
         type: "phaseChange",
         phase: "revealed",
         drawerId: this.drawerId!,
-        ...(this.pendingPromotionId
-          ? { pendingPromotionId: this.pendingPromotionId }
-          : {}),
+        ...(this.pendingPromotionId ? { pendingPromotionId: this.pendingPromotionId } : {}),
       });
     }
   }
@@ -1549,7 +1567,8 @@ export class GameRoom implements DurableObject {
     // 标记要是新鲜的：刷新时 beacon 可能比新页面的 join 晚到，落在已接管的新连接上，
     // 不能让这条连接之后的普通断线也只有短保留期。
     const graceMs =
-      player.quickLeaveAt !== undefined && Date.now() - player.quickLeaveAt < QUICK_LEAVE_MARK_TTL_MS
+      player.quickLeaveAt !== undefined &&
+      Date.now() - player.quickLeaveAt < QUICK_LEAVE_MARK_TTL_MS
         ? QUICK_LEAVE_GRACE_MS
         : RECONNECT_GRACE_MS;
 

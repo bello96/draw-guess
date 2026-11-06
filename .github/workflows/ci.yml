@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# deploy-plan.mjs 要读本工作流以前的运行记录
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  changes:
+    name: 判断要部署什么
+    runs-on: ubuntu-latest
+    outputs:
+      worker: ${{ steps.plan.outputs.worker }}
+      pages: ${{ steps.plan.outputs.pages }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # 和“上一次部署成功的提交”比，不只看这次 push：上一次没部署成功的改动会算进这一次
+      - id: plan
+        run: node .github/scripts/deploy-plan.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+
+  check:
+    name: 类型检查、Lint、单元测试、协议回归
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            worker/package-lock.json
+      - name: 安装依赖
+        run: |
+          npm ci
+          npm ci --prefix worker
+      - name: 类型检查（前端）
+        run: npx tsc --noEmit
+      - name: 类型检查（Worker）
+        working-directory: worker
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: 格式检查
+        run: npm run format:check
+      - name: 单元测试
+        run: npm test
+      - name: 协议回归（本地 workerd）
+        run: npm run test:protocol
+
+  # 浏览器回归耗时长，先不挡部署。在 CI 上稳定跑一段时间后，再加进部署的 needs。
+  browser:
+    name: 浏览器回归（不挡部署）
+    needs: changes
+    if: needs.changes.outputs.worker == 'true' || needs.changes.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            worker/package-lock.json
+      - name: 安装依赖
+        run: |
+          npm ci
+          npm ci --prefix worker
+      - name: 浏览器回归
+        run: npm run test:browser
+
+  # 协议变更要先上服务端（服务端兼容旧客户端，反过来不行），所以同一次运行里前端排在 Worker 后面。
+  # 每个目标一个 concurrency 组，不同运行的同一种部署排队、不并行。排队时被更新的运行挤掉的部署不会丢：
+  # 挤掉它的那次运行和“上一次部署成功的提交”比，会把它的改动一起部署。
+  # job 名字和 deploy-plan.mjs 里的 DEPLOY_JOBS 一致，改了要一起改。
+  deploy-worker:
+    name: Deploy Worker
+    needs: [changes, check]
+    if: >-
+      github.ref == 'refs/heads/master' && github.event_name != 'pull_request' &&
+      needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: production-worker
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: 安装依赖
+        run: npm ci --prefix worker
+      - name: 部署
+        working-directory: worker
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+
+  deploy-pages:
+    name: Deploy Pages
+    needs: [changes, check, deploy-worker]
+    # 这次没改 Worker 时 deploy-worker 是 skipped，不能挡住前端；Worker 部署失败时前端不上。
+    # 用 !cancelled() 而不是 always()：手动取消运行时这个 job 也要停下。
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/master' && github.event_name != 'pull_request' &&
+      needs.changes.outputs.pages == 'true' && needs.check.result == 'success' &&
+      (needs.deploy-worker.result == 'success' || needs.deploy-worker.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: production-pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            worker/package-lock.json
+      - name: 安装依赖
+        run: |
+          npm ci
+          npm ci --prefix worker
+      - name: 构建
+        run: npm run build
+      - name: 部署
+        # 用 worker 目录锁定的 wrangler，两个部署版本一致。
+        # 固定英文提交信息：默认取 git 提交信息，中文可能被 Pages 接口拒绝。
+        run: node worker/node_modules/wrangler/bin/wrangler.js pages deploy dist --project-name=draw-guess --branch=master --commit-message=ci-deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}

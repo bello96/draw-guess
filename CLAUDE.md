@@ -2,7 +2,7 @@
 
 本文件为 AI 助手（Claude Code 等）提供该仓库的上下文。人类阅读请直接看 `README.md`。
 
-> 项目：**🎨 我画你猜** · 双人实时画画猜词游戏
+> 项目：**🎨 我画你猜** · 2~6 人实时画画猜词游戏
 > 线上：https://draw-guess.dengjiabei.cn
 
 ---
@@ -12,7 +12,7 @@
 - **纯前端**：React 18 + TypeScript + Vite + Twind（CSS-in-JS Tailwind）
 - **后端**：Cloudflare Workers + Durable Objects（Hibernatable WebSocket + SQLite backend）
 - **实时通信**：WebSocket JSON 消息
-- **部署**：GitHub Actions → Cloudflare Pages（前端）+ Workers（后端）
+- **部署**：GitHub Actions（`ci.yml`）：检查通过后先部署 Workers（后端），再部署 Cloudflare Pages（前端）
 - **单仓库两个包**：根目录是前端，`worker/` 是后端，两边各自 `package.json` 与 `tsconfig.json`
 
 ## 二、目录结构
@@ -20,23 +20,29 @@
 ```
 ├── src/                          # 前端
 │   ├── main.tsx                  # 入口，Twind install
-│   ├── App.tsx                   # 顶层路由（首页 / 昵称弹窗 / 房间）
+│   ├── App.tsx                   # 顶层路由（首页 / 昵称弹窗 / 房间）；房间页懒加载
 │   ├── api.ts                    # apiUrl / wsUrl 工具
 │   ├── pages/
 │   │   ├── Home.tsx              # 创建 / 加入房间
 │   │   └── Room.tsx              # 主游戏页，消息分发 + 撤销/重做栈
 │   ├── components/
 │   │   ├── Canvas.tsx            # 画板容器 + 文字/形状/框选编辑 overlay
-│   │   ├── Toolbar.tsx           # 8 工具 + ColorPalette/CustomColorPanel 颜色选择 + undo/redo/clear
+│   │   ├── Toolbar.tsx           # 12 种工具 + ColorPalette/CustomColorPanel 颜色选择 + undo/redo/clear
 │   │   ├── PlayerBar.tsx         # 顶栏房间号、玩家、操作按钮
 │   │   ├── ChatPanel.tsx         # 聊天 / 设答案 / 猜词三合一输入
 │   │   ├── Confetti.tsx          # 猜对时的彩带雨（canvas + RAF）
-│   │   └── Toast.tsx             # 右上角错误提示（取代粗糙的 system message）
+│   │   ├── Toast.tsx             # 右上角错误提示（取代粗糙的 system message）
+│   │   └── ErrorBoundary.tsx     # 渲染出错、页面代码下载失败时的提示
 │   ├── hooks/
 │   │   ├── useWebSocket.ts       # WS 连接、重连、心跳、leave/pagehide
-│   │   └── useCanvas.ts          # 画布事件、笔画、归一化坐标、离屏缓存、flood fill
+│   │   └── useCanvas.ts          # 画布事件、笔画、归一化坐标、离屏画布
 │   ├── utils/
-│   │   └── color.ts              # normalizeColor（hex 字符串规范化）
+│   │   ├── color.ts              # normalizeColor（hex 字符串规范化）
+│   │   ├── textColor.ts          # 文本局部上色的区间计算
+│   │   ├── floodFill.ts          # 油漆桶算法（纯函数，只碰 RGBA 缓冲区）
+│   │   ├── brushes.ts            # 手绘笔型渲染器（普通笔、喷枪、蜡笔、水彩）
+│   │   ├── strokeReplay.ts       # 离屏重放：记录画到第几笔、检查点、分片
+│   │   └── handFont.ts           # 手写字体的样式表加载和字形下载
 │   ├── assets/                   # 图标源文件（SVG），当前用 inline path 镜像到 Toolbar
 │   └── types/protocol.ts         # ⭐ 前后端共享的消息类型契约
 ├── worker/
@@ -47,8 +53,12 @@
 │   │   ├── constants.ts          # 所有可调参数（grace、limits、protocol version）
 │   │   ├── validate.ts           # 客户端消息的入口校验（类型、范围、只留认识的字段）
 │   │   └── helpers.ts            # 纯函数 helpers（strokeKey, answerMatches）
-│   └── wrangler.toml             # durable_objects + routes
-└── .github/workflows/            # deploy-pages.yml / deploy-worker.yml
+│   └── wrangler.toml             # durable_objects + routes + 兼容日期 + 日志
+├── public/_headers               # Pages 响应头（CSP、HSTS、资源缓存）
+├── tests/
+│   ├── unit/                     # vitest：不依赖运行时的纯逻辑
+│   └── regression/               # 真实 workerd + 真实浏览器的断言式回归（见第二十一章）
+└── .github/workflows/ci.yml      # 检查 → 部署 Worker → 部署 Pages
 ```
 
 ## 三、核心设计要点
@@ -110,9 +120,9 @@ revealed       ← 可 "继续出题" 回到 drawing，或 "转让画笔" 切换
 - `OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT = 1600 × 960`（5:3，与 visible 比例一致）：实际离屏画布尺寸，2× 线性分辨率，曲线/油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible，显著减少阶梯锯齿
 - 两个常量解耦：visible 渲染用 `canvas.width / REF_WIDTH` 算 scale；offscreen 渲染用 `1600 / 800 = 2.0` 算 scale；最终 drawImage 缩到 visible 后两者视觉粗细一致
 
-### 7. 工具系统（8 种 + 编辑态）
+### 7. 工具系统（12 种 + 编辑态）
 
-工具栏左→右分 6 组（用竖线分隔）：油漆桶和框选移动各自独占一栏，把"区域填充"和"像素搬运"两类区别于规则形状的工具单独凸显。
+12 种工具见 `Toolbar.tsx` 的 `ToolMode`（下面的分组是早期版本，三角形、五角星、心形、橡皮擦是后来加的）。工具栏左→右分 6 组（用竖线分隔）：油漆桶和框选移动各自独占一栏，把"区域填充"和"像素搬运"两类区别于规则形状的工具单独凸显。
 ```
 [画笔 | 文本] │ [油漆桶] │ [矩形 | 椭圆 | 直线 | 箭头] │ [框选] │ [撤销 | 重做] │ [清除]
 ```
@@ -234,10 +244,16 @@ cd worker && npx wrangler dev
 4. 两端都要跑 `tsc --noEmit`
 
 ### 部署
-- 推 `master`：
-  - 改到 `worker/**` 外的文件 → 触发 Pages 部署
-  - 改到 `worker/**` → 触发 Worker 部署
-- 手动：`cd worker && npx wrangler deploy` / `npm run build && npx wrangler pages deploy dist`
+- 推 `master` 就上线（`ci.yml`）：先跑类型检查、Lint、格式检查、单元测试、协议回归，通过后部署，**同一次运行里 Worker 先于 Pages**。Worker 部署失败时前端不上
+  - 部署什么由 `.github/scripts/deploy-plan.mjs` 决定：和**这个目标上一次部署成功的提交**比，不只看这次 push。上一次检查没过、部署失败或被取消，它的改动会算进下一次。查不到记录就都部署
+  - 两个部署各有一个 concurrency 组，排队时被更新的运行挤掉的部署，会由挤掉它的那次运行一起部署
+  - 部署 job 的名字（Deploy Worker / Deploy Pages）是 deploy-plan.mjs 查记录用的，改名要一起改
+  - 改到 `worker/**` → 部署 Worker
+  - 改到 `worker/**`、`tests/**`、`docs/**`、`.github/**`、`.claude/**`、`*.md` 以外的文件 → 部署 Pages
+  - 浏览器回归也会跑，但目前不挡部署
+- 手动：`npm run deploy:worker` / `npm run deploy:pages`（Pages 按当前 git 分支决定环境：在 master 上是生产，其他分支是预览）
+- 响应头改 `public/_headers`（只对 Pages 生效，`/api/*` 归 Worker）。CSP 的 `connect-src` 写死了线上域名，换域名要同步
+- **不要给 `/assets/*` 加 immutable 或长 max-age**：Pages 对不存在的文件回退成 index.html（状态码 200），会带上同样的响应头，浏览器就把这份 HTML 当成那个 JS 缓存下来，回滚到同一个 hash 时刷新也加载不了。要加就先加 `404.html` 改掉回退，但房间链接 `/123456` 会变成 404，分享预览要先验证
 
 ---
 
@@ -259,12 +275,12 @@ cd worker && npx wrangler dev
 
 - ~~**P0**~~：全部已处理 — WebSocket 重连 ✅ / 桌面端定位 ✅ / 房间码冲突 ✅ / 输入长度限制 ✅
 - ~~**P1**~~：全部已处理 — WS 心跳 ✅ / 答案归一化 ✅ / draw RAF 批量 ✅ / strokes 分片存储 ✅
-- **P2**：Origin 白名单 ✅ / rate limit ✅ / 错误 Toast ✅ / 文字点击空白 commit ✅ / ESLint + Prettier ✅ / ~~状态机单测~~ ⏳
+- **P2**：Origin 白名单 ✅ / rate limit ✅ / 错误 Toast ✅ / 文字点击空白 commit ✅ / ESLint + Prettier ✅ / 状态机回归 ✅（`tests/regression`）
 - **P3**：协议版本号 ✅ / `room.ts` 拆文件 ✅ / ~~draw 二进制协议~~ ⏭ / 离屏 canvas 缓存 ✅ / Confetti 改 canvas 渲染 ✅
 
 > **为什么跳过 draw 二进制协议**：permessage-deflate 已经压掉 JSON 的冗余，实际带宽 <40 KB/s 峰值。手写 binary 协议需要前后端双端 encode/decode + bump 协议版本 + 维持 JSON fallback，工程成本大但收益边际。如果某天带宽成了瓶颈再做，现在不值。
 
-**输入长度硬限制（服务端常量 in `worker/src/room.ts`）**：
+**输入长度硬限制（服务端常量 in `worker/src/constants.ts`）**：
 - `MAX_NAME_LENGTH = 10`
 - `MAX_ANSWER_LENGTH = 20`
 - `MAX_CHAT_LENGTH = 200`（guess/chat 共用）
@@ -282,7 +298,8 @@ cd worker && npx wrangler dev
 
 旧客户端的 `end` 不带这个字段，服务端回退到缓存，颜色和线宽用 `end` 上的。缓存丢过 start（中途休眠）时内容不完整，广播就不带 `stroke`，对端用自己累积的点，别用残缺的覆盖掉。
 
-**渲染成本**：蜡笔、喷枪的成本和路径长度成正比，所以校验里限制单笔路径（`MAX_STROKE_PATH`），`move` 超过累计上限后不再转发，房间总量有预算（`strokeCost`）。对端每条 `move` 都要重画整条进行中的笔画，这个放大还没解决（第三批的增量渲染）。
+**渲染成本**：蜡笔、喷枪的成本和路径长度成正比，所以校验里限制单笔路径（`MAX_STROKE_PATH`），`move` 超过累计上限后不再转发，房间总量有预算（`strokeCost`）。对端的 `move` 按帧合并，一帧最多重绘一次；进行中的喷枪、蜡笔只补新线段（见第十二章）。
+
 **strokes 分片存储**：strokes 不再用单 key `"strokes"` 存，每条独立 key `stroke:0000000001` …，避免单值大小上限。关键点：
 - 写入：新笔画一律走 `commitStroke()`：put 单条 + 清 redo，同一批原子提交。超出房间预算时它返回 false，调用方不要广播
 - 撤销 / 重做：`onUndo` / `onRedo` 在 `stroke:` 和 `redo:` 之间搬一条，同样不在两次写之间 await
@@ -320,13 +337,13 @@ cd worker && npx wrangler dev
 
 **画板比例 5:3**：visible canvas 是 **5:3**（width:height）。`Canvas.tsx` 的 `resizeCanvas` **高度驱动**：先取 `container.clientHeight` 作为高度，宽度 = 高度 × 5/3；如果宽度溢出 container 就回退成宽度驱动（高度 = 宽度 × 3/5）。`container` 的 CSS 最小尺寸改成 `min-w-[667px] min-h-[400px]`（667 = 400 × 5/3）。
 
-**离屏 canvas 缓存**：`useCanvas.ts` 维护一个固定 **1600×960 (5:3，OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT)** 的 `offscreenRef`，作为"已完成笔画"的单一来源。2× 线性分辨率，曲线 / 油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible canvas，显著减少阶梯锯齿。所有 stroke end 分支（本地 onMouseUp / 远程 replayDraw 的 end / addTextStroke / addFill / addSelection）都会把完成的 stroke **commit 到 offscreen**。resize 时 Room 的 `handleCanvasResize` 调 `syncVisibleFromOffscreen`，直接 `drawImage(offs, 0, 0, canvas.width, canvas.height)` 一次 blit 搞定，**O(1)** 而不是 O(总点数) full replay。
+**离屏 canvas 缓存**：`useCanvas.ts` 维护一个固定 **1600×960 (5:3，OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT)** 的 `offscreenRef`，作为"已完成笔画"的单一来源。2× 线性分辨率，曲线 / 油漆桶在更高分辨率下渲染再 bilinear 下采样到 visible canvas，显著减少阶梯锯齿。所有完成的笔画（本地 onMouseUp / 远程 replayDraw 的 end / addTextStroke / addFill / addSelection / addShape）都走 `appendStroke` 画到 offscreen，可见画布只从 offscreen 同步（`syncVisibleFromOffscreen`）。resize 时 Room 的 `handleCanvasResize` 调 `repaintVisible`，一次 blit 再补画进行中的笔画，**O(1)** 而不是 O(总点数) full replay。
 
 关键约束：
 - offscreen 尺寸固定 1600×960（OFFSCREEN_WIDTH × OFFSCREEN_HEIGHT，比例 5:3）；REF_WIDTH=800 是用于 lineWidth/字号缩放的「逻辑参考」，与离屏物理尺寸**解耦**。`scaleLineWidth` clamp 范围 0.5~**2.0**（上限 2.0 是为了让 offscreen 的 1600/800 = 2× 倍率不被钳掉，否则 commit 后线突然变细）
 - aspect ratio 必须与 visible 一致，否则图形会被拉伸；`Canvas.tsx` 的 `RATIO_W/RATIO_H = 5/3` 必须等于 `OFFSCREEN_WIDTH:OFFSCREEN_HEIGHT`
 - **live drawing（mousemove 中）不写 offscreen**，只在 stroke end 时 flush —— 如果用户一边 resize 一边还在画，当前未完成的 in-progress stroke 的已绘像素会丢失。这种 edge case 不处理（用户几乎不会这样操作）
-- `replayAll` / `clearCanvas` / `undo` 仍然 O(N)（rebuild offscreen），因为 canvas 无法"反绘"某条笔画
+- canvas 无法"反绘"某条笔画，撤销、删除要回到更早的状态再往后画。怎么做到不从头画见第二十章
 - **改画板比例要三处联动**：Canvas.tsx 的 `RATIO_W/RATIO_H`、useCanvas 的 `OFFSCREEN_WIDTH/OFFSCREEN_HEIGHT`、字号/线宽参考 `REF_WIDTH`
 
 **Confetti 性能版**：`src/components/Confetti.tsx` 是单 canvas + requestAnimationFrame 粒子系统，替代了旧版 150 confetti DOM + 16 rocket × 60 粒子 ≈ **1100 个 DOM 节点 + CSS 动画**。现在只有一个 `<canvas fixed inset-0 pointer-events-none>`。
@@ -343,8 +360,6 @@ cd worker && npx wrangler dev
 **bump 流程**：同时改两个文件的常量（目前是 1 → 2），push 服务端再 push 前端。服务端先上比前端先上更安全：老客户端被服务端拒绝 + 提示刷新 → 用户刷新拿到新客户端 → OK。
 
 **legacy grace**：当前服务端对 `clientVersion == null` 豁免（兼容 P3-1 部署瞬间在线的老客户端）。**当确认线上没有无 v 字段的客户端后，把 `if (clientVersion != null && …)` 里的 null 分支去掉，改成严格相等**。这一步别忘，否则 version 校验永远有漏洞。
-
-修改前建议先阅读仓库根的《全面分析报告》（会话历史里的那次完整输出），里面有每条问题对应的代码位置和修复思路。
 
 ---
 
@@ -410,11 +425,11 @@ cd worker && npx wrangler dev
 
 **协议**：`C_Fill` / `S_Fill`：`{ x, y, color, tolerance }`。`SerializedStroke.fill = { tolerance }`，`stroke.points = [{x, y}]` 存种子。
 
-**算法**（`useCanvas.ts` 的 `scanlineFill`）：标准 scanline flood fill（4-邻域 + span tracking + 早返检查 target == fill）。tolerance per-channel（默认 32）。
+**算法**（`src/utils/floodFill.ts` 的 `scanlineFill`，单测在 `tests/unit/floodFill.test.ts`）：标准 scanline flood fill（4-邻域 + span tracking + 早返检查 target == fill）。tolerance per-channel（默认 32）。
 
 **边缘抗锯齿**（`antiAliasFillEdges`）：scanline 完成后做一遍 1px 边界 alpha 混合 pass：
-- 遍历所有未填充像素
-- 若有任意 4 邻居是填充色，按「该像素离背景色的最大通道距离」算 α（FALLOFF=96）
+- 只遍历填充区域的包围盒外扩 1px，写回画布时也只写这块（`floodFill` 返回脏矩形）
+- 未填充像素若有任意 4 邻居是**这次涂到的**（看 visited，不看颜色，否则别处的同色块每填一次就外扩一圈），按「该像素离背景色的最大通道距离」算 α（FALLOFF=96）
 - alpha-blend 填充色到该像素，消除填充与抗锯齿描边之间的 1~2px 白晕
 - 双端确定性：纯整数运算 + Uint8ClampedArray clamp，A/B 两端跑出的像素完全一致，不需要传位图
 
@@ -435,11 +450,15 @@ cd worker && npx wrangler dev
 **修法**（`tool === "pen"` 块）：
 - `onMouseDown`：仅记录起点 + send `start`，不动 ctx
 - `onMouseMove`：push 点到 `currentStrokeRef.points` + `pendingPointsRef`，scheduleFlush
-- `flushPendingMove`（RAF 帧）：距上次发送满 16ms 才 send 网络批量 move（否则点留在队列，下一帧再试），然后 `syncVisibleFromOffscreen()`（committed strokes）+ `drawInProgressStroke()`（当前 stroke 一次性 beginPath + 所有 lineTo + stroke）。**每帧重画 = 每个像素只涂一次**
-- `onMouseUp`：commitToOffscreen + syncVisibleFromOffscreen + send end
+- `flushPendingMove`（RAF 帧）：距上次发送满 16ms 才 send 网络批量 move（否则点留在队列，下一帧再试），然后 `paintLiveStroke()`：先 `syncVisibleFromOffscreen()` 恢复底图，再把当前 stroke 一次性 beginPath + 所有 lineTo + stroke。**每帧重画 = 每个像素只涂一次**
+- `onMouseUp`：appendStroke + syncVisibleFromOffscreen + send end（end 带整笔）
 - `replayDraw`（peer 端）同样改成「sync offscreen + 重绘 in-progress」
 
 **代价**：每 RAF 帧多一次 `drawImage(offs, 0, 0, w, h)`（~0.5ms 量级 @ 1067px wide）+ 一次完整路径重绘。60fps 持续 ~30ms/sec，可忽略。
+
+**喷枪、蜡笔例外**：它们的成本和路径长度成正比，整条重画一笔长了就卡（4000 点时观战端主线程占用 700~900 ms/s）。这两种笔的散点只取决于线段的绝对序号和坐标，所以只补新线段，结果和整条重画逐像素相同（`renderBrushSegments`）。上一帧的像素留在可见画布上，可见画布被整张覆盖（`showOffscreen`）时 `liveStrokeRef` 清空，下一帧从头补画。水彩有模糊和透明度，不能增量。
+
+**对端按帧合并**：`replayDraw` 收到 `move` 只累积点，`requestAnimationFrame` 里才画，消息来得再快一帧也只重绘一次。`end` 取消挂起的帧。
 
 ---
 
@@ -550,7 +569,7 @@ ref 模式：每次 render 重新赋值 `messageHandlerRef.current = (msg) => { 
 - 节流跳过 alarm 重设可能让 alarm 比真实理想触发时间略早 30s，但 alarm 末尾的 `scheduleNextAlarm` 会重新基于内存里最新 `lastActivityAt` 推到下一次合适时间，最终销毁时刻仍准确。
 
 ### 房间销毁与闲置回收
-销毁房间统一走 `resetRoom()`：重置内存 + `deleteAlarm()` + `deleteAll()`。alarm 要显式先删：当前兼容日期早于 2026-02-24，`deleteAll` 不删 alarm。销毁后不要再调 `saveState`，否则会把 key 写回去。
+销毁房间统一走 `resetRoom()`：重置内存 + `deleteAll()`（从兼容日期 2026-02-24 起连 alarm 一起删）。销毁后不要再调 `saveState`，否则会把 key 写回去。
 
 闲置回收的约定：
 - `/init` 就记 `lastActivityAt` 并设 alarm，从未有人加入的房间到期也会被回收
@@ -576,8 +595,8 @@ ref 模式：每次 render 重新赋值 `messageHandlerRef.current = (msg) => { 
 > 1. `hairline` 实际取 `#ebebeb`（DESIGN.md 的 `#e0e0e0` 偏深一档，用户反馈调浅）
 > 2. `shadow-product` 实际取 `rgba(0, 0, 0, 0.10) 2px 4px 20px`（轻于 DESIGN.md 的
 >    `0.22 / 3px 5px 30px` 约 60%）
-> 3. **保留 `src/assets/bg.png`**：首页 + 模态框背景仍走 bg.png（19.3 的"删除背景图"
->    步骤被回退）。`bg-canvas` / `bg-canvas-parchment` 不要再覆盖到这两处
+> 3. **保留背景图**：首页 + 模态框背景仍走 `src/assets/bg.webp`（19.3 的"删除背景图"
+>    步骤被回退，2026-11 从 412 KB 的 bg.png 压成 30 KB 的 WebP）。`bg-canvas` / `bg-canvas-parchment` 不要再覆盖到这两处
 > 4. **字体逻辑试做又整体撤销**：`@font-face` + `font-fun` / Douyin / Zcool 已 100%
 >    移除；当前 `fontFamily` 只有 SF Pro Display / Text 系统栈。`src/assets/font/` 下
 >    两份 ttf/otf 仍在仓库，需要再启用时直接接 `fonts.css` + Twind theme `fontFamily`
@@ -744,5 +763,49 @@ font-bold → font-semibold（除非是真正的 700 层级，比如 hero）
 - **保留 `@uiw/react-color` 的内部样式**（已在 ignorelist 配置）。
 - **错误提示色** `bg-red-50 text-red-600` 保留不动（DESIGN.md 已知 gap，无规范）。
 - **emoji** 🎨 / 🏠 等保留——Apple 系统也用平台 emoji，不必删。
-- 改造完成前**不要删除 `src/assets/bg.png`**，等所有引用清除并验收通过后再删。
+- ~~改造完成前不要删除 `src/assets/bg.png`~~：2026-11 已换成 `bg.webp`（见上面的进度说明第 3 条）。
 5. 改造任何组件前，先 grep 现有色值/字号，统一替换为 DESIGN.md 中的 token
+
+---
+
+## 二十、离屏重放（strokeReplay.ts）
+
+`strokesRef` 是目标，`StrokeReplay` 记着离屏上实际画到了哪一笔，`sync()` 负责追上去。**所有改离屏的路径都走它**，不要绕过去直接画：
+
+- 目标只是多了几笔（落笔、重做）：往后画
+- 目标变短或中间变了（撤销、删除）：按对象引用找公共前缀，回到最近的检查点，只补后面的部分。`roomState` 的笔画都是新对象，公共前缀是 0，全量重放
+- **检查点**：距上一个累计渲染超过 20ms 存一张快照（1600×960 约 6 MB），最多 6 张。到上限时淘汰“去掉后留下的空档相对离末尾的距离”最小的那张，所以离末尾近的密、远的疏
+- **分片**：`pumpReplay` 每片最多 12ms，画不完用 MessageChannel 让出主线程（定时器在后台标签页会被限流）。画完之前**可见画布的底图是开始重放前冻结的那一帧**（`frozenFrameRef`），`syncVisibleFromOffscreen` 画的是它，进行中的笔画、形状预览、框选预览都画在它上面，不会露出半成品，也不会叠画。途中提交的笔画 push 进 `strokesRef` 排队，同时先画到冻结帧上，提交了马上看得到；油漆桶和框选要读像素，提交时直接 `flushReplay` 画完。要读离屏像素的 `beginSelection` 也先 `flushReplay`。**不要在别处直接把 offscreenRef 画到可见画布上**，统一走 `syncVisibleFromOffscreen`
+
+**taint**：离屏上有 `rendered` 推不出来的像素（框选把来源涂白了），下一次 `sync` 必须先恢复。提交框选时粘贴的结果和重放相同，`noteRendered` + `untaint`。框选已经被作废（重连收到全量状态，来源像素画回去了）时 `commitLocalSelection` 返回 false，不粘贴也不发消息：Room 的全局 mousedown 监听在 React 卸载它之前还可能触发一次提交。删除框选内容是 `releaseLocalSelection` + `addShape`，sync 时恢复再画白矩形，结果也和重放相同。
+
+**字体**：`refreshTextStrokes` 只重画第一条文字之后的部分（`invalidateFrom`），没有文字就不重画。一批字体接连到达时合并成一次（100ms）；没加载出任何字体的 `loadingdone` 不处理。样式表到达时只给已有文字补发字体下载，下载完再重画一次。框选悬空时字体到了，等框选结束再补（`fontRefreshPendingRef`）。
+
+**坑**：
+- 临时画布（框选的 patch）**必须** `willReadFrequently: true`。少了它离屏会走另一条光栅路径（边缘量化到 1/4 像素），后来者和实时观众的抗锯齿边缘不一致，以前的低分辨率比对看不出来
+- 快照和恢复用 `copy` 合成，保证和全量重放逐像素相同。`browser-batch3` 的测试比的是离屏的完整 hash（`T.offHash`），改渲染路径时跑一下
+- 单笔渲染不可分片，极长的一笔还是会有长任务
+
+## 二十一、测试
+
+```bash
+npm test                # vitest 单测，1 秒
+npm run test:protocol   # 协议回归：本地 workerd，约 5 分钟，会起停 8787
+npm run test:browser    # 浏览器回归：本地 workerd + 无头 Chromium，约 25 分钟
+node tests/regression/run.cjs browser batch3   # 只跑一个脚本；单个脚本还能带组名正则
+```
+
+- 回归脚本都是断言式，退出码 = 失败条数。产物在 `tests/regression/.tmp`（已忽略）
+- 本机 VC++ 运行库过旧时 workerd 会崩，设 `MINIFLARE_WORKERD_PATH` 指向带新版 DLL 的副本。浏览器路径用 `BROWSER_PATH` 指定
+- 改 Worker 时别同时跑浏览器测试：`wrangler dev` 会热更新，正在跑的结果作废
+- 测试只访问本机，不要对线上建房或连 WebSocket
+- **修 bug 时先写测试，确认在旧代码上红灯；修完用变异核实测试真能抓到问题**（`build-client.mjs` 的插件写法可以在内存里改源码）。这个项目吃过测试不灵敏的亏：等待时间卡在边界上、比较的内容没变化
+
+## 二十二、Worker 配置和日志
+
+- `compatibility_date = "2026-07-15"`。再往后（2026-08-04）会默认打开 `nodejs_compat`，升级前读兼容标志的变更，再跑协议回归
+- 这个日期之后 `deleteAll` 连 alarm 一起删，`close()` 的 reason 不能超过 123 字节
+- `webSocketClose` 里的 `ws.close()` **不要删**：文档说兼容日期 2026-04-07 起运行时会自动回 close 帧，但本地 workerd（2026-11-03）的 Hibernation 下实测不回，对端要等 10 秒以上才算关闭
+- `workers_dev = false`：只有 `/api/*` 路由一个入口
+- 前端 `useWebSocket` 卸载时**不发 leave**，只关连接：主动离开由 Room 的 `handleLeave` 显式调 `leave()`。渲染出错时 ErrorBoundary 会卸掉 Room，这时按普通断线处理，席位有保留期，刷新能回到原身份
+- **线上不记调用日志**（`invocation_logs = false`）：每条 WebSocket 消息都算一次调用，一局就能用完每天的日志额度。所以 DO 和 Worker 的入口都包了 `logFailure`，出错时 `console.error`（Workers Logs 能查到）。日志里不要写用户内容

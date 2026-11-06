@@ -1,0 +1,10 @@
+# Cloudflare Pages 响应头。/api/* 由 Worker 处理，不走这里。
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.dengjiabei.cn; font-src https://fonts.dengjiabei.cn; img-src 'self' data:; connect-src 'self' wss://draw-guess.dengjiabei.cn; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'
+  Strict-Transport-Security: max-age=2592000
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# 不给 /assets/* 加长缓存：Pages 对不存在的文件回退成 index.html（状态码 200），会带上同样的头，
+# 浏览器就把这份 HTML 当成那个 JS 缓存下来。之后回滚到同一个 hash，用户刷新也加载不了页面。

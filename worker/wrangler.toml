@@ -1,7 +1,9 @@
 name = "draw-guess-worker"
 main = "src/index.ts"
-compatibility_date = "2024-12-05"
-workers_dev = true
+# 再往后（2026-08-04）会默认打开 nodejs_compat。升级前读兼容标志的变更，再跑协议回归。
+compatibility_date = "2026-07-15"
+# 只留 /api/* 路由一个入口
+workers_dev = false
 
 routes = [
   { pattern = "draw-guess.dengjiabei.cn/api/*", zone_name = "dengjiabei.cn" }
@@ -23,6 +25,14 @@ simple = { limit = 30, period = 60 }
 name = "CONNECT_LIMITER"
 namespace_id = "39102"
 simple = { limit = 240, period = 60 }
+
+# 线上报错到 Workers Logs 查。不记调用日志：每条 WebSocket 消息都算一次调用，一局就能用完
+# 每天的日志额度。错误由入口的 logFailure 用 console.error 记。
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = false
 
 [[migrations]]
 tag = "v1"

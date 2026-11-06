@@ -11,8 +11,8 @@ import {
   svgPathStar,
   svgPathHeart,
   getStrokeBBoxPx,
-  HAND_FONT_FAMILY,
 } from "../hooks/useCanvas";
+import { HAND_FONT_FAMILY } from "../utils/handFont";
 
 type Point = { x: number; y: number };
 

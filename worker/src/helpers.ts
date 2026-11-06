@@ -23,6 +23,19 @@ export function pathLength(points: { x: number; y: number }[]): number {
   return length;
 }
 
+/**
+ * 入口统一记错误。线上不记调用日志（见 wrangler.toml），没有这个就查不到报错。
+ * 只记入口名和异常本身，不写消息内容。错误继续往外抛，行为和不包一样。
+ */
+export async function logFailure<T>(where: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    console.error(`${where} failed`, err);
+    throw err;
+  }
+}
+
 const strokeCosts = new WeakMap<SerializedStroke, number>();
 
 /**

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { tx } from "@twind/core";
 import { apiUrl } from "../api";
-import bgUrl from "../assets/bg.png";
+import bgUrl from "../assets/bg.webp";
 // apiUrl used only for room creation
 
 interface Props {

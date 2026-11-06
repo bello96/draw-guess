@@ -253,11 +253,10 @@ export function useWebSocket(roomCode: string, playerName: string, playerId?: st
       window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("pageshow", onPageShow);
 
+      // 这里不发 leave：主动离开由调用方用 leave() 显式通知。其他原因卸载（比如渲染出错，
+      // ErrorBoundary 换成提示页）按普通断线处理，席位有保留期，刷新还能回来。
       const ws = wsRef.current;
       if (ws) {
-        if (ws.readyState === WebSocket.OPEN && !isUnloadingRef.current && !hasLeftRef.current) {
-          ws.send(JSON.stringify({ type: "leave" }));
-        }
         try {
           ws.close();
         } catch {

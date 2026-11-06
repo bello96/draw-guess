@@ -10,6 +10,15 @@ import type {
 import { MAX_STROKE_PATH, MAX_STROKE_POINTS } from "../types/protocol";
 import type { FillMode, ToolMode } from "../components/Toolbar";
 import { lineSegments } from "../utils/textColor";
+import {
+  HAND_FONT_FAMILY,
+  kickHandFontLoad,
+  loadHandFonts,
+  loadHandFontStylesheet,
+} from "../utils/handFont";
+import { floodFill } from "../utils/floodFill";
+import { isIncrementalBrush, renderBrushSegments, renderBrushStroke } from "../utils/brushes";
+import { StrokeReplay, type ReplaySurface } from "../utils/strokeReplay";
 
 type Point = { x: number; y: number };
 
@@ -76,35 +85,6 @@ const MIN_SCALE = 0.5;
 // visible canvas 通常 667~1067px（5:3，667 是 CSS min），仍不触上限。
 const MAX_SCALE = 2.0;
 
-// 画板文本的手写字体栈：Excalifont 覆盖英文/数字，Xiaolai（小赖体）覆盖中文。
-// 字体由自托管 CDN 提供（index.html 引入 fonts.dengjiabei.cn/hand.css），按
-// unicode-range 子集懒加载；CDN 不可达时回退 cursive / 系统字体。
-export const HAND_FONT_FAMILY = '"Excalifont", "Xiaolai", cursive';
-
-// document.fonts.check / load 用的探针串。故意不含 cursive：generic family
-// 永远视作已加载，带上它 check() 恒为 true，真正需要的网络加载会被跳过。
-const HAND_FONT_PROBE = '16px "Excalifont", "Xiaolai"';
-
-/**
- * 触发 text 所需手写字体子集的下载。canvas 的 fillText 不像 DOM 文本那样会
- * 自动触发 @font-face（unicode-range 子集）加载，必须显式 load；加载完成后
- * 由 useCanvas 里的 "loadingdone" 监听统一重建离屏，把回退字形换成手写体。
- */
-function kickHandFontLoad(text: string): void {
-  if (typeof document === "undefined" || !document.fonts) {
-    return;
-  }
-  try {
-    if (!document.fonts.check(HAND_FONT_PROBE, text)) {
-      document.fonts.load(HAND_FONT_PROBE, text).catch(() => {
-        // CDN 不可达：维持回退字体渲染，不重试不报错
-      });
-    }
-  } catch {
-    // 老浏览器无 FontFaceSet API：直接用回退字体
-  }
-}
-
 // Physical offscreen canvas dimensions (5:3). Larger than REF for finer
 // anti-aliasing on curves: pen strokes are rendered at 2× linear resolution,
 // then downsampled when blitted onto the visible canvas (which is typically
@@ -113,6 +93,70 @@ function kickHandFontLoad(text: string): void {
 // Aspect ratio MUST match RATIO_W:RATIO_H in Canvas.tsx and REF_WIDTH:REF_HEIGHT.
 const OFFSCREEN_WIDTH = 1600;
 const OFFSCREEN_HEIGHT = 960;
+
+// 重放每一片最多占用主线程多久。超过就让出去，下一片接着画。
+const REPLAY_SLICE_MS = 12;
+
+// 让出主线程。不用定时器：后台标签页的定时器会被限流到每秒一次，重放要很久才能追上。
+function yieldToMain(fn: () => void): void {
+  const { port1, port2 } = new MessageChannel();
+  port1.onmessage = () => {
+    port1.close();
+    fn();
+  };
+  port2.postMessage(null);
+}
+
+function createOffscreenCanvas(): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = OFFSCREEN_WIDTH;
+  canvas.height = OFFSCREEN_HEIGHT;
+  return canvas;
+}
+
+// 整张覆盖，和当前画布内容、合成状态都无关，恢复出来的像素和快照完全相同。
+function copyCanvasInto(ctx: CanvasRenderingContext2D, source: HTMLCanvasElement): void {
+  ctx.save();
+  ctx.globalCompositeOperation = "copy";
+  ctx.globalAlpha = 1;
+  ctx.filter = "none";
+  ctx.drawImage(source, 0, 0);
+  ctx.restore();
+}
+
+function offscreenSurface(
+  offs: HTMLCanvasElement,
+  offCtx: CanvasRenderingContext2D,
+): ReplaySurface<HTMLCanvasElement> {
+  return {
+    snapshot(reuse) {
+      const snapshot = reuse ?? createOffscreenCanvas();
+      const ctx = snapshot.getContext("2d", { willReadFrequently: true });
+      if (ctx) {
+        copyCanvasInto(ctx, offs);
+      }
+      return snapshot;
+    },
+    restore(snapshot) {
+      if (snapshot) {
+        copyCanvasInto(offCtx, snapshot);
+        return;
+      }
+      offCtx.save();
+      offCtx.globalCompositeOperation = "source-over";
+      offCtx.globalAlpha = 1;
+      offCtx.filter = "none";
+      offCtx.fillStyle = "#ffffff";
+      offCtx.fillRect(0, 0, offs.width, offs.height);
+      offCtx.restore();
+    },
+    discard(snapshot) {
+      // 释放像素存储，不用等 GC
+      snapshot.width = 0;
+      snapshot.height = 0;
+    },
+  };
+}
 
 export function scaleLineWidth(baseWidth: number, canvasWidth: number): number {
   const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, canvasWidth / REF_WIDTH));
@@ -573,247 +617,6 @@ function drawLine(
   ctx.stroke();
 }
 
-/**
- * 确定性伪随机：对相同 (x, y, n) 返回相同值。两端用同一公式渲染相同点序，
- * 散点位置完全一致，无需通过协议传随机数据。返回 [0, 1)。
- */
-function pseudoRandom(x: number, y: number, n: number): number {
-  const s = Math.sin(x * 12.9898 + y * 78.233 + n * 37.719) * 43758.5453;
-  return s - Math.floor(s);
-}
-
-/** 普通画笔：实色 round-cap stroke，沿点序连线。 */
-function renderPenBrush(
-  ctx: CanvasRenderingContext2D,
-  pts: Point[],
-  color: string,
-  lw: number,
-): void {
-  if (pts.length === 0) {
-    return;
-  }
-  ctx.beginPath();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = lw;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  for (let i = 0; i < pts.length; i++) {
-    if (i === 0) {
-      ctx.moveTo(pts[i].x, pts[i].y);
-    } else {
-      ctx.lineTo(pts[i].x, pts[i].y);
-    }
-  }
-  ctx.stroke();
-}
-
-/**
- * 喷枪：仿 Windows 画图工具 —— 大量小点 + **均匀**面积分布（关键 bug 修复）。
- *
- * 之前误用 r = R · u² 让小 r 出现概率高 → 每个 stamp 中心比外围密 → 沿路径
- * 所有 stamp 中心连成一条可见的实线。改成 r = R · √u（u² 的反函数）让点
- * 在 disc 内**按面积均匀分布**：径向各处单位面积内点数相同，无中心偏置。
- *
- * 配合上层在 hold-still 时由 setInterval 持续把 lastPos 加进 stroke 的逻辑：
- * 移动快 → stamp 间隔大 → 浓度低；移动慢/不动 → stamp 在同一处叠加 → 浓度
- * 按时间累积，匹配 Win Paint 的「按住一直喷」体感。
- */
-function renderAirbrush(
-  ctx: CanvasRenderingContext2D,
-  pts: Point[],
-  color: string,
-  lw: number,
-): void {
-  if (pts.length < 1) {
-    return;
-  }
-  ctx.fillStyle = color;
-  const radius = lw * 1.8;
-  const stride = Math.max(1.0, lw * 0.5); // 加大步长，避免相邻 stamp 在路径上重叠形成中心线
-  const dotsPerPos = 14;
-  const dotSize = Math.max(0.5, lw * 0.18);
-
-  /** 在 (cx, cy) 撒一坨散点；segIdx 用作 PRNG 域，保证不同 stamp 散点不同。 */
-  const stampAt = (cx: number, cy: number, segIdx: number, stepIdx: number) => {
-    for (let d = 0; d < dotsPerPos; d++) {
-      const angle = pseudoRandom(segIdx, stepIdx, d) * Math.PI * 2;
-      const u = pseudoRandom(segIdx + 7919, stepIdx, d * 3 + 1);
-      // 均匀面积分布：r = R·√u（与之前的 u² 完全相反，去除中心线 bug）
-      const r = Math.sqrt(u) * radius;
-      const px = cx + Math.cos(angle) * r;
-      const py = cy + Math.sin(angle) * r;
-      const alpha = 0.55 + pseudoRandom(segIdx + 31337, stepIdx, d) * 0.3;
-      ctx.globalAlpha = alpha;
-      ctx.fillRect(px - dotSize / 2, py - dotSize / 2, dotSize, dotSize);
-    }
-  };
-
-  // 单点的 stroke（hold-still 第一帧 / 或所有点重合的 0 长度连续 stamp）
-  if (pts.length === 1) {
-    stampAt(pts[0].x, pts[0].y, 0, 0);
-    ctx.globalAlpha = 1;
-    return;
-  }
-
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[i];
-    const p1 = pts[i + 1];
-    const dx = p1.x - p0.x;
-    const dy = p1.y - p0.y;
-    const dist = Math.hypot(dx, dy);
-    // 0 长度 segment（hold-still 时同一坐标重复入队）：按 1 步处理，
-    // 不同 i 的 PRNG 域保证每帧叠新点，浓度自然累积。
-    if (dist < 0.01) {
-      stampAt(p0.x, p0.y, i, 0);
-      continue;
-    }
-    const steps = Math.max(1, Math.floor(dist / stride));
-    for (let s = 0; s < steps; s++) {
-      const t = s / steps;
-      const cx = p0.x + dx * t;
-      const cy = p0.y + dy * t;
-      stampAt(cx, cy, i, s);
-    }
-  }
-  ctx.globalAlpha = 1;
-}
-
-/**
- * 蜡笔：完全不画核心实线（旧版的细黑实线让蜡笔看起来更像「描边+稀疏喷枪」，
- * 用户反馈太丑）。改成沿路径密集铺颗粒，跨垂直方向均匀分布；颗粒大小、alpha
- * 都随 PRNG 抖动，靠堆叠和重叠形成中间近实色 + 边缘自然散开的鳞片感纹理。
- */
-function renderCrayon(
-  ctx: CanvasRenderingContext2D,
-  pts: Point[],
-  color: string,
-  lw: number,
-): void {
-  if (pts.length < 2) {
-    return;
-  }
-  ctx.fillStyle = color;
-  const halfW = lw * 1.0; // 总宽 ~2 lw（粗壮）
-  const stride = Math.max(0.6, lw * 0.18); // 极密采样 = 颗粒重叠多，中间近实色
-  const grainsPerPos = 6;
-  const grainSize = lw * 0.4; // 颗粒尺寸随 lw scale
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[i];
-    const p1 = pts[i + 1];
-    const dx = p1.x - p0.x;
-    const dy = p1.y - p0.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 0.2) {
-      continue;
-    }
-    const ux = dx / dist;
-    const uy = dy / dist;
-    const perpX = -uy;
-    const perpY = ux;
-    const steps = Math.max(2, Math.floor(dist / stride));
-    for (let s = 0; s < steps; s++) {
-      const t = s / steps;
-      const cx = p0.x + dx * t;
-      const cy = p0.y + dy * t;
-      for (let g = 0; g < grainsPerPos; g++) {
-        const u = pseudoRandom(i, s, g) * 2 - 1; // [-1, 1) 均匀
-        const offset = u * halfW;
-        const along = (pseudoRandom(i + 12345, s, g) - 0.5) * stride * 1.6;
-        const gx = cx + perpX * offset + ux * along;
-        const gy = cy + perpY * offset + uy * along;
-        // 颗粒尺寸 + alpha 抖动 = 不规则鳞片纹理
-        const sz = grainSize * (0.6 + pseudoRandom(i + 9001, s, g + 11) * 0.7);
-        // 中心 alpha 高 / 边缘 alpha 低 + 颗粒间随机抖动
-        const dist01 = Math.abs(u);
-        const alpha = (1 - dist01 * 0.6) * (0.55 + pseudoRandom(i + 31337, s, g + 23) * 0.4);
-        ctx.globalAlpha = alpha;
-        ctx.fillRect(gx - sz / 2, gy - sz / 2, sz, sz);
-      }
-    }
-  }
-  ctx.globalAlpha = 1;
-}
-
-/**
- * 水彩笔：仿 Windows 画图工具的「湿润」笔触感。
- *
- * 关键技术：用 ctx.filter = "blur(...)" 给外层柔边 stroke 加 Gaussian 模糊，
- * 形成自然的边缘渐隐（替代旧版 2/3 层硬叠加 —— 那种讨巧叠加会在小 lw 下
- * 出现可见的同心环 / 双线空心，而 blur 是连续 Gaussian 衰减，无阶梯感）。
- *
- * 之后再叠一层不模糊的稍窄核心，得到「软边 + 实心」的湿笔触观感。
- *
- * 跨端一致：blur(Npx) 是 W3C Filter Effects 规范定义的高斯模糊；现代
- * Chromium / Firefox / Safari 实现一致，blit 后视觉相同。blur 半径按
- * scaledLineWidth 比例 scale，offscreen→visible 缩放后视觉一致。
- */
-function renderWatercolor(
-  ctx: CanvasRenderingContext2D,
-  pts: Point[],
-  color: string,
-  lw: number,
-): void {
-  if (pts.length === 0) {
-    return;
-  }
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = color;
-
-  const drawPath = () => {
-    ctx.beginPath();
-    for (let i = 0; i < pts.length; i++) {
-      if (i === 0) {
-        ctx.moveTo(pts[i].x, pts[i].y);
-      } else {
-        ctx.lineTo(pts[i].x, pts[i].y);
-      }
-    }
-    ctx.stroke();
-  };
-
-  // 外层柔边：模糊 stroke 形成 Gaussian 衰减边缘
-  const prevFilter = ctx.filter;
-  const blurRadius = Math.max(0.5, lw * 0.32);
-  ctx.filter = `blur(${blurRadius}px)`;
-  ctx.globalAlpha = 0.55;
-  ctx.lineWidth = lw * 1.1;
-  drawPath();
-  ctx.filter = prevFilter;
-
-  // 核心：不模糊、稍窄、深一些 —— 形成实心笔触感
-  ctx.globalAlpha = 0.7;
-  ctx.lineWidth = lw * 0.55;
-  drawPath();
-
-  ctx.globalAlpha = 1;
-}
-
-/** 根据 brushType 派发到具体笔型渲染器。导出供 Toolbar 画笔选择 popover 的 preview 复用。 */
-export function renderBrushStroke(
-  ctx: CanvasRenderingContext2D,
-  pts: Point[],
-  color: string,
-  scaledLineWidth: number,
-  brushType: BrushType | undefined,
-): void {
-  switch (brushType) {
-    case "airbrush":
-      renderAirbrush(ctx, pts, color, scaledLineWidth);
-      return;
-    case "crayon":
-      renderCrayon(ctx, pts, color, scaledLineWidth);
-      return;
-    case "watercolor":
-      renderWatercolor(ctx, pts, color, scaledLineWidth);
-      return;
-    case "pen":
-    case undefined:
-    default:
-      renderPenBrush(ctx, pts, color, scaledLineWidth);
-  }
-}
-
 /** Parse "#rrggbb" / "#rgb" / "#rrggbbaa" / "#rgba" to [r,g,b,a]. */
 function hexToRgba(hex: string): [number, number, number, number] {
   let h = hex.replace("#", "");
@@ -830,185 +633,6 @@ function hexToRgba(hex: string): [number, number, number, number] {
   return [r, g, b, a];
 }
 
-/**
- * Scanline flood fill in-place on a RGBA pixel buffer. Replaces all pixels
- * connected to (sx, sy) whose color is within per-channel `tolerance` of the
- * seed color with (fr,fg,fb,255). O(N) worst case.
- *
- * Already-filled pixels naturally fail the `matches` test (they've been
- * rewritten to fill color, which is only equal to the target if we bailed
- * early at the caller), so no explicit visited set needed.
- */
-function scanlineFill(
-  data: Uint8ClampedArray,
-  w: number,
-  h: number,
-  sx: number,
-  sy: number,
-  fr: number,
-  fg: number,
-  fb: number,
-  tolerance: number,
-): void {
-  const idx0 = (sy * w + sx) * 4;
-  const tr = data[idx0];
-  const tg = data[idx0 + 1];
-  const tb = data[idx0 + 2];
-  // Seed 已经是 fill 色 → 无事可做。
-  if (tr === fr && tg === fg && tb === fb) {
-    return;
-  }
-  const tol = tolerance;
-  // visited 位图：每像素一字节。paint 时 mark，matches 优先检查。
-  // 关键：fill 色可能与 target 色在容差内但不相等（吸管吸到画布反走样像素的
-  // 经典场景），此时 paint 后的像素 RGB 仍落在容差里。如果没有 visited，
-  // 已染色像素会被反复 push 进 stack → 死循环 → Array.push 抛
-  // "Invalid array length" → 浏览器卡死。visited 让每个像素最多处理一次，
-  // 既根除死循环，又不影响相近颜色的正常填充。
-  const visited = new Uint8Array(w * h);
-  const matches = (px: number): boolean => {
-    if (visited[px]) {
-      return false;
-    }
-    const idx = px * 4;
-    const dr = data[idx] - tr;
-    const dg = data[idx + 1] - tg;
-    const db = data[idx + 2] - tb;
-    return dr >= -tol && dr <= tol && dg >= -tol && dg <= tol && db >= -tol && db <= tol;
-  };
-  const paint = (px: number): void => {
-    visited[px] = 1;
-    const idx = px * 4;
-    data[idx] = fr;
-    data[idx + 1] = fg;
-    data[idx + 2] = fb;
-    data[idx + 3] = 255;
-  };
-  const stack: number[] = [sx, sy];
-  while (stack.length > 0) {
-    const y = stack.pop()!;
-    const x = stack.pop()!;
-    let lx = x;
-    while (lx >= 0 && matches(y * w + lx)) {
-      lx--;
-    }
-    lx++;
-    let rx = x;
-    while (rx < w && matches(y * w + rx)) {
-      rx++;
-    }
-    rx--;
-    let aboveMatch = false;
-    let belowMatch = false;
-    for (let i = lx; i <= rx; i++) {
-      paint(y * w + i);
-      if (y > 0) {
-        const up = (y - 1) * w + i;
-        const m = matches(up);
-        if (m && !aboveMatch) {
-          stack.push(i, y - 1);
-          aboveMatch = true;
-        } else if (!m) {
-          aboveMatch = false;
-        }
-      }
-      if (y < h - 1) {
-        const down = (y + 1) * w + i;
-        const m = matches(down);
-        if (m && !belowMatch) {
-          stack.push(i, y + 1);
-          belowMatch = true;
-        } else if (!m) {
-          belowMatch = false;
-        }
-      }
-    }
-  }
-}
-
-/**
- * Anti-alias the boundary of a freshly-filled region. For each unfilled pixel
- * adjacent to a filled pixel, alpha-blend the fill color in based on how close
- * the pixel is to the original target (background) color. This eliminates the
- * 1–2 px "halo" gap that scanlineFill leaves between fill and anti-aliased
- * pen strokes.
- *
- * Deterministic: depends only on RGBA inputs + integer arithmetic, so both
- * peers produce identical pixels without transmitting bitmaps.
- */
-function antiAliasFillEdges(
-  data: Uint8ClampedArray,
-  w: number,
-  h: number,
-  tr: number,
-  tg: number,
-  tb: number,
-  fr: number,
-  fg: number,
-  fb: number,
-): void {
-  // Pixels within this max-channel-distance of background get partial fill.
-  // Beyond it (deep into stroke), no blending. Tuned to cover typical canvas
-  // anti-aliasing halo without bleeding into stroke cores.
-  const FALLOFF = 96;
-  const snap = new Uint8ClampedArray(data);
-  const rowStride = w * 4;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const idx = (y * w + x) * 4;
-      if (snap[idx] === fr && snap[idx + 1] === fg && snap[idx + 2] === fb) {
-        continue;
-      }
-      let hasFilledNeighbor = false;
-      if (y > 0) {
-        const up = idx - rowStride;
-        if (snap[up] === fr && snap[up + 1] === fg && snap[up + 2] === fb) {
-          hasFilledNeighbor = true;
-        }
-      }
-      if (!hasFilledNeighbor && y < h - 1) {
-        const down = idx + rowStride;
-        if (snap[down] === fr && snap[down + 1] === fg && snap[down + 2] === fb) {
-          hasFilledNeighbor = true;
-        }
-      }
-      if (!hasFilledNeighbor && x > 0) {
-        const left = idx - 4;
-        if (snap[left] === fr && snap[left + 1] === fg && snap[left + 2] === fb) {
-          hasFilledNeighbor = true;
-        }
-      }
-      if (!hasFilledNeighbor && x < w - 1) {
-        const right = idx + 4;
-        if (snap[right] === fr && snap[right + 1] === fg && snap[right + 2] === fb) {
-          hasFilledNeighbor = true;
-        }
-      }
-      if (!hasFilledNeighbor) {
-        continue;
-      }
-      const drv = snap[idx] - tr;
-      const dgv = snap[idx + 1] - tg;
-      const dbv = snap[idx + 2] - tb;
-      const adr = drv >= 0 ? drv : -drv;
-      const adg = dgv >= 0 ? dgv : -dgv;
-      const adb = dbv >= 0 ? dbv : -dbv;
-      const dist = adr > adg ? (adr > adb ? adr : adb) : adg > adb ? adg : adb;
-      let alpha = 1 - dist / FALLOFF;
-      if (alpha <= 0) {
-        continue;
-      }
-      if (alpha > 1) {
-        alpha = 1;
-      }
-      const inv = 1 - alpha;
-      data[idx] = snap[idx] * inv + fr * alpha;
-      data[idx + 1] = snap[idx + 1] * inv + fg * alpha;
-      data[idx + 2] = snap[idx + 2] * inv + fb * alpha;
-    }
-  }
-}
-
 /** Flood-fill an offscreen-sized context at the given (pixel) seed point. */
 function drawFillOnContext(
   ctx: CanvasRenderingContext2D,
@@ -1023,16 +647,10 @@ function drawFillOnContext(
   }
   const [fr, fg, fb] = hexToRgba(fillColor);
   const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const seedIdx = (sy * canvas.width + sx) * 4;
-  const tr = img.data[seedIdx];
-  const tg = img.data[seedIdx + 1];
-  const tb = img.data[seedIdx + 2];
-  if (tr === fr && tg === fg && tb === fb) {
-    return;
+  const dirty = floodFill(img.data, canvas.width, canvas.height, sx, sy, fr, fg, fb, tolerance);
+  if (dirty) {
+    ctx.putImageData(img, 0, 0, dirty.x, dirty.y, dirty.w, dirty.h);
   }
-  scanlineFill(img.data, canvas.width, canvas.height, sx, sy, fr, fg, fb, tolerance);
-  antiAliasFillEdges(img.data, canvas.width, canvas.height, tr, tg, tb, fr, fg, fb);
-  ctx.putImageData(img, 0, 0);
 }
 
 /**
@@ -1062,7 +680,7 @@ function performSelectionOnContext(
   const patch = document.createElement("canvas");
   patch.width = srcPxW;
   patch.height = srcPxH;
-  const pctx = patch.getContext("2d");
+  const pctx = patch.getContext("2d", { willReadFrequently: true });
   if (!pctx) {
     return;
   }
@@ -1346,17 +964,17 @@ export function useCanvas({
   const pendingPointsRef = useRef<Point[]>([]);
   const rafIdRef = useRef<number | null>(null);
   // 框选悬空标记：beginSelection 已把 src 区域涂白、patch 还浮在 overlay 上。
-  // 此窗口内禁止 rebuildOffscreen（会把 src 原像素恢复出来，commit 后变重影）。
+  // 此窗口内不能重放（会把 src 原像素恢复出来，commit 后变重影）。
   const hasPendingSelectionRef = useRef(false);
 
   // Offscreen canvas — single source of truth for committed strokes.
   // Initialized with an opaque white background so the bucket tool has
   // real pixels to read (transparent pixels would make every fill degenerate).
   const offscreenRef = useRef<HTMLCanvasElement | null>(null);
+  // 离屏上画到了哪一笔，以及撤销时用的检查点。strokesRef 是目标，replay.sync 负责追上它。
+  const replayRef = useRef<StrokeReplay<SerializedStroke, HTMLCanvasElement> | null>(null);
   if (offscreenRef.current === null && typeof document !== "undefined") {
-    const off = document.createElement("canvas");
-    off.width = OFFSCREEN_WIDTH;
-    off.height = OFFSCREEN_HEIGHT;
+    const off = createOffscreenCanvas();
     // willReadFrequently: true → 关闭 GPU 加速，让 getImageData 走 CPU 直读。
     // 油漆桶 / 反走样每次填充都要 readback 整张离屏，标记后浏览器不再重复
     // 警告，且 readback 性能更稳定。
@@ -1364,50 +982,176 @@ export function useCanvas({
     if (offCtx) {
       offCtx.fillStyle = "#ffffff";
       offCtx.fillRect(0, 0, OFFSCREEN_WIDTH, OFFSCREEN_HEIGHT);
+      replayRef.current = new StrokeReplay({
+        surface: offscreenSurface(off, offCtx),
+        render: (stroke) => renderStrokeSafely(offCtx, off, stroke),
+      });
     }
     offscreenRef.current = off;
   }
+  // 重放没画完（分片进行中）。这段时间离屏只是半成品，可见画布保留上一帧，画完再一次换上去。
+  const replayPendingRef = useRef(false);
+  const replaySliceScheduledRef = useRef(false);
+  const unmountedRef = useRef(false);
 
-  const commitToOffscreen = useCallback((stroke: SerializedStroke) => {
-    const offs = offscreenRef.current;
-    if (!offs) {
+  // 进行中的喷枪、蜡笔是增量画在可见画布上的：这里记着哪一笔、画到第几条线段。
+  // 可见画布一旦被整张覆盖，这些像素就没了，要从头补画。
+  const liveStrokeRef = useRef<object | null>(null);
+  const liveSegmentsRef = useRef(0);
+  // 对端的 move 按帧合并，一帧最多重绘一次
+  const remoteFrameRef = useRef<number | null>(null);
+
+  // 重放分片期间离屏只是半成品，可见画布用开始重放前那一帧做底（加上这期间提交的笔画），
+  // 画完再换成离屏。进行中的笔画、形状预览、框选预览都画在这个底上，不会露出半成品。
+  const frozenFrameRef = useRef<HTMLCanvasElement | null>(null);
+  const frozenValidRef = useRef(false);
+
+  const freezeVisible = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) {
+      frozenValidRef.current = false;
       return;
     }
-    const offCtx = offs.getContext("2d");
-    if (!offCtx) {
+    const frozen = frozenFrameRef.current ?? document.createElement("canvas");
+    frozenFrameRef.current = frozen;
+    frozen.width = canvas.width;
+    frozen.height = canvas.height;
+    const ctx = frozen.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      frozenValidRef.current = false;
       return;
     }
-    renderStrokeSafely(offCtx, offs, stroke);
-  }, []);
+    ctx.drawImage(canvas, 0, 0);
+    frozenValidRef.current = true;
+  }, [canvasRef]);
 
+  /** 把可见画布恢复成底图：平时是离屏，重放分片期间是冻结的那一帧。进行中的笔画要另外补画。 */
   const syncVisibleFromOffscreen = useCallback(() => {
     const canvas = canvasRef.current;
-    const offs = offscreenRef.current;
-    if (!canvas || !offs) {
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) {
       return;
     }
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
+    const base =
+      replayPendingRef.current && frozenValidRef.current
+        ? frozenFrameRef.current
+        : offscreenRef.current;
+    if (!base) {
       return;
     }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(offs, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
+    liveStrokeRef.current = null;
   }, [canvasRef]);
 
-  const rebuildOffscreen = useCallback((strokes: SerializedStroke[]) => {
-    const offs = offscreenRef.current;
-    if (!offs) {
+  /** 把进行中的笔画画到可见画布上。按帧调用。 */
+  const paintLiveStroke = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    const stroke = currentStrokeRef.current;
+    if (!canvas || !ctx || !stroke || stroke.points.length === 0) {
       return;
     }
-    const offCtx = offs.getContext("2d");
-    if (!offCtx) {
+    const toPixels = (p: Point): Point => ({ x: p.x * canvas.width, y: p.y * canvas.height });
+    const lw = scaleLineWidth(stroke.lineWidth, canvas.width);
+    if (!isIncrementalBrush(stroke.brushType)) {
+      // 水彩有模糊和透明度，普通笔的成本很低：都是每帧整条重画，每个像素只涂一次
+      syncVisibleFromOffscreen();
+      renderBrushStroke(ctx, stroke.points.map(toPixels), stroke.color, lw, stroke.brushType);
       return;
     }
-    offCtx.fillStyle = "#ffffff";
-    offCtx.fillRect(0, 0, offs.width, offs.height);
-    for (const stroke of strokes) {
-      renderStrokeSafely(offCtx, offs, stroke);
+    // 喷枪、蜡笔整条重画的成本和路径长度成正比，一笔长了对端就卡。上一帧的像素还在画布上，只补新线段。
+    if (liveStrokeRef.current !== stroke) {
+      syncVisibleFromOffscreen();
+      liveStrokeRef.current = stroke;
+      liveSegmentsRef.current = 0;
     }
+    const from = liveSegmentsRef.current;
+    const pts = stroke.points.slice(from).map(toPixels);
+    renderBrushSegments(ctx, pts, stroke.color, lw, stroke.brushType, from);
+    liveSegmentsRef.current = Math.max(from, stroke.points.length - 1);
+  }, [canvasRef, syncVisibleFromOffscreen]);
+
+  /** 底图 + 进行中的笔画。可见画布被整张覆盖（窗口缩放、重放结束）之后调用。 */
+  const repaintVisible = useCallback(() => {
+    syncVisibleFromOffscreen();
+    paintLiveStroke();
+  }, [syncVisibleFromOffscreen, paintLiveStroke]);
+
+  const finishReplay = useCallback(() => {
+    replayPendingRef.current = false;
+    frozenValidRef.current = false;
+    repaintVisible();
+  }, [repaintVisible]);
+
+  /** 让离屏追上 strokesRef。画得完就当场换上去，画不完就分片继续，不长时间占住主线程。 */
+  const pumpReplay = useCallback(() => {
+    const replay = replayRef.current;
+    if (!replay) {
+      return;
+    }
+    if (replay.sync(strokesRef.current, REPLAY_SLICE_MS)) {
+      finishReplay();
+      return;
+    }
+    if (!replayPendingRef.current) {
+      // 可见画布还是改动之前的样子，冻结下来当底图
+      freezeVisible();
+      replayPendingRef.current = true;
+    }
+    if (replaySliceScheduledRef.current) {
+      return;
+    }
+    replaySliceScheduledRef.current = true;
+    yieldToMain(() => {
+      replaySliceScheduledRef.current = false;
+      if (replayPendingRef.current && !unmountedRef.current) {
+        pumpReplay();
+      }
+    });
+  }, [finishReplay, freezeVisible]);
+
+  /** 要读离屏像素前调用：必须是完整的画面。 */
+  const flushReplay = useCallback(() => {
+    replayRef.current?.sync(strokesRef.current);
+    if (replayPendingRef.current) {
+      finishReplay();
+    }
+  }, [finishReplay]);
+
+  /**
+   * 记下一笔并画到离屏。重放进行中就排在后面，轮到它时一起画，顺序不会乱；
+   * 同时先画到冻结的底图上，提交了马上就看得到。油漆桶和框选要读像素，只能等重放画完。
+   */
+  const appendStroke = useCallback(
+    (stroke: SerializedStroke) => {
+      strokesRef.current.push(stroke);
+      if (!replayPendingRef.current) {
+        replayRef.current?.sync(strokesRef.current);
+        return;
+      }
+      if (stroke.fill || stroke.selection) {
+        flushReplay();
+        return;
+      }
+      const frozen = frozenFrameRef.current;
+      const frozenCtx = frozen?.getContext("2d");
+      if (frozen && frozenCtx && frozenValidRef.current) {
+        renderStrokeSafely(frozenCtx, frozen, stroke);
+      }
+    },
+    [flushReplay],
+  );
+
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      if (remoteFrameRef.current !== null) {
+        cancelAnimationFrame(remoteFrameRef.current);
+        remoteFrameRef.current = null;
+      }
+    };
   }, []);
 
   /**
@@ -1441,27 +1185,82 @@ export function useCanvas({
 
   // 手写字体（Excalifont / Xiaolai）按 unicode-range 子集异步加载：roomState
   // 回放或远端 textStroke 到达时字体可能尚未就绪，文字先以回退字体绘制。
-  // 任一批字体加载完成（loadingdone）后整体重建离屏并同步可见画布，替换
-  // 回退字形。pen 进行中的 live 笔画只画在 visible 上，下一 RAF 帧会自愈。
+  // 字体到了之后，第一条文字之后的笔画要重画，把回退字形换掉。没有文字就不用重画。
+  const refreshTextStrokes = useCallback(() => {
+    const firstText = strokesRef.current.findIndex((stroke) => stroke.text);
+    if (firstText === -1) {
+      // 不动离屏，只把可见画布恢复原样（进行中的笔画也补回来）
+      repaintVisible();
+      return;
+    }
+    replayRef.current?.invalidateFrom(firstText);
+    pumpReplay();
+  }, [pumpReplay, repaintVisible]);
+
+  // 框选悬空时字体到了：重画会恢复已涂白的 src 像素造成重影，等框选结束再补上。
+  const fontRefreshPendingRef = useRef(false);
+  const settleSelection = useCallback(() => {
+    hasPendingSelectionRef.current = false;
+    if (fontRefreshPendingRef.current) {
+      fontRefreshPendingRef.current = false;
+      refreshTextStrokes();
+    }
+  }, [refreshTextStrokes]);
+
+  // 一批字体往往接连到达，合并成一次重画
+  const fontRefreshTimerRef = useRef<number | null>(null);
+  const requestTextRefresh = useCallback(() => {
+    if (fontRefreshTimerRef.current !== null) {
+      return;
+    }
+    fontRefreshTimerRef.current = window.setTimeout(() => {
+      fontRefreshTimerRef.current = null;
+      if (unmountedRef.current) {
+        return;
+      }
+      if (hasPendingSelectionRef.current) {
+        fontRefreshPendingRef.current = true;
+        return;
+      }
+      refreshTextStrokes();
+    }, 100);
+  }, [refreshTextStrokes]);
+
   useEffect(() => {
     if (typeof document === "undefined" || !document.fonts) {
       return;
     }
     const fonts = document.fonts;
-    const onFontsLoaded = () => {
-      // 框选悬空期跳过：rebuild 会恢复已涂白的 src 像素造成重影。此时不重绘，
-      // 字形等下一次全量重建（undo / clear / 撤销框选等）再矫正。
-      if (hasPendingSelectionRef.current) {
+    const onFontsLoaded = (event: Event) => {
+      // 什么字体都没加载完成的事件不用管
+      const faces = (event as FontFaceSetLoadEvent).fontfaces;
+      if (faces && faces.length === 0) {
         return;
       }
-      rebuildOffscreen(strokesRef.current);
-      syncVisibleFromOffscreen();
+      requestTextRefresh();
     };
     fonts.addEventListener("loadingdone", onFontsLoaded);
+    // 样式表到达之前画的文字没能触发字体下载：现在补上，下载完再重画一次
+    let unmounted = false;
+    void loadHandFontStylesheet().then(async () => {
+      const texts = [...new Set(strokesRef.current.flatMap((s) => (s.text ? [s.text] : [])))];
+      if (unmounted || texts.length === 0) {
+        return;
+      }
+      await loadHandFonts(texts);
+      if (!unmounted) {
+        requestTextRefresh();
+      }
+    });
     return () => {
+      unmounted = true;
       fonts.removeEventListener("loadingdone", onFontsLoaded);
+      if (fontRefreshTimerRef.current !== null) {
+        window.clearTimeout(fontRefreshTimerRef.current);
+        fontRefreshTimerRef.current = null;
+      }
     };
-  }, [rebuildOffscreen, syncVisibleFromOffscreen]);
+  }, [requestTextRefresh]);
 
   /**
    * Drawer-side: open a selection. Extracts a patch from the offscreen src rect,
@@ -1471,6 +1270,7 @@ export function useCanvas({
    */
   const beginSelection = useCallback(
     (srcNorm: { x: number; y: number; w: number; h: number }): HTMLCanvasElement | null => {
+      flushReplay();
       const offs = offscreenRef.current;
       if (!offs) {
         return null;
@@ -1489,45 +1289,50 @@ export function useCanvas({
       const patch = document.createElement("canvas");
       patch.width = srcPxW;
       patch.height = srcPxH;
-      const pctx = patch.getContext("2d");
+      const pctx = patch.getContext("2d", { willReadFrequently: true });
       if (!pctx) {
         return null;
       }
       pctx.drawImage(offs, srcPxX, srcPxY, srcPxW, srcPxH, 0, 0, srcPxW, srcPxH);
       offCtx.fillStyle = "#ffffff";
       offCtx.fillRect(srcPxX, srcPxY, srcPxW, srcPxH);
+      // 涂白的像素不在 strokes 里，提交之前都不能算数
+      replayRef.current?.taint();
       syncVisibleFromOffscreen();
       hasPendingSelectionRef.current = true;
       return patch;
     },
-    [syncVisibleFromOffscreen],
+    [flushReplay, syncVisibleFromOffscreen],
   );
 
   /**
    * Drawer-side: commit a selection in progress. Offscreen already has src
    * whitened (from beginSelection), so we just paste the patch at dst.
+   * 返回是否真的提交了：框选已经被作废（比如重连收到全量状态，来源像素画回去了）时不能再粘贴，
+   * 否则来源和目标各有一份，本地多出一块别人看不到的重影。调用方据此决定发不发消息。
    */
   const commitLocalSelection = useCallback(
     (
       patch: HTMLCanvasElement,
       srcNorm: { x: number; y: number; w: number; h: number },
       dstNorm: { x: number; y: number },
-    ) => {
-      hasPendingSelectionRef.current = false;
+    ): boolean => {
+      if (!hasPendingSelectionRef.current) {
+        return false;
+      }
       const offs = offscreenRef.current;
       if (!offs) {
-        return;
+        return false;
       }
       const offCtx = offs.getContext("2d");
       if (!offCtx) {
-        return;
+        return false;
       }
       const srcPxW = Math.round(srcNorm.w * offs.width);
       const srcPxH = Math.round(srcNorm.h * offs.height);
       const dstPxX = Math.round(dstNorm.x * offs.width);
       const dstPxY = Math.round(dstNorm.y * offs.height);
       offCtx.drawImage(patch, 0, 0, patch.width, patch.height, dstPxX, dstPxY, srcPxW, srcPxH);
-      syncVisibleFromOffscreen();
       const stroke: SerializedStroke = {
         points: [],
         color: "",
@@ -1542,28 +1347,33 @@ export function useCanvas({
         },
       };
       strokesRef.current.push(stroke);
+      // 涂白 + 粘贴和重放这一笔的结果完全相同，不用重画
+      replayRef.current?.noteRendered(stroke);
+      replayRef.current?.untaint();
+      syncVisibleFromOffscreen();
+      settleSelection();
+      return true;
     },
-    [syncVisibleFromOffscreen],
+    [settleSelection, syncVisibleFromOffscreen],
   );
 
   /**
-   * Drawer-side: abort an in-progress selection. Restores the offscreen by
-   * rebuilding from the committed strokes (which don't include the pending
-   * selection). Called when the user switches away or clears without commit.
+   * Drawer-side: abort an in-progress selection. Restores the offscreen from the
+   * committed strokes (which don't include the pending selection). Called when
+   * the user switches away or clears without commit.
    */
   const cancelLocalSelection = useCallback(() => {
-    hasPendingSelectionRef.current = false;
-    rebuildOffscreen(strokesRef.current);
-    syncVisibleFromOffscreen();
-  }, [rebuildOffscreen, syncVisibleFromOffscreen]);
+    settleSelection();
+    pumpReplay();
+  }, [pumpReplay, settleSelection]);
 
   /**
-   * Drawer-side: the floating patch was discarded on purpose and the whitened src
-   * is now the intended result (deleted selection). Nothing is pending any more.
+   * Drawer-side: the floating patch was discarded on purpose (deleted selection, or
+   * a full state just arrived). The next stroke rebuilds from the committed strokes.
    */
   const releaseLocalSelection = useCallback(() => {
-    hasPendingSelectionRef.current = false;
-  }, []);
+    settleSelection();
+  }, [settleSelection]);
 
   /**
    * Apply a selection-move stroke from a remote S_Selection message. Runs the
@@ -1575,17 +1385,7 @@ export function useCanvas({
       srcNorm: { x: number; y: number; w: number; h: number },
       dstNorm: { x: number; y: number },
     ) => {
-      const offs = offscreenRef.current;
-      if (!offs) {
-        return;
-      }
-      const offCtx = offs.getContext("2d");
-      if (!offCtx) {
-        return;
-      }
-      performSelectionOnContext(offCtx, offs, srcNorm, dstNorm);
-      syncVisibleFromOffscreen();
-      const stroke: SerializedStroke = {
+      appendStroke({
         points: [],
         color: "",
         lineWidth: 0,
@@ -1597,10 +1397,10 @@ export function useCanvas({
           dstX: dstNorm.x,
           dstY: dstNorm.y,
         },
-      };
-      strokesRef.current.push(stroke);
+      });
+      syncVisibleFromOffscreen();
     },
-    [syncVisibleFromOffscreen],
+    [appendStroke, syncVisibleFromOffscreen],
   );
 
   /**
@@ -1611,27 +1411,15 @@ export function useCanvas({
    */
   const addFill = useCallback(
     (normX: number, normY: number, fillColor: string, tolerance: number) => {
-      const offs = offscreenRef.current;
-      if (!offs) {
-        return;
-      }
-      const offCtx = offs.getContext("2d");
-      if (!offCtx) {
-        return;
-      }
-      const sx = Math.floor(normX * offs.width);
-      const sy = Math.floor(normY * offs.height);
-      drawFillOnContext(offCtx, offs, sx, sy, fillColor, tolerance);
-      syncVisibleFromOffscreen();
-      const stroke: SerializedStroke = {
+      appendStroke({
         points: [{ x: normX, y: normY }],
         color: fillColor,
         lineWidth: 0,
         fill: { tolerance },
-      };
-      strokesRef.current.push(stroke);
+      });
+      syncVisibleFromOffscreen();
     },
-    [syncVisibleFromOffscreen],
+    [appendStroke, syncVisibleFromOffscreen],
   );
 
   // Canvas pointer events — routed by tool
@@ -1664,27 +1452,6 @@ export function useCanvas({
       const isEraser = tool === "eraser";
       const effColor = isEraser ? "#ffffff" : color;
       const effBrush: BrushType = isEraser ? "pen" : brushType;
-      // 关键：在 visible canvas 上重绘当前 in-progress stroke。
-      // 配合 syncVisibleFromOffscreen 使用，每帧 visible = offscreen + 单次绘制的当前 stroke。
-      // 旧实现是 ctx.beginPath() once + 每次 mousemove 调 ctx.lineTo + ctx.stroke()，
-      // 这会让累积路径反复 stroke，alpha < 1 时透明度叠加成不透明 → 修复。
-      const drawInProgressStroke = () => {
-        const stroke = currentStrokeRef.current;
-        if (!stroke || stroke.points.length === 0) {
-          return;
-        }
-        const pxPoints: Point[] = stroke.points.map((p) => ({
-          x: p.x * canvas.width,
-          y: p.y * canvas.height,
-        }));
-        renderBrushStroke(
-          ctx,
-          pxPoints,
-          stroke.color,
-          scaleLineWidth(stroke.lineWidth, canvas.width),
-          stroke.brushType,
-        );
-      };
 
       // 网络发送按时间节流：rAF 频率等于屏幕刷新率，高刷屏每帧发一条会撞服务端限流。
       // 取 16ms 而不是 1000/60：60Hz 屏的帧间隔有抖动，16.67 会让大约一半的帧被跳过。
@@ -1722,8 +1489,7 @@ export function useCanvas({
           scheduleFlush();
         }
         // 视觉重绘：每 RAF 帧一次，避免 mousemove 高频触发的浪费
-        syncVisibleFromOffscreen();
-        drawInProgressStroke();
+        paintLiveStroke();
       };
 
       const scheduleFlush = () => {
@@ -1797,8 +1563,7 @@ export function useCanvas({
           // 默认 pen 不写字段（保持与历史 stroke 一致）
           ...(stash.brushType !== "pen" ? { brushType: stash.brushType } : {}),
         };
-        strokesRef.current.push(finalized);
-        commitToOffscreen(finalized);
+        appendStroke(finalized);
         syncVisibleFromOffscreen();
         currentStrokeRef.current = null;
         send({ type: "draw", action: "end", x, y, color: effColor, lineWidth, stroke: finalized });
@@ -1937,11 +1702,7 @@ export function useCanvas({
           reportHover(hits.length > 0 ? hits[0] : null);
           return;
         }
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        const offs = offscreenRef.current;
-        if (offs) {
-          ctx.drawImage(offs, 0, 0, canvas.width, canvas.height);
-        }
+        syncVisibleFromOffscreen();
         ctx.strokeStyle = "#818cf8";
         ctx.lineWidth = 1;
         ctx.setLineDash([6, 4]);
@@ -2042,11 +1803,7 @@ export function useCanvas({
         return;
       }
       const current = clampToCanvas(e);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const offs = offscreenRef.current;
-      if (offs) {
-        ctx.drawImage(offs, 0, 0, canvas.width, canvas.height);
-      }
+      syncVisibleFromOffscreen();
       drawShapePreview(ctx, canvas, shapeStart, current, color, lineWidth, shapeKind, filled);
     };
 
@@ -2108,7 +1865,8 @@ export function useCanvas({
     fillMode,
     brushType,
     send,
-    commitToOffscreen,
+    appendStroke,
+    paintLiveStroke,
     syncVisibleFromOffscreen,
     onShapeDrawn,
     onLocalPenEnd,
@@ -2120,31 +1878,11 @@ export function useCanvas({
     phase,
   ]);
 
-  // Replay a remote draw event (pen). 与本地 pen 同样的 alpha 修复：
-  // 不再增量 stroke 累积路径，而是每帧 sync offscreen + 单次重绘当前 in-progress stroke。
+  // Replay a remote draw event (pen).
   const replayDraw = useCallback(
     (msg: S_Draw) => {
       // 这里不能因为画布没挂载就提前返回：roomState 刚到时 Canvas 还没渲染，紧跟着的 end
       // 丢了的话这一笔就永远缺了。笔画和离屏都不依赖可见画布，挂载后会从离屏同步过去。
-      const drawInProgressStroke = () => {
-        const stroke = currentStrokeRef.current;
-        const canvas = canvasRef.current;
-        const ctx = canvas?.getContext("2d");
-        if (!stroke || stroke.points.length === 0 || !canvas || !ctx) {
-          return;
-        }
-        const pxPoints: Point[] = stroke.points.map((p) => ({
-          x: p.x * canvas.width,
-          y: p.y * canvas.height,
-        }));
-        renderBrushStroke(
-          ctx,
-          pxPoints,
-          stroke.color,
-          scaleLineWidth(stroke.lineWidth, canvas.width),
-          stroke.brushType,
-        );
-      };
 
       // brushType 由服务端透传到所有 action（worker 缓存了 start 时的笔型），
       // 这里直接读 msg.brushType；缺值视作 "pen"。
@@ -2162,10 +1900,19 @@ export function useCanvas({
         const points = msg.points ?? [{ x: msg.x, y: msg.y }];
         if (currentStrokeRef.current) {
           currentStrokeRef.current.points.push(...points);
+          // 不管消息来得多快，一帧只重绘一次
+          if (remoteFrameRef.current === null) {
+            remoteFrameRef.current = requestAnimationFrame(() => {
+              remoteFrameRef.current = null;
+              paintLiveStroke();
+            });
+          }
         }
-        syncVisibleFromOffscreen();
-        drawInProgressStroke();
       } else if (msg.action === "end") {
+        if (remoteFrameRef.current !== null) {
+          cancelAnimationFrame(remoteFrameRef.current);
+          remoteFrameRef.current = null;
+        }
         const stash = currentStrokeRef.current;
         currentStrokeRef.current = null;
         // 以服务端存下的整笔为准：中途加入、重连时漏了 start 或部分 move 都能补全。
@@ -2181,22 +1928,24 @@ export function useCanvas({
           };
         }
         if (finalized) {
-          strokesRef.current.push(finalized);
-          commitToOffscreen(finalized);
+          appendStroke(finalized);
           syncVisibleFromOffscreen();
         }
       }
     },
-    [canvasRef, commitToOffscreen, syncVisibleFromOffscreen],
+    [appendStroke, paintLiveStroke, syncVisibleFromOffscreen],
   );
 
+  /**
+   * 把笔画换成 strokes 并画出来。撤销、删除、收到全量状态都走这里，只补必要的部分，
+   * 画不完就分片继续（见 pumpReplay）。
+   */
   const replayAll = useCallback(
     (strokes: SerializedStroke[]) => {
       strokesRef.current = strokes;
-      rebuildOffscreen(strokes);
-      syncVisibleFromOffscreen();
+      pumpReplay();
     },
-    [rebuildOffscreen, syncVisibleFromOffscreen],
+    [pumpReplay],
   );
 
   const clearCanvas = useCallback(() => {
@@ -2207,17 +1956,13 @@ export function useCanvas({
         ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
     }
-    const offs = offscreenRef.current;
-    if (offs) {
-      const offCtx = offs.getContext("2d");
-      if (offCtx) {
-        offCtx.fillStyle = "#ffffff";
-        offCtx.fillRect(0, 0, offs.width, offs.height);
-      }
-    }
+    liveStrokeRef.current = null;
+    replayRef.current?.clear();
+    replayPendingRef.current = false;
     strokesRef.current = [];
     // 画布清空后没有悬空的框选了。对端的半截笔画也作废（画手离开时会走到这里）。
     hasPendingSelectionRef.current = false;
+    fontRefreshPendingRef.current = false;
     if (!isDrawingRef.current) {
       currentStrokeRef.current = null;
     }
@@ -2243,17 +1988,10 @@ export function useCanvas({
       if (colorRanges && colorRanges.length > 0) {
         stroke.colorRanges = colorRanges;
       }
-      commitToOffscreen(stroke);
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          renderStrokeToCtx(ctx, canvas, stroke);
-        }
-      }
-      strokesRef.current.push(stroke);
+      appendStroke(stroke);
+      syncVisibleFromOffscreen();
     },
-    [canvasRef, commitToOffscreen],
+    [appendStroke, syncVisibleFromOffscreen],
   );
 
   /** Add a shape/arrow/line stroke (from local commit OR remote). Accepts normalized points. */
@@ -2266,24 +2004,16 @@ export function useCanvas({
       shape: "rect" | "ellipse" | "arrow" | "line" | "triangle" | "star" | "heart",
       filled: boolean,
     ) => {
-      const stroke: SerializedStroke = {
+      appendStroke({
         points: [p0, p1],
         color: shapeColor,
         lineWidth: shapeLineWidth,
         shape,
         filled,
-      };
-      commitToOffscreen(stroke);
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          renderStrokeToCtx(ctx, canvas, stroke);
-        }
-      }
-      strokesRef.current.push(stroke);
+      });
+      syncVisibleFromOffscreen();
     },
-    [canvasRef, commitToOffscreen],
+    [appendStroke, syncVisibleFromOffscreen],
   );
 
   return {
@@ -2299,7 +2029,7 @@ export function useCanvas({
     cancelLocalSelection,
     releaseLocalSelection,
     resetStrokeInProgress,
-    syncVisibleFromOffscreen,
+    repaintVisible,
     strokesRef,
   };
 }

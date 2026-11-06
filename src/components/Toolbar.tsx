@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { tx } from "@twind/core";
 import { Saturation, Hue, hexToHsva, hsvaToHex } from "@uiw/react-color";
 import { normalizeColor } from "../utils/color";
-import { renderBrushStroke } from "../hooks/useCanvas";
+import { renderBrushStroke } from "../utils/brushes";
 import type { BrushType } from "../types/protocol";
 
 export type ToolMode =

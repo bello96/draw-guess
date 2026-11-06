@@ -194,7 +194,7 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
     cancelLocalSelection,
     releaseLocalSelection,
     resetStrokeInProgress,
-    syncVisibleFromOffscreen,
+    repaintVisible,
     strokesRef,
   } = useCanvas({
     canvasRef,
@@ -216,10 +216,10 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
   // Canvas resize handler — blit the cached offscreen onto the (now resized)
   // visible canvas. O(1) regardless of stroke count.
   const handleCanvasResize = useCallback(() => {
-    syncVisibleFromOffscreen();
+    repaintVisible();
     // 高亮框基于像素 bbox 计算，resize 后失真 → 直接取消选中
     setPicked(null);
-  }, [syncVisibleFromOffscreen]);
+  }, [repaintVisible]);
 
   // 选择删除：删除选中笔画 + 级联删除其内部的油漆桶填充（否则重放时种子
   // 落在白底上会把整张画布灌成填充色），本地重建 + 同步对端 + 清空重做栈。
@@ -818,7 +818,11 @@ export default function Room({ roomCode, playerName, playerId, onLeave }: Props)
       x: srcNorm.x + dragOffsetPx.dx / canvas.width,
       y: srcNorm.y + dragOffsetPx.dy / canvas.height,
     };
-    commitLocalSelection(patch, srcNorm, dstNorm);
+    // 框选已经被作废（重连收到全量状态时会这样），这次点击不能再提交
+    if (!commitLocalSelection(patch, srcNorm, dstNorm)) {
+      setEditingSelection(null);
+      return;
+    }
     send({
       type: "selection",
       srcX: srcNorm.x,

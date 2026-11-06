@@ -5,3 +5,5 @@ dist/
 *.local
 tsconfig.tsbuildinfo
 .worktrees/
+.claude/settings.local.json
+tests/regression/.tmp/

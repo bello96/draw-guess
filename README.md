@@ -1,6 +1,6 @@
 # 🎨 我画你猜
 
-一个实时在线的双人画画猜词小游戏。一人画、一人猜，通过 WebSocket 实时同步画板与聊天消息。
+一个实时在线的多人（2~6 人）画画猜词小游戏。一人画、其他人猜，通过 WebSocket 实时同步画板与聊天消息。
 
 **在线体验：** https://draw-guess.dengjiabei.cn
 
@@ -11,7 +11,7 @@
 - 无需注册，输入昵称即可开始游戏
 - 创建 / 加入房间（6 位房间号），每个房间限 2 人，支持一键复制分享链接
 - 5:3 画板，实时同步每一笔
-- **多种绘图工具**（8 种）：
+- **多种绘图工具**（12 种）：
   - ✏️ 画笔（4 档线宽，逐帧重绘避免 overdraw）
   - T 文本（小/中/大字号，画完可拖动位置、角点调字号）
   - 🪣 油漆桶（封闭区域填充，scanline flood fill + 边缘抗锯齿后处理消除白晕）
@@ -56,7 +56,7 @@
 │   │   └── Room.tsx              # 主游戏页，消息分发 + 撤销/重做栈
 │   ├── components/
 │   │   ├── Canvas.tsx            # 画板 + 文字/形状/框选编辑 overlay
-│   │   ├── Toolbar.tsx           # 8 工具 + 颜色拾取器（含自定义面板）+ undo/redo/clear
+│   │   ├── Toolbar.tsx           # 12 种工具 + 颜色拾取器（含自定义面板）+ undo/redo/clear
 │   │   ├── PlayerBar.tsx         # 顶栏房间号 / 玩家 / 操作按钮
 │   │   ├── ChatPanel.tsx         # 聊天 / 设答案 / 猜词三合一输入
 │   │   ├── Confetti.tsx          # 彩带雨（canvas + RAF）
@@ -79,8 +79,8 @@
 │   ├── wrangler.toml             # durable_objects + 限流绑定 + routes
 │   └── package.json
 ├── .github/workflows/            # CI/CD
-│   ├── deploy-pages.yml          # 前端自动部署到 Pages
-│   └── deploy-worker.yml         # Worker 自动部署
+│   └── ci.yml                    # 检查通过后先部署 Worker，再部署 Pages
+├── tests/                        # 单元测试和回归测试
 ├── eslint.config.js              # ESLint flat config
 ├── .prettierrc.json              # Prettier 配置
 └── CLAUDE.md                     # AI 助手 / 深入开发文档
@@ -121,6 +121,9 @@ npm run lint            # ESLint 检查
 npm run lint:fix        # 自动修复（含 curly: all）
 npm run format          # Prettier 格式化
 npm run format:check    # CI 友好的只读检查
+npm test                # 单元测试
+npm run test:protocol   # 协议回归（本地 workerd）
+npm run test:browser    # 浏览器回归（本地 workerd + 无头 Chromium）
 ```
 
 ESLint 规则里 `curly: ["error", "all"]` 强制所有 `if` 加花括号；3 个已知的 `exhaustive-deps` warnings 是有意保留的。
@@ -129,8 +132,9 @@ ESLint 规则里 `curly: ["error", "all"]` 强制所有 `if` 加花括号；3 �
 
 项目通过 GitHub Actions 自动部署：
 
-- **前端**：推送到 `master` 分支后自动构建并部署到 Cloudflare Pages
-- **Worker**：`worker/` 目录有变更时自动部署到 Cloudflare Workers
+- 推送到 `master` 后先跑类型检查、Lint、单元测试和协议回归，通过才部署
+- **Worker**：`worker/` 目录有变更时部署到 Cloudflare Workers，先于前端
+- **前端**：前端相关文件有变更时构建并部署到 Cloudflare Pages
 
 ### 需要配置的 GitHub Secrets
 
@@ -143,11 +147,10 @@ ESLint 规则里 `curly: ["error", "all"]` 强制所有 `if` 加花括号；3 �
 
 ```bash
 # 部署 Worker
-cd worker && npx wrangler deploy
+npm run deploy:worker
 
 # 构建并部署前端
-npm run build
-npx wrangler pages deploy dist --project-name=draw-guess
+npm run deploy:pages
 ```
 
 ## 协议与消息
