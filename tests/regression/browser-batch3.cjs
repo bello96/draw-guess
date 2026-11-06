@@ -59,7 +59,10 @@ async function createInBrowser(br, name = "画手甲", max = 2) {
     await sleep(50);
   }
   await p1.eval(`T.clickBtn('确认创建')`);
-  await p1.waitText("房间号", 6000);
+  // 没进房间就当场报错：不然 code 是空的，后面报的错和原因对不上
+  if (!(await p1.waitText("房间号", 6000))) {
+    throw new Error(`建房后没进房间：${await p1.eval("location.pathname + ' ' + document.body.innerText.slice(0, 120)")}`);
+  }
   await sleep(300);
   const code = await p1.eval(`location.pathname.slice(1)`);
   return { p1, code };

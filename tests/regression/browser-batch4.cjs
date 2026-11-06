@@ -47,7 +47,10 @@ async function createInBrowser(br, name = "画手甲", max = 2) {
     await sleep(50);
   }
   await p1.eval(`T.clickBtn('确认创建')`);
-  await p1.waitText("房间号", 8000);
+  // 没进房间就当场报错：不然 code 是空的，后面报的错和原因对不上
+  if (!(await p1.waitText("房间号", 8000))) {
+    throw new Error(`建房后没进房间：${await p1.eval("location.pathname + ' ' + document.body.innerText.slice(0, 120)")}`);
+  }
   await sleep(300);
   const code = await p1.eval(`location.pathname.slice(1)`);
   return { p1, code };
@@ -653,15 +656,18 @@ G.O1_overlay_buttons = async ({ br }) => {
   await drag(border, 0, [[30, 0, 1], [200, 150, 0]]);
   b = await rectOf(TXT);
   ok("文字：左键拖动有效，松开后不再跟着走", !!b && Math.abs(b.x - a.x - 30) <= 3 && Math.abs(b.y - a.y) <= 3, { a, b });
-  a = b;
+  // 角点改的是字号，直接读文本框的 font-size，不看编辑框宽度：宽度有 60px 下限，
+  // 没装中文字体的机器（CI）上“你好”量出来很窄，宽度一直卡在下限，字号变了也看不出来
+  const fontOf = () => p1.eval(`parseFloat(getComputedStyle(document.querySelector('${TXT} textarea')).fontSize)`);
   const tcorner = `[...document.querySelectorAll('${TXT} *')].filter((e)=>getComputedStyle(e).cursor.includes('resize')).at(-1)`;
+  const f0 = await fontOf();
   await drag(tcorner, 2, [[80, 80, 2]]);
-  b = await rectOf(TXT);
-  ok("文字：右键拖角点不改字号", !!b && Math.abs(b.w - a.w) <= 3, { a, b });
+  const f1 = await fontOf();
+  ok("文字：右键拖角点不改字号", Math.abs(f1 - f0) < 0.5, { f0, f1 });
   // 左键拖一小段（字号变大约两成），然后左键在别处松开了：之后的移动不再改字号
   await drag(tcorner, 0, [[20, 20, 1], [150, 150, 0]]);
-  b = await rectOf(TXT);
-  ok("文字：左键拖角点有效，松开后不再改字号", !!b && b.w > a.w + 3 && b.w - a.w < a.w * 0.6, { a, b });
+  const f2 = await fontOf();
+  ok("文字：左键拖角点有效，松开后不再改字号", f2 > f1 * 1.05 && f2 < f1 * 1.6, { f1, f2 });
   await closeAll(br, p1, p2);
 };
 

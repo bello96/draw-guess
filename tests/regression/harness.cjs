@@ -55,8 +55,18 @@ class Proxy {
         return;
       }
       const u = net.connect(WORKER_PORT, "127.0.0.1");
-      const pair = { c, u, dead: false };
+      const pair = { c, u, dead: false, ws: false };
       this.pairs.add(pair);
+      // 看第一个请求的头，记下这条连接是不是 WebSocket（blackholeExisting 只拉黑 WebSocket）
+      let head = "";
+      const sniff = (d) => {
+        head += d.toString("latin1");
+        if (head.includes("\r\n\r\n") || head.length > 8192) {
+          pair.ws = /\r\nupgrade:\s*websocket/i.test(head.split("\r\n\r\n")[0]);
+          c.off("data", sniff);
+        }
+      };
+      c.on("data", sniff);
       const fwd = (from, to, extraDelay) => {
         from.on("data", (d) => {
           if (pair.dead) {
@@ -84,10 +94,14 @@ class Proxy {
     });
     return new Promise((r) => this.srv.listen(PROXY_PORT, "127.0.0.1", r));
   }
-  // 现有连接变成半开：TCP 不断，但数据都丢掉。新连接不受影响。
+  // 现有的 WebSocket 连接变成半开：TCP 不断，但数据都丢掉。新连接不受影响。
+  // HTTP 连接不动：浏览器的 keep-alive 连接池是所有页面共用的，空闲的 HTTP 连接一起拉黑的话，
+  // 后面的测试建房会复用到它，一直挂到 Worker 关掉空闲连接（约 15 秒）才换连接重试
   blackholeExisting() {
     for (const pair of this.pairs) {
-      pair.dead = true;
+      if (pair.ws) {
+        pair.dead = true;
+      }
     }
   }
   killAll() {
